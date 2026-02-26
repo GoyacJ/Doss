@@ -1,4 +1,12 @@
-use super::super::*;
+use reqwest::blocking::Client;
+use serde::Deserialize;
+use serde_json::Value;
+use std::net::TcpListener;
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+use tauri::State;
+
+use crate::core::state::{AppState, SidecarManager, SidecarRuntime};
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct SidecarCrawlJobsInput {

@@ -1,4 +1,23 @@
-use super::super::*;
+use tauri::State;
+
+use crate::core::state::AppState;
+use crate::core::time::now_iso;
+use crate::domains::ai_runtime::{
+    ensure_minimax_endpoint, ensure_openai_endpoint, make_ai_profile_id,
+    normalize_profile_in_place, normalize_task_runtime_settings, probe_provider_connectivity,
+    profile_default_name, read_ai_profiles, read_ai_settings, read_task_runtime_settings,
+    resolve_ai_settings, resolve_ai_settings_for_profile, resolve_ai_settings_with_input_overrides,
+    to_ai_profile_views, to_ai_settings_view, trim_resume_excerpt, write_ai_profiles,
+    write_ai_settings, write_task_runtime_settings, AI_SETTINGS_KEY, TASK_RUNTIME_SETTINGS_KEY,
+};
+use crate::infra::audit::write_audit;
+use crate::infra::db::open_connection;
+use crate::models::ai::{
+    AiProviderCatalogView, AiProviderProfileView, AiProviderSettingsView, AiProviderTestResult,
+    StoredAiProviderProfile, StoredAiProviderSettings, TaskRuntimeSettings,
+    UpsertAiProviderProfileInput, UpsertAiProviderSettingsInput, UpsertTaskRuntimeSettingsInput,
+};
+use crate::models::common::AiProvider;
 
 #[tauri::command]
 pub(crate) fn get_ai_provider_catalog() -> Result<AiProviderCatalogView, String> {

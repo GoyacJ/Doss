@@ -1,4 +1,95 @@
-use super::super::*;
+use base64::prelude::*;
+use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::Value;
+use tauri::State;
+
+use crate::core::cipher::FieldCipher;
+use crate::core::error::AppError;
+use crate::core::pii::{hash_value, mask_email, mask_phone, normalize_phone};
+use crate::core::state::AppState;
+use crate::core::time::now_iso;
+use crate::domains::ai_runtime::{invoke_cloud_provider, resolve_ai_settings};
+use crate::domains::screening::{
+    build_structured_resume_fields, clamp_score, extract_file_extension,
+    extract_text_from_docx_bytes, extract_text_from_pdf_bytes, extract_text_from_plain_bytes,
+    normalize_resume_text, parse_skills, try_tesseract_ocr,
+};
+use crate::infra::audit::write_audit;
+use crate::infra::db::open_connection;
+use crate::infra::search_index::sync_candidate_search;
+use crate::models::ai::{
+    AiAnalysisPayload, AiPromptContext, AnalysisRecord, DimensionScore, EvidenceItem,
+    RunAnalysisInput,
+};
+use crate::models::candidate::{
+    Candidate, MergeCandidateImportInput, MoveStageInput, NewCandidateInput, ParseResumeFileInput,
+    ParseResumeFileOutput, PipelineEvent, ResumeRecord, SetCandidateQualificationInput,
+    UpdateCandidateInput, UpsertResumeInput,
+};
+use crate::models::common::{
+    is_valid_transition, resolve_qualification_stage, PipelineStage, SourceType,
+};
+
+pub(crate) fn merge_candidate_tags(existing: &[String], incoming: &[String]) -> Vec<String> {
+    let mut dedup = std::collections::BTreeMap::<String, String>::new();
+
+    for tag in existing.iter().chain(incoming.iter()) {
+        let normalized = tag.trim();
+        if normalized.is_empty() {
+            continue;
+        }
+        let key = normalized.to_lowercase();
+        dedup.entry(key).or_insert_with(|| normalized.to_string());
+    }
+
+    dedup
+        .values()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+}
+
+pub(crate) fn candidate_from_row(
+    row: &rusqlite::Row<'_>,
+    cipher: &FieldCipher,
+) -> Result<Candidate, rusqlite::Error> {
+    let stage_text: String = row.get("stage")?;
+    let stage = PipelineStage::from_db(&stage_text).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+    })?;
+
+    let tags_json: String = row.get("tags_json")?;
+    let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+
+    let phone_masked = row
+        .get::<_, Option<String>>("phone_enc")?
+        .and_then(|value| cipher.decrypt(&value).ok())
+        .map(|value| mask_phone(&value));
+
+    let email_masked = row
+        .get::<_, Option<String>>("email_enc")?
+        .and_then(|value| cipher.decrypt(&value).ok())
+        .map(|value| mask_email(&value));
+
+    Ok(Candidate {
+        id: row.get("id")?,
+        external_id: row.get("external_id")?,
+        source: row.get("source")?,
+        name: row.get("name")?,
+        current_company: row.get("current_company")?,
+        job_id: row.get("linked_job_id")?,
+        job_title: row.get("linked_job_title")?,
+        score: row.get("score")?,
+        age: row.get("age")?,
+        gender: row.get("gender")?,
+        years_of_experience: row.get("years_of_experience")?,
+        stage,
+        tags,
+        phone_masked,
+        email_masked,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
 
 fn read_candidate_by_id(
     conn: &Connection,

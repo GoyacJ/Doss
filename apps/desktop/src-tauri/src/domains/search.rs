@@ -1,4 +1,10 @@
-use super::super::*;
+use regex::Regex;
+use tauri::State;
+
+use crate::core::state::AppState;
+use crate::infra::db::open_connection;
+use crate::models::common::PipelineStage;
+use crate::models::metrics::SearchHit;
 
 pub(crate) fn build_fts_match_query(input: &str) -> Option<String> {
     let token_regex = Regex::new(r"[\p{L}\p{N}_]+").ok()?;
