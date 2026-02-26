@@ -58,4 +58,37 @@ describe("CrawlTaskQueue", () => {
 
     expect(second.status).toBe("SKIPPED_DUPLICATE");
   });
+
+  it("attaches classified failure details on terminal failure", async () => {
+    const queue = new CrawlTaskQueue({ maxRetries: 1, compliantDelayMs: 0, advancedDelayMs: 0 });
+
+    const task = {
+      id: "t4",
+      source: "boss",
+      mode: "compliant",
+      fingerprint: "fp-4",
+      payload: { keyword: "前端" },
+      run: async () => {
+        throw new Error("Navigation timeout of 20000 ms exceeded");
+      },
+      onError: () => ({
+        errorCode: "TIMEOUT",
+        snapshot: {
+          source: "boss",
+          taskType: "jobs",
+        },
+      }),
+    } as QueueTask & {
+      onError: () => { errorCode: string; snapshot: Record<string, unknown> };
+    };
+
+    const result = await queue.enqueue(task);
+
+    expect(result.status).toBe("FAILED");
+    expect(result.errorCode).toBe("TIMEOUT");
+    expect(result.snapshot).toMatchObject({
+      source: "boss",
+      taskType: "jobs",
+    });
+  });
 });

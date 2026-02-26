@@ -43,6 +43,6 @@ describe("AI scorecard generation", () => {
     expect(result.overallScore).toBeGreaterThanOrEqual(70);
     expect(result.dimensionScores).toHaveLength(4);
     expect(result.evidence.length).toBeGreaterThan(0);
-    expect(result.modelInfo.provider).toBe("cloud-mock");
+    expect(result.modelInfo.provider).toBe("local-heuristic");
   });
 });

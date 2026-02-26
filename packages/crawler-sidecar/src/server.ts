@@ -4,11 +4,12 @@ import pino from "pino";
 import { z } from "zod";
 import type { CrawlMode, SourceType } from "@doss/shared";
 import { getAdapter } from "./adapters";
+import { classifyCrawlError, type CrawlTaskType } from "./errors";
 import { CrawlTaskQueue } from "./task-queue";
 
 const logger = pino({ name: "doss-crawler-sidecar" });
 
-const sourceSchema = z.enum(["boss", "zhilian", "wuba"]);
+const sourceSchema = z.enum(["boss", "zhilian", "wuba", "lagou"]);
 const modeSchema = z.enum(["compliant", "advanced"]);
 
 const jobParamsSchema = z.object({
@@ -33,6 +34,30 @@ function buildTaskFingerprint(source: SourceType, mode: CrawlMode, type: string,
     .createHash("sha256")
     .update(JSON.stringify({ source, mode, type, payload }))
     .digest("hex");
+}
+
+function classifyForTask(
+  error: unknown,
+  input: {
+    source: SourceType;
+    mode: CrawlMode;
+    taskType: CrawlTaskType;
+    payload: Record<string, unknown>;
+    url?: string;
+  },
+) {
+  const detail = classifyCrawlError(error, {
+    source: input.source,
+    mode: input.mode,
+    taskType: input.taskType,
+    payload: input.payload,
+    url: input.url,
+  });
+
+  return {
+    errorCode: detail.errorCode,
+    snapshot: detail.snapshot,
+  };
 }
 
 export function createServer() {
@@ -73,6 +98,13 @@ export function createServer() {
       payload: paramsParsed.data,
       fingerprint: buildTaskFingerprint(sourceParsed.data, modeParsed.data, "jobs", paramsParsed.data),
       run: async () => adapter.crawlJobs(modeParsed.data, paramsParsed.data),
+      onError: (error) =>
+        classifyForTask(error, {
+          source: sourceParsed.data,
+          mode: modeParsed.data,
+          taskType: "jobs",
+          payload: paramsParsed.data,
+        }),
     });
 
     logger.info({ result }, "crawl jobs task completed");
@@ -98,6 +130,13 @@ export function createServer() {
       payload: paramsParsed.data,
       fingerprint: buildTaskFingerprint(sourceParsed.data, modeParsed.data, "candidates", paramsParsed.data),
       run: async () => adapter.crawlCandidates(modeParsed.data, paramsParsed.data),
+      onError: (error) =>
+        classifyForTask(error, {
+          source: sourceParsed.data,
+          mode: modeParsed.data,
+          taskType: "candidates",
+          payload: paramsParsed.data,
+        }),
     });
 
     logger.info({ result }, "crawl candidates task completed");
@@ -123,6 +162,15 @@ export function createServer() {
       payload: { candidateId: candidateIdParsed.data },
       fingerprint: buildTaskFingerprint(sourceParsed.data, modeParsed.data, "resume", candidateIdParsed.data),
       run: async () => adapter.crawlResume(modeParsed.data, candidateIdParsed.data),
+      onError: (error) =>
+        classifyForTask(error, {
+          source: sourceParsed.data,
+          mode: modeParsed.data,
+          taskType: "resume",
+          payload: {
+            candidateId: candidateIdParsed.data,
+          },
+        }),
     });
 
     logger.info({ result }, "crawl resume task completed");

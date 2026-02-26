@@ -7,6 +7,10 @@ export interface QueueTask {
   fingerprint: string;
   payload: Record<string, unknown>;
   run: () => Promise<unknown>;
+  onError?: (error: unknown, attempt: number) => {
+    errorCode?: string;
+    snapshot?: Record<string, unknown>;
+  };
 }
 
 export interface QueueOptions {
@@ -23,6 +27,8 @@ export interface QueueResult {
   attempts: number;
   output?: unknown;
   error?: string;
+  errorCode?: string;
+  snapshot?: Record<string, unknown>;
 }
 
 function sleep(delayMs: number): Promise<void> {
@@ -70,6 +76,8 @@ export class CrawlTaskQueue {
 
     let attempts = 0;
     let lastError: unknown = undefined;
+    let lastErrorCode: string | undefined = undefined;
+    let lastSnapshot: Record<string, unknown> | undefined = undefined;
 
     while (attempts < this.maxRetries) {
       attempts += 1;
@@ -86,6 +94,15 @@ export class CrawlTaskQueue {
         };
       } catch (error) {
         lastError = error;
+        if (task.onError) {
+          try {
+            const classified = task.onError(error, attempts);
+            lastErrorCode = classified.errorCode ?? lastErrorCode;
+            lastSnapshot = classified.snapshot ?? lastSnapshot;
+          } catch {
+            // Keep retrying even if classifier fails.
+          }
+        }
       }
     }
 
@@ -96,6 +113,8 @@ export class CrawlTaskQueue {
       status: "FAILED",
       attempts,
       error: lastError instanceof Error ? lastError.message : "Unknown queue error",
+      errorCode: lastErrorCode,
+      snapshot: lastSnapshot,
     };
   }
 }

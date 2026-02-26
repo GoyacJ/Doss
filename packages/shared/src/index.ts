@@ -1,8 +1,14 @@
-export type SourceType = "boss" | "zhilian" | "wuba" | "manual";
+export type SourceType = "boss" | "zhilian" | "wuba" | "lagou" | "manual";
 
 export type CrawlMode = "compliant" | "advanced";
 
-export type CrawlTaskStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
+export type CrawlTaskStatus =
+  | "PENDING"
+  | "RUNNING"
+  | "PAUSED"
+  | "CANCELED"
+  | "SUCCEEDED"
+  | "FAILED";
 
 export type PipelineStage =
   | "NEW"
@@ -75,6 +81,50 @@ export interface AnalysisResult {
     model: string;
     generatedAt: string;
   };
+}
+
+export type InterviewRecommendation = "HIRE" | "HOLD" | "NO_HIRE";
+
+export interface InterviewQuestion {
+  primary_question: string;
+  follow_ups: string[];
+  scoring_points: string[];
+  red_flags: string[];
+}
+
+export interface InterviewKit {
+  id?: number;
+  candidate_id: number;
+  job_id?: number;
+  questions: InterviewQuestion[];
+  generated_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InterviewFeedback {
+  id: number;
+  candidate_id: number;
+  job_id?: number;
+  transcript_text: string;
+  structured_feedback: Record<string, unknown>;
+  recording_path?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InterviewEvaluation {
+  id: number;
+  candidate_id: number;
+  job_id?: number;
+  feedback_id: number;
+  recommendation: InterviewRecommendation;
+  overall_score: number;
+  confidence: number;
+  evidence: string[];
+  verification_points: string[];
+  uncertainty: string;
+  created_at: string;
 }
 
 export interface JobRecord {
@@ -304,8 +354,8 @@ export function buildScorecard(
     suggestions,
     evidence,
     modelInfo: {
-      provider: "cloud-mock",
-      model: "gpt-style-compat",
+      provider: "local-heuristic",
+      model: "local-scorecard-v1",
       generatedAt: new Date().toISOString(),
     },
   };

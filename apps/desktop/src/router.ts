@@ -28,6 +28,11 @@ export const router = createRouter({
       component: () => import("./views/CrawlView.vue"),
     },
     {
+      path: "/interview",
+      name: "interview",
+      component: () => import("./views/InterviewView.vue"),
+    },
+    {
       path: "/settings",
       name: "settings",
       component: () => import("./views/SettingsView.vue"),
