@@ -6187,13 +6187,36 @@ fn list_crawl_tasks(state: State<'_, AppState>) -> Result<Vec<CrawlTask>, String
         .map_err(|error| error.to_string())
 }
 
+fn build_fts_match_query(input: &str) -> Option<String> {
+    let token_regex = Regex::new(r"[\p{L}\p{N}_]+").ok()?;
+    let tokens = token_regex
+        .find_iter(input)
+        .map(|item| item.as_str().to_lowercase())
+        .filter(|item| !item.is_empty())
+        .take(8)
+        .collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return None;
+    }
+
+    Some(
+        tokens
+            .into_iter()
+            .map(|token| format!("\"{token}\"*"))
+            .collect::<Vec<_>>()
+            .join(" AND "),
+    )
+}
+
 #[tauri::command]
 fn search_candidates(state: State<'_, AppState>, query: String) -> Result<Vec<SearchHit>, String> {
     let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
-    let normalized_query = query.trim();
-    if normalized_query.is_empty() {
+    if query.trim().is_empty() {
         return Ok(Vec::new());
     }
+    let Some(match_query) = build_fts_match_query(&query) else {
+        return Ok(Vec::new());
+    };
 
     let mut stmt = conn
         .prepare(
@@ -6209,7 +6232,7 @@ fn search_candidates(state: State<'_, AppState>, query: String) -> Result<Vec<Se
         .map_err(|error| error.to_string())?;
 
     let rows = stmt
-        .query_map([normalized_query], |row| {
+        .query_map([match_query], |row| {
             let stage_text: String = row.get(2)?;
             Ok(SearchHit {
                 candidate_id: row.get(0)?,
@@ -6310,6 +6333,41 @@ fn resolve_db_path(app: &AppHandle) -> AppResult<PathBuf> {
     Ok(data_dir.join("doss.sqlite3"))
 }
 
+fn normalize_local_key(value: Option<String>) -> Option<String> {
+    value
+        .map(|raw| raw.trim().to_string())
+        .filter(|trimmed| !trimmed.is_empty())
+}
+
+fn generate_system_local_key() -> String {
+    let bytes: [u8; 32] = rand::random();
+    BASE64_STANDARD.encode(bytes)
+}
+
+fn resolve_local_key(app: &AppHandle, value: Option<String>) -> AppResult<String> {
+    if let Some(key) = normalize_local_key(value) {
+        return Ok(key);
+    }
+
+    let data_dir = app.path().app_data_dir().map_err(|_| AppError::NotFound("app_data_dir".to_string()))?;
+    fs::create_dir_all(&data_dir)?;
+    let key_path = data_dir.join("doss.local.key");
+
+    match fs::read_to_string(&key_path) {
+        Ok(existing) => {
+            if let Some(key) = normalize_local_key(Some(existing)) {
+                return Ok(key);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(AppError::Io(error)),
+    }
+
+    let generated = generate_system_local_key();
+    fs::write(&key_path, format!("{generated}\n"))?;
+    Ok(generated)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -6318,13 +6376,7 @@ pub fn run() {
             let db_path = resolve_db_path(app.handle())?;
             migrate_db(&db_path)?;
 
-            let seed = std::env::var("DOSS_LOCAL_KEY").unwrap_or_else(|_| {
-                format!(
-                    "{}:{}",
-                    app.config().identifier,
-                    app.package_info().version.to_string()
-                )
-            });
+            let seed = resolve_local_key(app.handle(), std::env::var("DOSS_LOCAL_KEY").ok())?;
 
             let preferred_sidecar_port = std::env::var("CRAWLER_PORT")
                 .ok()
@@ -6468,6 +6520,41 @@ mod tests {
     #[test]
     fn sidecar_base_url_uses_localhost() {
         assert_eq!(sidecar_base_url(3791), "http://127.0.0.1:3791");
+    }
+
+    #[test]
+    fn normalize_local_key_uses_trimmed_env_value() {
+        assert_eq!(
+            normalize_local_key(Some(" test-secret ".to_string())),
+            Some("test-secret".to_string())
+        );
+        assert_eq!(normalize_local_key(Some("   ".to_string())), None);
+        assert_eq!(normalize_local_key(None), None);
+    }
+
+    #[test]
+    fn generate_system_local_key_returns_random_non_empty_value() {
+        let first = generate_system_local_key();
+        let second = generate_system_local_key();
+
+        assert!(!first.trim().is_empty());
+        assert!(!second.trim().is_empty());
+        assert!(first.len() >= 40);
+        assert!(second.len() >= 40);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn build_fts_match_query_sanitizes_special_characters() {
+        assert_eq!(build_fts_match_query("\""), None);
+        assert_eq!(
+            build_fts_match_query("Vue3 (TypeScript)"),
+            Some("\"vue3\"* AND \"typescript\"*".to_string())
+        );
+        assert_eq!(
+            build_fts_match_query("前端 \"工程师\""),
+            Some("\"前端\"* AND \"工程师\"*".to_string())
+        );
     }
 
     #[test]

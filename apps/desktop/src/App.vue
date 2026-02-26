@@ -22,7 +22,12 @@ const lastErrorToast = ref<string | null>(null);
 
 onMounted(async () => {
   if (!store.hasBootstrapped) {
-    await store.bootstrap();
+    try {
+      await store.bootstrap();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "bootstrap_failed";
+      toast.danger(`初始化失败：${message}`);
+    }
   }
 });
 

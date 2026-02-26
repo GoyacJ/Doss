@@ -330,6 +330,12 @@ describe("recruiting store auto workflow", () => {
 
     expect(backend.triggerSidecarCrawlResume).toHaveBeenCalledTimes(2);
     expect(backend.runCandidateAnalysis).toHaveBeenCalledTimes(2);
+    expect(backend.upsertResume).toHaveBeenCalledTimes(2);
+    for (const [payload] of backend.upsertResume.mock.calls) {
+      expect(payload).toEqual(expect.objectContaining({
+        source: "boss",
+      }));
+    }
   });
 
   it("marks crawl task failed with sidecar error code and snapshot", async () => {
@@ -491,6 +497,7 @@ describe("recruiting store auto workflow", () => {
     expect(backend.upsertResume).toHaveBeenCalledWith(
       expect.objectContaining({
         candidate_id: 11,
+        source: "manual",
         raw_text: "候选人简历文本",
       }),
     );
@@ -504,6 +511,29 @@ describe("recruiting store auto workflow", () => {
         candidate_id: 11,
       }),
     );
+    expect(backend.loadDashboardMetrics).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back cleanly when search query causes backend error", async () => {
+    backend.searchCandidates
+      .mockResolvedValueOnce([
+        {
+          candidate_id: 11,
+          name: "张三",
+          stage: "NEW",
+          snippet: "Vue3",
+        },
+      ])
+      .mockRejectedValueOnce(new Error("fts_parse_error"));
+
+    const store = useRecruitingStore();
+    await store.bootstrap();
+
+    await store.search("Vue3");
+    expect(store.searchResults).toHaveLength(1);
+
+    await expect(store.search("\"")).resolves.toBeDefined();
+    expect(store.searchResults).toEqual([]);
   });
 
   it("supports task lifecycle actions and runtime setting update", async () => {

@@ -52,6 +52,7 @@ pnpm --filter @doss/desktop dev
 
 - sidecar 采用 Playwright 持久化会话目录执行真实抓取，不再返回示例 Mock 数据；首次使用请先在持久化 profile 中完成各平台登录。
 - 桌面端会在启动时自动确保 sidecar 可用；若端口冲突会尝试后续端口（默认从 `3791` 向后探测），异常退出后会在下次请求时自动重连拉起。
+- 可通过 `DOSS_LOCAL_KEY` 显式指定本地敏感字段加密密钥；若未设置，应用会在本机自动生成并持久化本地密钥。
 - AI分析默认可在设置页切换供应商；未配置密钥或调用失败时自动降级为本地启发式分析。
 - 可通过环境变量覆盖运行时配置：`DOSS_AI_PROVIDER`、`DOSS_AI_MODEL`、`DOSS_AI_BASE_URL`、`DOSS_AI_API_KEY`、`DOSS_AI_TEMPERATURE`、`DOSS_AI_MAX_TOKENS`、`DOSS_AI_TIMEOUT_SECS`、`DOSS_AI_RETRY_COUNT`。也支持 `DOSS_QWEN_API_KEY` / `DOSS_DOUBAO_API_KEY` / `DOSS_DEEPSEEK_API_KEY` / `DOSS_MINIMAX_API_KEY` / `DOSS_GLM_API_KEY` / `DOSS_OPENAPI_API_KEY`。
 - sidecar 运行参数可覆盖：`DOSS_SIDECAR_CMD`、`DOSS_SIDECAR_CWD`、`DOSS_SIDECAR_AUTOSTART`、`CRAWLER_PORT`。

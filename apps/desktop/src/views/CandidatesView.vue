@@ -183,7 +183,10 @@ function openInterviewWorkspace() {
 }
 
 async function doSearch() {
-  await store.search(searchKeyword.value);
+  const result = await store.search(searchKeyword.value);
+  if (!result.ok) {
+    toast.warning(`搜索失败，已清空结果：${result.error ?? "unknown_error"}`, 4200);
+  }
 }
 
 async function crawlResumeFromSidecar() {

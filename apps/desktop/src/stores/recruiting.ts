@@ -9,6 +9,7 @@ import type {
   InterviewQuestion,
   JobRecord,
   PipelineStage,
+  SourceType,
 } from "@doss/shared";
 import {
   checkSidecarHealth,
@@ -413,16 +414,21 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     raw_text: string;
     parsed: Record<string, unknown>;
     job_id?: number;
+    source?: SourceType;
   }) {
     await upsertResume({
-      source: "manual",
       ...payload,
+      source: payload.source ?? "manual",
     });
     await runResumeScreening({
       candidate_id: payload.candidate_id,
       job_id: payload.job_id,
     });
-    screeningResults.value[payload.candidate_id] = await listScreeningResults(payload.candidate_id);
+    const [latestScreeningResults] = await Promise.all([
+      listScreeningResults(payload.candidate_id),
+      refreshMetrics(),
+    ]);
+    screeningResults.value[payload.candidate_id] = latestScreeningResults;
   }
 
   async function analyzeCandidate(candidateId: number, jobId?: number) {
@@ -659,6 +665,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
         raw_text: resume.raw_text,
         parsed: resume.parsed,
         job_id: payload.localJobId,
+        source: payload.source,
       });
 
       await updateCrawlTask({
@@ -1033,12 +1040,21 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     };
   }
 
-  async function search(query: string) {
+  async function search(query: string): Promise<{ ok: boolean; error?: string }> {
     if (!query.trim()) {
       searchResults.value = [];
-      return;
+      return { ok: true };
     }
-    searchResults.value = await searchCandidates(query);
+    try {
+      searchResults.value = await searchCandidates(query);
+      return { ok: true };
+    } catch (error) {
+      searchResults.value = [];
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : "candidate_search_failed",
+      };
+    }
   }
 
   async function importResumeFileAndAnalyze(payload: {

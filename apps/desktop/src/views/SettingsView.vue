@@ -26,7 +26,6 @@ import { useToastStore } from "../stores/toast";
 
 const store = useRecruitingStore();
 const toast = useToastStore();
-const complianceMode = ref(true);
 
 const loadingCatalog = ref(false);
 const loadingProfiles = ref(false);
@@ -510,11 +509,6 @@ onMounted(async () => {
 
         <p v-else class="m-0 text-muted">暂无 AI 配置，点击“新增配置”创建第一条。</p>
       </template>
-    </UiPanel>
-
-    <UiPanel title="采集合规策略">
-      <UiCheckbox v-model="complianceMode" label="默认使用合规模式（推荐）" />
-      <p class="m-0">高级模式仍可在任务创建时显式选择。</p>
     </UiPanel>
 
     <UiPanel title="全局筛选模板">
