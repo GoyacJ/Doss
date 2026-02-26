@@ -1,0 +1,15 @@
+node_modules/
+.pnpm-store/
+
+# Build outputs
+apps/desktop/dist/
+apps/desktop/src-tauri/target/
+
+# Logs / env
+*.log
+.env
+.env.*
+
+# IDE
+.DS_Store
+.vscode/
