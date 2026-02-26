@@ -7,12 +7,15 @@ const backend = vi.hoisted(() => ({
   createCandidate: vi.fn(),
   createCrawlTask: vi.fn(),
   createJob: vi.fn(),
+  finalizeHiringDecision: vi.fn(),
   generateInterviewKit: vi.fn(),
   getAiProviderSettings: vi.fn(),
   getScreeningTemplate: vi.fn(),
   getTaskRuntimeSettings: vi.fn(),
   getHealth: vi.fn(),
   listAnalysis: vi.fn(),
+  listHiringDecisions: vi.fn(),
+  listInterviewEvaluations: vi.fn(),
   listCandidates: vi.fn(),
   listCrawlTasks: vi.fn(),
   listJobs: vi.fn(),
@@ -66,6 +69,10 @@ describe("recruiting store auto workflow", () => {
       total_candidates: 0,
       total_resumes: 0,
       pending_tasks: 0,
+      hiring_decisions_total: 0,
+      ai_alignment_count: 0,
+      ai_deviation_count: 0,
+      ai_alignment_rate: 0,
       stage_stats: [],
     });
     backend.getHealth.mockResolvedValue({
@@ -221,6 +228,8 @@ describe("recruiting store auto workflow", () => {
       created_at: "2026-02-26T00:00:00Z",
     });
     backend.listAnalysis.mockResolvedValue([]);
+    backend.listHiringDecisions.mockResolvedValue([]);
+    backend.listInterviewEvaluations.mockResolvedValue([]);
     backend.listPipelineEvents.mockResolvedValue([]);
     backend.listScreeningResults.mockResolvedValue([]);
     backend.runResumeScreening.mockResolvedValue({
@@ -308,6 +317,19 @@ describe("recruiting store auto workflow", () => {
       verification_points: ["补充面试记录"],
       uncertainty: "证据不足",
       created_at: "2026-02-26T00:00:00Z",
+    });
+    backend.finalizeHiringDecision.mockResolvedValue({
+      id: 1,
+      candidate_id: 11,
+      job_id: 101,
+      interview_evaluation_id: 1,
+      ai_recommendation: "HOLD",
+      final_decision: "HIRE",
+      reason_code: "skills_match",
+      note: "业务强相关经验",
+      ai_deviation: true,
+      created_at: "2026-02-26T00:00:00Z",
+      updated_at: "2026-02-26T00:00:00Z",
     });
   });
 
@@ -597,5 +619,28 @@ describe("recruiting store auto workflow", () => {
 
     expect(evaluation.recommendation).toBe("HOLD");
     expect(store.interviewEvaluations[11][0].verification_points[0]).toContain("补充");
+  });
+
+  it("stores hiring decision and keeps ai deviation flag", async () => {
+    const store = useRecruitingStore();
+    await store.bootstrap();
+
+    const decision = await store.finalizeHiringDecision({
+      candidate_id: 11,
+      job_id: 101,
+      final_decision: "HIRE",
+      reason_code: "skills_match",
+      note: "业务强相关经验",
+    });
+
+    expect(decision.ai_deviation).toBe(true);
+    expect(store.hiringDecisions[11][0].final_decision).toBe("HIRE");
+    expect(backend.finalizeHiringDecision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        candidate_id: 11,
+        job_id: 101,
+        final_decision: "HIRE",
+      }),
+    );
   });
 });

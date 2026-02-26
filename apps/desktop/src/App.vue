@@ -14,6 +14,7 @@ const navItems = [
   { to: "/jobs", label: "职位池" },
   { to: "/candidates", label: "候选人" },
   { to: "/interview", label: "面试" },
+  { to: "/decision", label: "决策" },
   { to: "/crawl", label: "采集任务" },
   { to: "/settings", label: "设置" },
 ] as const;

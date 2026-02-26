@@ -875,6 +875,30 @@ struct InterviewEvaluationPayload {
     uncertainty: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct FinalizeHiringDecisionInput {
+    candidate_id: i64,
+    job_id: Option<i64>,
+    final_decision: String,
+    reason_code: String,
+    note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HiringDecisionRecord {
+    id: i64,
+    candidate_id: i64,
+    job_id: Option<i64>,
+    interview_evaluation_id: Option<i64>,
+    ai_recommendation: Option<String>,
+    final_decision: String,
+    reason_code: String,
+    note: Option<String>,
+    ai_deviation: bool,
+    created_at: String,
+    updated_at: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct CrawlTask {
     id: i64,
@@ -954,6 +978,10 @@ struct DashboardMetrics {
     total_candidates: i64,
     total_resumes: i64,
     pending_tasks: i64,
+    hiring_decisions_total: i64,
+    ai_alignment_count: i64,
+    ai_deviation_count: i64,
+    ai_alignment_rate: f64,
     stage_stats: Vec<StageStat>,
 }
 
@@ -1209,6 +1237,23 @@ fn migrate_db(db_path: &Path) -> AppResult<()> {
             FOREIGN KEY(feedback_id) REFERENCES interview_feedback(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS hiring_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_id INTEGER NOT NULL,
+            job_id INTEGER,
+            interview_evaluation_id INTEGER,
+            ai_recommendation TEXT,
+            final_decision TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            note TEXT,
+            ai_deviation INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
+            FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE SET NULL,
+            FOREIGN KEY(interview_evaluation_id) REFERENCES interview_evaluations(id) ON DELETE SET NULL
+        );
+
         CREATE TABLE IF NOT EXISTS pipeline_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             candidate_id INTEGER NOT NULL,
@@ -1261,6 +1306,7 @@ fn migrate_db(db_path: &Path) -> AppResult<()> {
         CREATE INDEX IF NOT EXISTS idx_interview_kits_candidate ON interview_kits(candidate_id, updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_interview_feedback_candidate ON interview_feedback(candidate_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_interview_evaluations_candidate ON interview_evaluations(candidate_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_hiring_decisions_candidate ON hiring_decisions(candidate_id, created_at DESC);
 
         CREATE VIRTUAL TABLE IF NOT EXISTS candidate_search USING fts5(
             candidate_id UNINDEXED,
@@ -3625,6 +3671,39 @@ fn upsert_screening_template(
     Ok(template)
 }
 
+fn derive_screening_recommendation(t0_score: f64, overall_score: i32, risk_level: &str) -> String {
+    if t0_score < 3.0 {
+        return "REJECT".to_string();
+    }
+    if overall_score >= 80 && risk_level != "HIGH" {
+        return "PASS".to_string();
+    }
+    if overall_score >= 65 || risk_level != "LOW" {
+        return "REVIEW".to_string();
+    }
+    "REJECT".to_string()
+}
+
+fn normalize_final_decision(value: &str) -> Result<String, String> {
+    let normalized = value.trim().to_uppercase();
+    if normalized.is_empty() {
+        return Err("final_decision_required".to_string());
+    }
+    match normalized.as_str() {
+        "HIRE" | "OFFERED" => Ok("HIRE".to_string()),
+        "NO_HIRE" | "REJECT" | "REJECTED" => Ok("NO_HIRE".to_string()),
+        _ => Err("final_decision_invalid".to_string()),
+    }
+}
+
+fn map_ai_recommendation_to_final_decision(recommendation: &str) -> Option<&'static str> {
+    match recommendation {
+        "HIRE" => Some("HIRE"),
+        "HOLD" | "NO_HIRE" => Some("NO_HIRE"),
+        _ => None,
+    }
+}
+
 #[tauri::command]
 fn run_resume_screening(
     state: State<'_, AppState>,
@@ -3850,15 +3929,7 @@ fn run_resume_screening(
             .round() as i32,
     );
 
-    let recommendation = if t0_score < 3.0 {
-        "REJECT".to_string()
-    } else if overall_score >= 80 && risk_level != "HIGH" {
-        "PASS".to_string()
-    } else if overall_score >= 65 || risk_level != "LOW" {
-        "REVIEW".to_string()
-    } else {
-        "REJECT".to_string()
-    };
+    let recommendation = derive_screening_recommendation(t0_score, overall_score, &risk_level);
 
     if verification_points.is_empty() {
         verification_points.push("可进入面试验证岗位关键能力与价值观匹配度。".to_string());
@@ -4433,6 +4504,302 @@ fn run_interview_evaluation(
 }
 
 #[tauri::command]
+fn list_interview_evaluations(
+    state: State<'_, AppState>,
+    candidate_id: i64,
+) -> Result<Vec<InterviewEvaluationRecord>, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT id, candidate_id, job_id, feedback_id, recommendation, overall_score, confidence,
+                   evidence_json, verification_points_json, uncertainty, created_at
+            FROM interview_evaluations
+            WHERE candidate_id = ?1
+            ORDER BY created_at DESC
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map([candidate_id], |row| {
+            let evidence_text: String = row.get(7)?;
+            let verification_text: String = row.get(8)?;
+            Ok(InterviewEvaluationRecord {
+                id: row.get(0)?,
+                candidate_id: row.get(1)?,
+                job_id: row.get(2)?,
+                feedback_id: row.get(3)?,
+                recommendation: row.get(4)?,
+                overall_score: row.get(5)?,
+                confidence: row.get(6)?,
+                evidence: serde_json::from_str(&evidence_text).unwrap_or_default(),
+                verification_points: serde_json::from_str(&verification_text).unwrap_or_default(),
+                uncertainty: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn finalize_hiring_decision(
+    state: State<'_, AppState>,
+    input: FinalizeHiringDecisionInput,
+) -> Result<HiringDecisionRecord, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+
+    let current_stage_text: String = conn
+        .query_row(
+            "SELECT stage FROM candidates WHERE id = ?1",
+            [input.candidate_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Candidate {} not found", input.candidate_id))?;
+
+    let reason_code = input.reason_code.trim().to_string();
+    if reason_code.is_empty() {
+        return Err("hiring_decision_reason_code_required".to_string());
+    }
+    let note = input
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let final_decision = normalize_final_decision(&input.final_decision)?;
+    let target_stage = if final_decision == "HIRE" {
+        PipelineStage::Offered
+    } else {
+        PipelineStage::Rejected
+    };
+    if current_stage_text != target_stage.as_db()
+        && !is_valid_transition(&current_stage_text, target_stage.as_db())
+    {
+        return Err(
+            AppError::InvalidTransition {
+                from: current_stage_text.clone(),
+                to: target_stage.as_db().to_string(),
+            }
+            .to_string(),
+        );
+    }
+
+    let inferred_job_id = conn
+        .query_row(
+            "SELECT job_id FROM applications WHERE candidate_id = ?1 ORDER BY updated_at DESC LIMIT 1",
+            [input.candidate_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let effective_job_id = input.job_id.or(inferred_job_id);
+
+    let latest_evaluation = if let Some(job_id) = effective_job_id {
+        conn.query_row(
+            r#"
+            SELECT id, recommendation
+            FROM interview_evaluations
+            WHERE candidate_id = ?1 AND job_id = ?2
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+            params![input.candidate_id, job_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    } else {
+        conn.query_row(
+            r#"
+            SELECT id, recommendation
+            FROM interview_evaluations
+            WHERE candidate_id = ?1
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+            [input.candidate_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    };
+
+    let interview_evaluation_id = latest_evaluation.as_ref().map(|value| value.0);
+    let ai_recommendation = latest_evaluation.map(|value| value.1);
+    let ai_deviation = ai_recommendation
+        .as_deref()
+        .and_then(map_ai_recommendation_to_final_decision)
+        .map(|mapped| mapped != final_decision.as_str())
+        .unwrap_or(false);
+
+    let now = now_iso();
+    conn.execute(
+        r#"
+        INSERT INTO hiring_decisions(
+            candidate_id, job_id, interview_evaluation_id, ai_recommendation,
+            final_decision, reason_code, note, ai_deviation, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        "#,
+        params![
+            input.candidate_id,
+            effective_job_id,
+            interview_evaluation_id,
+            ai_recommendation.clone(),
+            &final_decision,
+            &reason_code,
+            note.clone(),
+            if ai_deviation { 1_i32 } else { 0_i32 },
+            now,
+            now,
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    let decision_id = conn.last_insert_rowid();
+
+    if current_stage_text != target_stage.as_db() {
+        conn.execute(
+            "UPDATE candidates SET stage = ?1, updated_at = ?2 WHERE id = ?3",
+            params![target_stage.as_db(), now_iso(), input.candidate_id],
+        )
+        .map_err(|error| error.to_string())?;
+
+        if let Some(job_id) = effective_job_id {
+            conn.execute(
+                r#"
+                INSERT INTO applications(job_id, candidate_id, stage, notes, created_at, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                ON CONFLICT(job_id, candidate_id)
+                DO UPDATE SET stage = excluded.stage, notes = excluded.notes, updated_at = excluded.updated_at
+                "#,
+                params![
+                    job_id,
+                    input.candidate_id,
+                    target_stage.as_db(),
+                    note.clone(),
+                    now,
+                    now,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+
+        let stage_note = note
+            .as_deref()
+            .map(|value| format!("final_decision={final_decision}; reason_code={reason_code}; note={value}"))
+            .unwrap_or_else(|| format!("final_decision={final_decision}; reason_code={reason_code}"));
+
+        conn.execute(
+            r#"
+            INSERT INTO pipeline_events(candidate_id, job_id, from_stage, to_stage, note, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                input.candidate_id,
+                effective_job_id,
+                current_stage_text,
+                target_stage.as_db(),
+                stage_note,
+                now,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    let record = conn
+        .query_row(
+            r#"
+            SELECT id, candidate_id, job_id, interview_evaluation_id, ai_recommendation,
+                   final_decision, reason_code, note, ai_deviation, created_at, updated_at
+            FROM hiring_decisions
+            WHERE id = ?1
+            "#,
+            [decision_id],
+            |row| {
+                let ai_deviation_flag = row.get::<_, i32>(8)? != 0;
+                Ok(HiringDecisionRecord {
+                    id: row.get(0)?,
+                    candidate_id: row.get(1)?,
+                    job_id: row.get(2)?,
+                    interview_evaluation_id: row.get(3)?,
+                    ai_recommendation: row.get(4)?,
+                    final_decision: row.get(5)?,
+                    reason_code: row.get(6)?,
+                    note: row.get(7)?,
+                    ai_deviation: ai_deviation_flag,
+                    created_at: row.get(9)?,
+                    updated_at: row.get(10)?,
+                })
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+    write_audit(
+        &conn,
+        "hiring.decision.finalize",
+        "hiring_decision",
+        Some(record.id.to_string()),
+        serde_json::json!({
+            "candidateId": record.candidate_id,
+            "jobId": record.job_id,
+            "finalDecision": record.final_decision,
+            "reasonCode": record.reason_code,
+            "aiRecommendation": record.ai_recommendation,
+            "aiDeviation": record.ai_deviation,
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(record)
+}
+
+#[tauri::command]
+fn list_hiring_decisions(
+    state: State<'_, AppState>,
+    candidate_id: i64,
+) -> Result<Vec<HiringDecisionRecord>, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT id, candidate_id, job_id, interview_evaluation_id, ai_recommendation,
+                   final_decision, reason_code, note, ai_deviation, created_at, updated_at
+            FROM hiring_decisions
+            WHERE candidate_id = ?1
+            ORDER BY created_at DESC
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map([candidate_id], |row| {
+            Ok(HiringDecisionRecord {
+                id: row.get(0)?,
+                candidate_id: row.get(1)?,
+                job_id: row.get(2)?,
+                interview_evaluation_id: row.get(3)?,
+                ai_recommendation: row.get(4)?,
+                final_decision: row.get(5)?,
+                reason_code: row.get(6)?,
+                note: row.get(7)?,
+                ai_deviation: row.get::<_, i32>(8)? != 0,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn dashboard_metrics(state: State<'_, AppState>) -> Result<DashboardMetrics, String> {
     let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
 
@@ -4452,6 +4819,22 @@ fn dashboard_metrics(state: State<'_, AppState>) -> Result<DashboardMetrics, Str
             |row| row.get(0),
         )
         .map_err(|error| error.to_string())?;
+    let hiring_decisions_total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM hiring_decisions", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    let ai_deviation_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM hiring_decisions WHERE ai_deviation = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let ai_alignment_count = hiring_decisions_total.saturating_sub(ai_deviation_count);
+    let ai_alignment_rate = if hiring_decisions_total > 0 {
+        ((ai_alignment_count as f64 / hiring_decisions_total as f64) * 1000.0).round() / 10.0
+    } else {
+        0.0
+    };
 
     let mut stage_stmt = conn
         .prepare("SELECT stage, COUNT(*) FROM candidates GROUP BY stage")
@@ -4481,6 +4864,10 @@ fn dashboard_metrics(state: State<'_, AppState>) -> Result<DashboardMetrics, Str
         total_candidates,
         total_resumes,
         pending_tasks,
+        hiring_decisions_total,
+        ai_alignment_count,
+        ai_deviation_count,
+        ai_alignment_rate,
         stage_stats,
     })
 }
@@ -4604,6 +4991,9 @@ pub fn run() {
             save_interview_kit,
             submit_interview_feedback,
             run_interview_evaluation,
+            list_interview_evaluations,
+            finalize_hiring_decision,
+            list_hiring_decisions,
             get_ai_provider_catalog,
             list_ai_provider_profiles,
             upsert_ai_provider_profile,
@@ -4796,6 +5186,14 @@ mod tests {
         let total = dimensions.iter().map(|item| item.weight).sum::<i32>();
         assert_eq!(total, 100);
         assert!(dimensions.len() >= 4);
+    }
+
+    #[test]
+    fn screening_recommendation_respects_t0_boundaries() {
+        assert_eq!(derive_screening_recommendation(2.9, 88, "LOW"), "REJECT");
+        assert_eq!(derive_screening_recommendation(3.0, 82, "LOW"), "PASS");
+        assert_eq!(derive_screening_recommendation(3.9, 70, "LOW"), "REVIEW");
+        assert_eq!(derive_screening_recommendation(4.0, 60, "LOW"), "REJECT");
     }
 
     #[test]

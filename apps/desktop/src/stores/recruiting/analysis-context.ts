@@ -2,6 +2,7 @@ import type { Ref } from "vue";
 import type { InterviewQuestion, SourceType } from "@doss/shared";
 import {
   type BackendAnalysisRecord,
+  type HiringDecisionRecord,
   type InterviewEvaluationRecord,
   type InterviewFeedbackRecord,
   type InterviewKitRecord,
@@ -18,12 +19,15 @@ export interface AnalysisContextDeps {
   interviewKits: Ref<Record<number, InterviewKitRecord | null>>;
   interviewFeedback: Ref<Record<number, InterviewFeedbackRecord[]>>;
   interviewEvaluations: Ref<Record<number, InterviewEvaluationRecord[]>>;
+  hiringDecisions: Ref<Record<number, HiringDecisionRecord[]>>;
   pipelineEvents: Ref<Record<number, PipelineEvent[]>>;
   mapAnalysis: (record: BackendAnalysisRecord) => UiAnalysisRecord;
   runCandidateAnalysis: (input: { candidate_id: number; job_id?: number }) => Promise<unknown>;
   listAnalysis: (candidateId: number) => Promise<BackendAnalysisRecord[]>;
   listPipelineEvents: (candidateId: number) => Promise<PipelineEvent[]>;
   listScreeningResults: (candidateId: number) => Promise<ScreeningResultRecord[]>;
+  listInterviewEvaluations: (candidateId: number) => Promise<InterviewEvaluationRecord[]>;
+  listHiringDecisions: (candidateId: number) => Promise<HiringDecisionRecord[]>;
   runResumeScreening: (input: { candidate_id: number; job_id?: number }) => Promise<ScreeningResultRecord>;
   upsertResume: (input: UpsertResumePayload) => Promise<unknown>;
   refreshMetrics: () => Promise<void>;
@@ -139,14 +143,18 @@ export function createAnalysisContextModule(deps: AnalysisContextDeps) {
   }
 
   async function loadCandidateContext(candidateId: number) {
-    const [analysisData, eventData, screeningData] = await Promise.all([
+    const [analysisData, eventData, screeningData, interviewEvaluationData, hiringDecisionData] = await Promise.all([
       deps.listAnalysis(candidateId),
       deps.listPipelineEvents(candidateId),
       deps.listScreeningResults(candidateId),
+      deps.listInterviewEvaluations(candidateId),
+      deps.listHiringDecisions(candidateId),
     ]);
     deps.analyses.value[candidateId] = analysisData.map(deps.mapAnalysis);
     deps.pipelineEvents.value[candidateId] = eventData;
     deps.screeningResults.value[candidateId] = screeningData;
+    deps.interviewEvaluations.value[candidateId] = interviewEvaluationData;
+    deps.hiringDecisions.value[candidateId] = hiringDecisionData;
   }
 
   async function runScreening(candidateId: number, jobId?: number) {

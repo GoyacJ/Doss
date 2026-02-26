@@ -32,6 +32,7 @@ const jobTemplateDimensions = ref([
   { key: "learning_ability", label: "学习能力", weight: 10 },
   { key: "values_fit", label: "价值观契合", weight: 5 },
 ]);
+const jobTemplateRiskRulesText = ref("{}");
 
 const jobTemplateWeightTotal = computed(() =>
   jobTemplateDimensions.value.reduce((sum, item) => sum + Number(item.weight || 0), 0),
@@ -72,6 +73,7 @@ async function loadJobTemplateOverride() {
       weight: item.weight,
     }));
   }
+  jobTemplateRiskRulesText.value = JSON.stringify(template.risk_rules ?? {}, null, 2);
 }
 
 async function saveJobTemplateOverride() {
@@ -84,6 +86,30 @@ async function saveJobTemplateOverride() {
     return;
   }
 
+  const hasInvalidDimension = jobTemplateDimensions.value.some(
+    (item) => !item.key.trim() || !item.label.trim(),
+  );
+  if (hasInvalidDimension) {
+    toast.warning("请填写完整的维度 key 与名称");
+    return;
+  }
+
+  let riskRules: Record<string, unknown> = {};
+  const riskRulesText = jobTemplateRiskRulesText.value.trim();
+  if (riskRulesText) {
+    try {
+      const parsed = JSON.parse(riskRulesText);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        toast.warning("风险规则必须是 JSON 对象");
+        return;
+      }
+      riskRules = parsed as Record<string, unknown>;
+    } catch {
+      toast.warning("风险规则 JSON 格式不正确");
+      return;
+    }
+  }
+
   await store.saveScreeningTemplate({
     job_id: jobTemplateJobId.value,
     name: jobTemplateName.value.trim() || `岗位 ${jobTemplateJobId.value} 微调模板`,
@@ -92,8 +118,26 @@ async function saveJobTemplateOverride() {
       label: item.label.trim(),
       weight: Number(item.weight),
     })),
+    risk_rules: riskRules,
   });
   toast.success("职位微调模板已保存");
+}
+
+function addJobTemplateDimension() {
+  const next = jobTemplateDimensions.value.length + 1;
+  jobTemplateDimensions.value.push({
+    key: `custom_dimension_${next}`,
+    label: `自定义维度${next}`,
+    weight: 5,
+  });
+}
+
+function removeJobTemplateDimension(index: number) {
+  if (jobTemplateDimensions.value.length <= 1) {
+    toast.warning("至少保留一个维度");
+    return;
+  }
+  jobTemplateDimensions.value.splice(index, 1);
 }
 </script>
 
@@ -138,15 +182,32 @@ async function saveJobTemplateOverride() {
           <input v-model="jobTemplateName" placeholder="岗位微调模板" />
         </UiField>
       </div>
-      <div class="grid grid-cols-2 gap-2.5 mb-2.5 lt-lg:grid-cols-1">
-        <UiField
-          v-for="item in jobTemplateDimensions"
-          :key="item.key"
-          :label="item.label"
-        >
-          <input v-model.number="item.weight" type="number" min="1" max="100" step="1" />
-        </UiField>
+      <div class="flex items-center gap-2 mb-2.5">
+        <UiButton variant="secondary" @click="addJobTemplateDimension">新增维度</UiButton>
       </div>
+      <div class="grid gap-2.5 mb-2.5">
+        <div
+          v-for="(item, index) in jobTemplateDimensions"
+          :key="`${item.key}-${index}`"
+          class="border border-line rounded-xl p-2.5 grid grid-cols-[1fr_1fr_140px_auto] gap-2 lt-lg:grid-cols-1"
+        >
+          <UiField label="维度 Key">
+            <input v-model="item.key" placeholder="例如：goal_orientation" />
+          </UiField>
+          <UiField label="维度名称">
+            <input v-model="item.label" placeholder="例如：目标导向" />
+          </UiField>
+          <UiField label="权重">
+            <input v-model.number="item.weight" type="number" min="1" max="100" step="1" />
+          </UiField>
+          <div class="flex items-end">
+            <UiButton variant="ghost" @click="removeJobTemplateDimension(index)">删除</UiButton>
+          </div>
+        </div>
+      </div>
+      <UiField label="风险规则（JSON）" help="用于补充岗位级风险判定规则，可为空对象">
+        <textarea v-model="jobTemplateRiskRulesText" rows="6" placeholder='{"highRiskKeywords":["频繁跳槽"]}' />
+      </UiField>
       <p class="mt-1 mb-2 text-sm" :class="jobTemplateWeightTotal === 100 ? 'text-brand' : 'text-danger'">
         权重合计: {{ jobTemplateWeightTotal }} / 100
       </p>

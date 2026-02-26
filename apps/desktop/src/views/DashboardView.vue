@@ -12,6 +12,7 @@ import UiPanel from "../components/UiPanel.vue";
 const store = useRecruitingStore();
 
 const metrics = computed(() => store.metrics);
+const aiAlignmentRate = computed(() => metrics.value?.ai_alignment_rate ?? 0);
 </script>
 
 <template>
@@ -26,6 +27,10 @@ const metrics = computed(() => store.metrics);
       <UiMetricCard label="候选人总数" :value="metrics.total_candidates" />
       <UiMetricCard label="简历总数" :value="metrics.total_resumes" />
       <UiMetricCard label="待处理采集任务" :value="metrics.pending_tasks" />
+      <UiMetricCard label="最终决策总数" :value="metrics.hiring_decisions_total" />
+      <UiMetricCard label="AI一致决策" :value="metrics.ai_alignment_count" />
+      <UiMetricCard label="AI偏差决策" :value="metrics.ai_deviation_count" />
+      <UiMetricCard label="AI一致率(%)" :value="aiAlignmentRate.toFixed(1)" />
     </div>
 
     <UiPanel v-if="metrics" title="阶段分布">

@@ -40,13 +40,17 @@ import {
   type PipelineEvent,
   type InterviewEvaluationRecord,
   type InterviewFeedbackRecord,
+  type HiringDecisionRecord,
   type InterviewKitRecord,
   type SearchHit,
   type TaskRuntimeSettings,
+  finalizeHiringDecision as finalizeHiringDecisionApi,
   generateInterviewKit as generateInterviewKitApi,
   getAiProviderSettings,
   getScreeningTemplate,
   listAnalysis,
+  listHiringDecisions,
+  listInterviewEvaluations,
   listPipelineEvents,
   listScreeningResults,
   runCandidateAnalysis,
@@ -93,6 +97,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
   const interviewKits = ref<Record<number, InterviewKitRecord | null>>({});
   const interviewFeedback = ref<Record<number, InterviewFeedbackRecord[]>>({});
   const interviewEvaluations = ref<Record<number, InterviewEvaluationRecord[]>>({});
+  const hiringDecisions = ref<Record<number, HiringDecisionRecord[]>>({});
   const pipelineEvents = ref<Record<number, PipelineEvent[]>>({});
   const searchResults = ref<SearchHit[]>([]);
   const aiSettings = ref<AiProviderSettings | null>(null);
@@ -242,10 +247,13 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     interviewKits,
     interviewFeedback,
     interviewEvaluations,
+    hiringDecisions,
     pipelineEvents,
     mapAnalysis: mapBackendAnalysisRecord,
     runCandidateAnalysis,
     listAnalysis,
+    listHiringDecisions,
+    listInterviewEvaluations,
     listPipelineEvents,
     listScreeningResults,
     runResumeScreening,
@@ -347,6 +355,22 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     return testAiProviderSettings(payload);
   }
 
+  async function finalizeHiringDecision(payload: {
+    candidate_id: number;
+    job_id?: number;
+    final_decision: "HIRE" | "NO_HIRE";
+    reason_code: string;
+    note?: string;
+  }) {
+    const decision = await finalizeHiringDecisionApi(payload);
+    const existing = hiringDecisions.value[payload.candidate_id] ?? [];
+    hiringDecisions.value[payload.candidate_id] = [decision, ...existing];
+    candidates.value = await listCandidates();
+    pipelineEvents.value[payload.candidate_id] = await listPipelineEvents(payload.candidate_id);
+    await refreshMetrics();
+    return decision;
+  }
+
   async function loadTaskSettings() {
     taskSettings.value = await getTaskRuntimeSettings();
     return taskSettings.value;
@@ -399,6 +423,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     interviewKits,
     interviewFeedback,
     interviewEvaluations,
+    hiringDecisions,
     pipelineEvents,
     searchResults,
     aiSettings,
@@ -434,6 +459,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     saveInterviewKit: analysisContext.saveInterviewKit,
     submitInterviewFeedback: analysisContext.submitInterviewFeedback,
     runInterviewEvaluation: analysisContext.runInterviewEvaluation,
+    finalizeHiringDecision,
     loadAiSettings,
     saveAiSettings,
     testAiSettings,

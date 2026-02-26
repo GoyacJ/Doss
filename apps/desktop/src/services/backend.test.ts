@@ -10,7 +10,10 @@ import {
   createCandidate,
   createCrawlTask,
   deleteAiProviderProfile,
+  finalizeHiringDecision,
   listAnalysis,
+  listHiringDecisions,
+  listInterviewEvaluations,
   listPipelineEvents,
   listScreeningResults,
   parseResumeFile,
@@ -80,8 +83,10 @@ describe("backend AI profile commands", () => {
     await listPipelineEvents(101);
     await listAnalysis(102);
     await listScreeningResults(103);
+    await listHiringDecisions(104);
+    await listInterviewEvaluations(105);
     await runCandidateAnalysis({
-      candidate_id: 104,
+      candidate_id: 106,
       job_id: 12,
     });
 
@@ -94,9 +99,15 @@ describe("backend AI profile commands", () => {
     expect(invokeMock).toHaveBeenCalledWith("list_screening_results", {
       candidate_id: 103,
     });
+    expect(invokeMock).toHaveBeenCalledWith("list_hiring_decisions", {
+      candidate_id: 104,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("list_interview_evaluations", {
+      candidate_id: 105,
+    });
     expect(invokeMock).toHaveBeenCalledWith("run_candidate_analysis", {
       input: {
-        candidate_id: 104,
+        candidate_id: 106,
         job_id: 12,
       },
     });
@@ -264,6 +275,26 @@ describe("backend AI profile commands", () => {
       input: {
         candidate_id: 101,
         job_id: 12,
+      },
+    });
+  });
+
+  it("passes snake_case args for hiring decision command", async () => {
+    await finalizeHiringDecision({
+      candidate_id: 101,
+      job_id: 12,
+      final_decision: "HIRE",
+      reason_code: "skills_match",
+      note: "核心能力匹配度高",
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("finalize_hiring_decision", {
+      input: {
+        candidate_id: 101,
+        job_id: 12,
+        final_decision: "HIRE",
+        reason_code: "skills_match",
+        note: "核心能力匹配度高",
       },
     });
   });

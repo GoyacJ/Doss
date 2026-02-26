@@ -139,6 +139,7 @@ const screeningForm = reactive<{
     { key: "values_fit", label: "价值观契合", weight: 5 },
   ],
 });
+const screeningRiskRulesText = ref("{}");
 
 const screeningWeightTotal = computed(() =>
   screeningForm.dimensions.reduce((sum, item) => sum + Number(item.weight || 0), 0),
@@ -268,6 +269,7 @@ function hydrateScreeningForm() {
       weight: item.weight,
     }));
   }
+  screeningRiskRulesText.value = JSON.stringify(template.risk_rules ?? {}, null, 2);
 }
 
 async function loadScreeningTemplate() {
@@ -289,6 +291,30 @@ async function saveScreeningTemplate() {
     return;
   }
 
+  const hasInvalidDimension = screeningForm.dimensions.some(
+    (item) => !item.key.trim() || !item.label.trim(),
+  );
+  if (hasInvalidDimension) {
+    toast.warning("请填写完整的维度 key 与名称");
+    return;
+  }
+
+  let riskRules: Record<string, unknown> = {};
+  const riskRulesText = screeningRiskRulesText.value.trim();
+  if (riskRulesText) {
+    try {
+      const parsed = JSON.parse(riskRulesText);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        toast.warning("风险规则必须是 JSON 对象");
+        return;
+      }
+      riskRules = parsed as Record<string, unknown>;
+    } catch {
+      toast.warning("风险规则 JSON 格式不正确");
+      return;
+    }
+  }
+
   screeningSaving.value = true;
   try {
     await store.saveScreeningTemplate({
@@ -298,6 +324,7 @@ async function saveScreeningTemplate() {
         label: item.label.trim(),
         weight: Number(item.weight),
       })),
+      risk_rules: riskRules,
     });
     hydrateScreeningForm();
     toast.success("筛选模板已保存");
@@ -307,6 +334,23 @@ async function saveScreeningTemplate() {
   } finally {
     screeningSaving.value = false;
   }
+}
+
+function addScreeningDimension() {
+  const next = screeningForm.dimensions.length + 1;
+  screeningForm.dimensions.push({
+    key: `custom_dimension_${next}`,
+    label: `自定义维度${next}`,
+    weight: 5,
+  });
+}
+
+function removeScreeningDimension(index: number) {
+  if (screeningForm.dimensions.length <= 1) {
+    toast.warning("至少保留一个维度");
+    return;
+  }
+  screeningForm.dimensions.splice(index, 1);
 }
 
 async function saveProfile() {
@@ -515,15 +559,40 @@ onMounted(async () => {
       <UiField label="模板名称">
         <input v-model="screeningForm.name" placeholder="默认筛选模板" />
       </UiField>
-      <div class="mt-3 grid grid-cols-2 gap-2.5 lt-lg:grid-cols-1">
-        <UiField
-          v-for="item in screeningForm.dimensions"
-          :key="item.key"
-          :label="item.label"
-        >
-          <input v-model.number="item.weight" type="number" min="1" max="100" step="1" />
-        </UiField>
+      <div class="mt-3 mb-2 flex items-center gap-2">
+        <UiButton variant="secondary" :disabled="screeningLoading || screeningSaving" @click="addScreeningDimension">
+          新增维度
+        </UiButton>
       </div>
+      <div class="grid gap-2.5">
+        <div
+          v-for="(item, index) in screeningForm.dimensions"
+          :key="`${item.key}-${index}`"
+          class="border border-line rounded-xl p-2.5 grid grid-cols-[1fr_1fr_140px_auto] gap-2 lt-lg:grid-cols-1"
+        >
+          <UiField label="维度 Key">
+            <input v-model="item.key" placeholder="例如：goal_orientation" />
+          </UiField>
+          <UiField label="维度名称">
+            <input v-model="item.label" placeholder="例如：目标导向" />
+          </UiField>
+          <UiField label="权重">
+            <input v-model.number="item.weight" type="number" min="1" max="100" step="1" />
+          </UiField>
+          <div class="flex items-end">
+            <UiButton
+              variant="ghost"
+              :disabled="screeningLoading || screeningSaving"
+              @click="removeScreeningDimension(index)"
+            >
+              删除
+            </UiButton>
+          </div>
+        </div>
+      </div>
+      <UiField label="风险规则（JSON）" help="用于补充全局风险规则，可为空对象" class="mt-3">
+        <textarea v-model="screeningRiskRulesText" rows="6" placeholder='{"highRiskKeywords":["频繁跳槽"]}' />
+      </UiField>
       <p class="mt-3 mb-2 text-sm" :class="screeningWeightTotal === 100 ? 'text-brand' : 'text-danger'">
         权重合计: {{ screeningWeightTotal }} / 100
       </p>

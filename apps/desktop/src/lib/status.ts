@@ -1,4 +1,9 @@
-import type { CrawlTaskStatus, InterviewRecommendation, PipelineStage } from "@doss/shared";
+import type {
+  CrawlTaskStatus,
+  HiringFinalDecision,
+  InterviewRecommendation,
+  PipelineStage,
+} from "@doss/shared";
 
 export type StatusTone = "neutral" | "info" | "success" | "warning" | "danger";
 
@@ -82,6 +87,20 @@ export function interviewRecommendationTone(recommendation: InterviewRecommendat
   }
   if (recommendation === "HOLD") {
     return "warning";
+  }
+  return "danger";
+}
+
+export function hiringDecisionLabel(decision: HiringFinalDecision): string {
+  if (decision === "HIRE") {
+    return "录用";
+  }
+  return "遗憾";
+}
+
+export function hiringDecisionTone(decision: HiringFinalDecision): StatusTone {
+  if (decision === "HIRE") {
+    return "success";
   }
   return "danger";
 }

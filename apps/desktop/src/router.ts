@@ -33,6 +33,11 @@ export const router = createRouter({
       component: () => import("./views/InterviewView.vue"),
     },
     {
+      path: "/decision",
+      name: "decision",
+      component: () => import("./views/DecisionView.vue"),
+    },
+    {
       path: "/settings",
       name: "settings",
       component: () => import("./views/SettingsView.vue"),

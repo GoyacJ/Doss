@@ -83,6 +83,44 @@ export interface AnalysisResult {
   };
 }
 
+export type ScreeningRecommendation = "PASS" | "REVIEW" | "REJECT";
+export type ScreeningRiskLevel = "LOW" | "MEDIUM" | "HIGH";
+
+export interface ScreeningDimension {
+  key: string;
+  label: string;
+  weight: number;
+}
+
+export interface ScreeningTemplate {
+  id: number;
+  scope: "global" | "job";
+  name: string;
+  job_id?: number | null;
+  dimensions: ScreeningDimension[];
+  risk_rules: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScreeningResult {
+  id: number;
+  candidate_id: number;
+  job_id?: number | null;
+  template_id?: number | null;
+  t0_score: number;
+  t1_score: number;
+  fine_score: number;
+  bonus_score: number;
+  risk_penalty: number;
+  overall_score: number;
+  recommendation: ScreeningRecommendation;
+  risk_level: ScreeningRiskLevel;
+  evidence: string[];
+  verification_points: string[];
+  created_at: string;
+}
+
 export type InterviewRecommendation = "HIRE" | "HOLD" | "NO_HIRE";
 
 export interface InterviewQuestion {
@@ -125,6 +163,22 @@ export interface InterviewEvaluation {
   verification_points: string[];
   uncertainty: string;
   created_at: string;
+}
+
+export type HiringFinalDecision = "HIRE" | "NO_HIRE";
+
+export interface HiringDecision {
+  id: number;
+  candidate_id: number;
+  job_id?: number | null;
+  interview_evaluation_id?: number | null;
+  ai_recommendation?: InterviewRecommendation | null;
+  final_decision: HiringFinalDecision;
+  reason_code: string;
+  note?: string | null;
+  ai_deviation: boolean;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface JobRecord {
@@ -191,6 +245,10 @@ export interface DashboardMetrics {
   total_candidates: number;
   total_resumes: number;
   pending_tasks: number;
+  hiring_decisions_total: number;
+  ai_alignment_count: number;
+  ai_deviation_count: number;
+  ai_alignment_rate: number;
   stage_stats: StageStat[];
 }
 

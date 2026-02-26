@@ -182,6 +182,18 @@ function openInterviewWorkspace() {
   });
 }
 
+function openDecisionWorkspace() {
+  if (!selectedCandidateId.value) {
+    return;
+  }
+  router.push({
+    path: "/decision",
+    query: {
+      candidateId: String(selectedCandidateId.value),
+    },
+  });
+}
+
 async function doSearch() {
   const result = await store.search(searchKeyword.value);
   if (!result.ok) {
@@ -322,6 +334,7 @@ function screeningLabel(recommendation: "PASS" | "REVIEW" | "REJECT") {
 
         <div class="flex flex-wrap gap-2 mt-2">
           <UiButton variant="secondary" @click="openInterviewWorkspace">进入面试页</UiButton>
+          <UiButton variant="secondary" @click="openDecisionWorkspace">进入决策页</UiButton>
           <UiButton
             v-for="stage in nextStageOptions(selectedCandidate.stage)"
             :key="stage"

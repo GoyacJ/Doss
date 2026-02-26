@@ -4,6 +4,8 @@ import type {
   CrawlMode,
   CrawlTaskRecord,
   DashboardMetrics,
+  HiringDecision,
+  HiringFinalDecision,
   InterviewQuestion,
   InterviewRecommendation,
   JobRecord,
@@ -352,6 +354,16 @@ export interface InterviewEvaluationRecord {
   created_at: string;
 }
 
+export interface FinalizeHiringDecisionPayload {
+  candidate_id: number;
+  job_id?: number;
+  final_decision: HiringFinalDecision;
+  reason_code: string;
+  note?: string;
+}
+
+export type HiringDecisionRecord = HiringDecision;
+
 export async function getHealth(): Promise<AppHealth> {
   return invoke<AppHealth>("app_health");
 }
@@ -427,6 +439,10 @@ export async function listScreeningResults(candidate_id: number): Promise<Screen
   return invoke<ScreeningResultRecord[]>("list_screening_results", { candidate_id });
 }
 
+export async function listHiringDecisions(candidate_id: number): Promise<HiringDecisionRecord[]> {
+  return invoke<HiringDecisionRecord[]>("list_hiring_decisions", { candidate_id });
+}
+
 export async function generateInterviewKit(
   input: GenerateInterviewKitPayload,
 ): Promise<InterviewKitRecord> {
@@ -449,6 +465,16 @@ export async function runInterviewEvaluation(
   input: RunInterviewEvaluationPayload,
 ): Promise<InterviewEvaluationRecord> {
   return invoke<InterviewEvaluationRecord>("run_interview_evaluation", { input });
+}
+
+export async function listInterviewEvaluations(candidate_id: number): Promise<InterviewEvaluationRecord[]> {
+  return invoke<InterviewEvaluationRecord[]>("list_interview_evaluations", { candidate_id });
+}
+
+export async function finalizeHiringDecision(
+  input: FinalizeHiringDecisionPayload,
+): Promise<HiringDecisionRecord> {
+  return invoke<HiringDecisionRecord>("finalize_hiring_decision", { input });
 }
 
 export async function getAiProviderSettings(): Promise<AiProviderSettings> {
