@@ -13,3 +13,4 @@ apps/desktop/src-tauri/target/
 # IDE
 .DS_Store
 .vscode/
+.idea/
