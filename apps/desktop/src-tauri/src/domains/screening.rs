@@ -1688,10 +1688,20 @@ pub(crate) fn run_resume_screening(
     }
     t0_score = round_one_decimal(t0_score.clamp(1.0, 5.0));
 
-    let t1_acc = template.dimensions.iter().fold(0.0_f64, |sum, dimension| {
-        let score = dimension_signal_score(&dimension.key, &resume_lower, candidate_years);
-        sum + (score / 5.0) * dimension.weight as f64
-    });
+    let mut t1_acc = 0.0_f64;
+    let mut t1_items = Vec::<Value>::new();
+    for dimension in &template.dimensions {
+        let signal = dimension_signal_score(&dimension.key, &resume_lower, candidate_years);
+        let weighted = (signal / 5.0) * dimension.weight as f64;
+        t1_acc += weighted;
+        t1_items.push(serde_json::json!({
+            "key": dimension.key,
+            "label": dimension.label,
+            "weight": dimension.weight,
+            "score": clamp_score(((signal / 5.0) * 100.0).round() as i32),
+            "reason": format!("{} 维度信号评分 {:.1}/5.0", dimension.label, round_one_decimal(signal)),
+        }));
+    }
     let t1_score = clamp_score(t1_acc.round() as i32);
 
     let education_level = resume_parsed
@@ -1818,15 +1828,37 @@ pub(crate) fn run_resume_screening(
         overall_score, t1_score, fine_score, bonus_score, risk_penalty
     ));
 
+    let structured_result = serde_json::json!({
+        "weights": {
+            "t0": {
+                "score": t0_score,
+                "rule": "<3不匹配，3-4建议，>=4匹配",
+                "matched": t0_score >= 3.0,
+                "details": evidence.clone(),
+            },
+            "t1": {
+                "template": template.name,
+                "items": t1_items,
+            },
+            "t2": {
+                "bonus": bonus_score,
+                "items": verification_points.clone(),
+            }
+        },
+        "risk_alerts": if risk_penalty > 0 { vec![format!("风险扣减 {}", risk_penalty)] } else { Vec::<String>::new() },
+        "overall_score": overall_score,
+        "overall_comment": recommendation,
+    });
+
     let created_at = now_iso();
     conn.execute(
         r#"
         INSERT INTO screening_results(
             candidate_id, job_id, template_id, t0_score, t1_score, fine_score,
             bonus_score, risk_penalty, overall_score, recommendation, risk_level,
-            evidence_json, verification_points_json, created_at
+            evidence_json, verification_points_json, structured_result_json, created_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
         "#,
         params![
             input.candidate_id,
@@ -1842,6 +1874,7 @@ pub(crate) fn run_resume_screening(
             risk_level,
             serde_json::to_string(&evidence).map_err(|error| error.to_string())?,
             serde_json::to_string(&verification_points).map_err(|error| error.to_string())?,
+            structured_result.to_string(),
             created_at,
         ],
     )
@@ -1863,6 +1896,7 @@ pub(crate) fn run_resume_screening(
         risk_level,
         evidence,
         verification_points,
+        structured_result,
         created_at,
     };
 
@@ -1896,7 +1930,7 @@ pub(crate) fn list_screening_results(
             r#"
             SELECT id, candidate_id, job_id, template_id, t0_score, t1_score, fine_score,
                    bonus_score, risk_penalty, overall_score, recommendation, risk_level,
-                   evidence_json, verification_points_json, created_at
+                   evidence_json, verification_points_json, structured_result_json, created_at
             FROM screening_results
             WHERE candidate_id = ?1
             ORDER BY created_at DESC
@@ -1908,6 +1942,7 @@ pub(crate) fn list_screening_results(
         .query_map([candidate_id], |row| {
             let evidence_text: String = row.get(12)?;
             let verification_text: String = row.get(13)?;
+            let structured_text: String = row.get(14)?;
             Ok(ScreeningResultRecord {
                 id: row.get(0)?,
                 candidate_id: row.get(1)?,
@@ -1923,7 +1958,9 @@ pub(crate) fn list_screening_results(
                 risk_level: row.get(11)?,
                 evidence: serde_json::from_str(&evidence_text).unwrap_or_default(),
                 verification_points: serde_json::from_str(&verification_text).unwrap_or_default(),
-                created_at: row.get(14)?,
+                structured_result: serde_json::from_str(&structured_text)
+                    .unwrap_or(Value::Object(Default::default())),
+                created_at: row.get(15)?,
             })
         })
         .map_err(|error| error.to_string())?;

@@ -69,6 +69,37 @@ pub(crate) fn resolve_qualification_stage(
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PageQuery {
+    pub(crate) page: Option<i64>,
+    pub(crate) page_size: Option<i64>,
+}
+
+impl PageQuery {
+    pub(crate) fn normalized_page(&self) -> i64 {
+        self.page.unwrap_or(1).max(1)
+    }
+
+    pub(crate) fn normalized_page_size(&self) -> i64 {
+        self.page_size.unwrap_or(20).clamp(1, 100)
+    }
+
+    pub(crate) fn offset(&self) -> i64 {
+        (self.normalized_page() - 1) * self.normalized_page_size()
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PageResult<T>
+where
+    T: Serialize,
+{
+    pub(crate) items: Vec<T>,
+    pub(crate) page: i64,
+    pub(crate) page_size: i64,
+    pub(crate) total: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum CrawlTaskStatus {

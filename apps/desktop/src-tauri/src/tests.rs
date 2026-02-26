@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::app::bootstrap::{generate_system_local_key, normalize_local_key};
 use crate::core::cipher::FieldCipher;
@@ -14,6 +15,7 @@ use crate::domains::screening::{
 };
 use crate::domains::search::build_fts_match_query;
 use crate::domains::sidecar_runtime::{sidecar_base_url, sidecar_port_candidates};
+use crate::infra::db::migrate_db;
 use crate::models::ai::TaskRuntimeSettings;
 use crate::models::common::{is_valid_transition, resolve_qualification_stage, AiProvider};
 use crate::models::screening::ScreeningDimension;
@@ -362,4 +364,72 @@ fn count_active_tasks_for_job_counts_pending_running_and_paused() {
 
     let count = count_active_crawl_tasks_for_job(&conn, 101).expect("count active tasks");
     assert_eq!(count, 3);
+}
+
+#[test]
+fn migrate_db_applies_refactor_schema_extensions() {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("duration since epoch")
+        .as_millis();
+    let db_path = std::env::temp_dir().join(format!("doss-refactor-schema-{millis}.sqlite3"));
+
+    migrate_db(&db_path).expect("migrate db");
+    let conn = Connection::open(&db_path).expect("open db");
+
+    let pending_table_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = 'pending_candidates'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("check pending_candidates table");
+    assert_eq!(pending_table_exists, 1);
+
+    let candidate_has_address: i64 = conn
+        .query_row(
+            "SELECT COUNT(1) FROM pragma_table_info('candidates') WHERE name = 'address'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("check candidates.address");
+    assert_eq!(candidate_has_address, 1);
+
+    let screening_has_structured_result: i64 = conn
+        .query_row(
+            "SELECT COUNT(1) FROM pragma_table_info('screening_results') WHERE name = 'structured_result_json'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("check screening_results.structured_result_json");
+    assert_eq!(screening_has_structured_result, 1);
+
+    let crawl_has_schedule_fields: i64 = conn
+        .query_row(
+            "SELECT COUNT(1) FROM pragma_table_info('crawl_tasks') WHERE name IN ('schedule_type', 'schedule_time', 'schedule_day', 'next_run_at')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("check crawl task schedule fields");
+    assert_eq!(crawl_has_schedule_fields, 4);
+
+    let pending_index_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(1) FROM sqlite_master WHERE type = 'index' AND name = 'idx_pending_candidates_dedupe'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("check pending dedupe index");
+    assert_eq!(pending_index_exists, 1);
+
+    let schedule_index_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(1) FROM sqlite_master WHERE type = 'index' AND name = 'idx_crawl_tasks_next_run_at'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("check next_run_at index");
+    assert_eq!(schedule_index_exists, 1);
+
+    let _ = std::fs::remove_file(db_path);
 }

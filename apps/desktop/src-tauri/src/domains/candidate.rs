@@ -1,5 +1,5 @@
 use base64::prelude::*;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
 use serde_json::Value;
 use tauri::State;
 
@@ -22,12 +22,14 @@ use crate::models::ai::{
     RunAnalysisInput,
 };
 use crate::models::candidate::{
-    Candidate, MergeCandidateImportInput, MoveStageInput, NewCandidateInput, ParseResumeFileInput,
-    ParseResumeFileOutput, PipelineEvent, ResumeRecord, SetCandidateQualificationInput,
-    UpdateCandidateInput, UpsertResumeInput,
+    Candidate, CandidateListQuery, DecisionListQuery, InterviewListQuery,
+    MergeCandidateImportInput, MoveStageInput, NewCandidateInput, ParseResumeFileInput,
+    ParseResumeFileOutput, PendingCandidate, PendingCandidateListQuery, PipelineEvent,
+    ResumeRecord, SetCandidateQualificationInput, SyncPendingCandidateInput, UpdateCandidateInput,
+    UpsertPendingCandidatesInput, UpsertResumeInput,
 };
 use crate::models::common::{
-    is_valid_transition, resolve_qualification_stage, PipelineStage, SourceType,
+    is_valid_transition, resolve_qualification_stage, PageResult, PipelineStage, SourceType,
 };
 
 pub(crate) fn merge_candidate_tags(existing: &[String], incoming: &[String]) -> Vec<String> {
@@ -82,6 +84,7 @@ pub(crate) fn candidate_from_row(
         age: row.get("age")?,
         gender: row.get("gender")?,
         years_of_experience: row.get("years_of_experience")?,
+        address: row.get("address")?,
         stage,
         tags,
         phone_masked,
@@ -98,7 +101,7 @@ fn read_candidate_by_id(
 ) -> Result<Candidate, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, external_id, source, name, current_company, linked_job_id, linked_job_title, score, age, gender, years_of_experience, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates WHERE id = ?1",
+            "SELECT id, external_id, source, name, current_company, linked_job_id, linked_job_title, score, age, gender, years_of_experience, address, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates WHERE id = ?1",
         )
         .map_err(|error| error.to_string())?;
 
@@ -139,6 +142,12 @@ pub(crate) fn create_candidate(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let address = input
+        .address
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let (linked_job_id, linked_job_title) = if let Some(job_id) = input.job_id {
         let job_title = conn
             .query_row("SELECT title FROM jobs WHERE id = ?1", [job_id], |row| {
@@ -155,9 +164,9 @@ pub(crate) fn create_candidate(
     conn.execute(
         r#"
         INSERT INTO candidates(
-            external_id, source, name, current_company, linked_job_id, linked_job_title, score, age, gender, years_of_experience, stage,
+            external_id, source, name, current_company, linked_job_id, linked_job_title, score, age, gender, years_of_experience, address, stage,
             phone_enc, phone_hash, email_enc, email_hash, tags_json, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'NEW', ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'NEW', ?12, ?13, ?14, ?15, ?16, ?17, ?18)
         "#,
         params![
             input.external_id,
@@ -170,6 +179,7 @@ pub(crate) fn create_candidate(
             age,
             gender,
             input.years_of_experience,
+            address,
             phone_encrypted,
             phone_hash,
             email_encrypted,
@@ -264,6 +274,12 @@ pub(crate) fn update_candidate(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let address = input
+        .address
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let (linked_job_id, linked_job_title) = if let Some(job_id) = input.job_id {
         let job_title = conn
             .query_row("SELECT title FROM jobs WHERE id = ?1", [job_id], |row| {
@@ -288,15 +304,16 @@ pub(crate) fn update_candidate(
                 score = COALESCE(?4, score),
                 age = COALESCE(?5, age),
                 gender = COALESCE(?6, gender),
-                tags_json = ?7,
-                phone_enc = CASE WHEN ?8 IS NOT NULL THEN ?8 ELSE phone_enc END,
-                phone_hash = CASE WHEN ?9 IS NOT NULL THEN ?9 ELSE phone_hash END,
-                email_enc = CASE WHEN ?10 IS NOT NULL THEN ?10 ELSE email_enc END,
-                email_hash = CASE WHEN ?11 IS NOT NULL THEN ?11 ELSE email_hash END,
-                linked_job_id = ?12,
-                linked_job_title = ?13,
-                updated_at = ?14
-            WHERE id = ?15
+                address = COALESCE(?7, address),
+                tags_json = ?8,
+                phone_enc = CASE WHEN ?9 IS NOT NULL THEN ?9 ELSE phone_enc END,
+                phone_hash = CASE WHEN ?10 IS NOT NULL THEN ?10 ELSE phone_hash END,
+                email_enc = CASE WHEN ?11 IS NOT NULL THEN ?11 ELSE email_enc END,
+                email_hash = CASE WHEN ?12 IS NOT NULL THEN ?12 ELSE email_hash END,
+                linked_job_id = ?13,
+                linked_job_title = ?14,
+                updated_at = ?15
+            WHERE id = ?16
             "#,
             params![
                 name,
@@ -305,6 +322,7 @@ pub(crate) fn update_candidate(
                 score,
                 age,
                 gender,
+                address,
                 tags_json,
                 phone_enc,
                 phone_hash,
@@ -487,6 +505,12 @@ pub(crate) fn merge_candidate_import(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let incoming_address = input
+        .address
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let incoming_years = input.years_of_experience.map(|value| value.max(0.0));
 
     let normalized_phone = input
@@ -530,17 +554,23 @@ pub(crate) fn merge_candidate_import(
                     THEN ?2
                     ELSE years_of_experience
                 END,
-                tags_json = ?3,
-                phone_enc = COALESCE(phone_enc, ?4),
-                phone_hash = COALESCE(phone_hash, ?5),
-                email_enc = COALESCE(email_enc, ?6),
-                email_hash = COALESCE(email_hash, ?7),
-                updated_at = ?8
-            WHERE id = ?9
+                address = CASE
+                    WHEN (address IS NULL OR trim(address) = '') AND ?3 IS NOT NULL
+                    THEN ?3
+                    ELSE address
+                END,
+                tags_json = ?4,
+                phone_enc = COALESCE(phone_enc, ?5),
+                phone_hash = COALESCE(phone_hash, ?6),
+                email_enc = COALESCE(email_enc, ?7),
+                email_hash = COALESCE(email_hash, ?8),
+                updated_at = ?9
+            WHERE id = ?10
             "#,
             params![
                 incoming_company,
                 incoming_years,
+                incoming_address,
                 merged_tags_json,
                 phone_enc,
                 phone_hash,
@@ -620,7 +650,7 @@ pub(crate) fn list_candidates(
     if let Some(filter_stage) = stage {
         let mut stmt = conn
             .prepare(
-                "SELECT id, external_id, source, name, current_company, linked_job_id, linked_job_title, score, age, gender, years_of_experience, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates WHERE stage = ?1 ORDER BY updated_at DESC",
+                "SELECT id, external_id, source, name, current_company, linked_job_id, linked_job_title, score, age, gender, years_of_experience, address, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates WHERE stage = ?1 ORDER BY updated_at DESC",
             )
             .map_err(|error| error.to_string())?;
         let rows = stmt
@@ -633,7 +663,7 @@ pub(crate) fn list_candidates(
     } else {
         let mut stmt = conn
             .prepare(
-                "SELECT id, external_id, source, name, current_company, linked_job_id, linked_job_title, score, age, gender, years_of_experience, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates ORDER BY updated_at DESC",
+                "SELECT id, external_id, source, name, current_company, linked_job_id, linked_job_title, score, age, gender, years_of_experience, address, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates ORDER BY updated_at DESC",
             )
             .map_err(|error| error.to_string())?;
         let rows = stmt
@@ -642,6 +672,762 @@ pub(crate) fn list_candidates(
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())
     }
+}
+
+fn read_candidates_page(
+    conn: &Connection,
+    cipher: &FieldCipher,
+    where_clauses: &[String],
+    params: &[SqlValue],
+    order_by: &str,
+    page: i64,
+    page_size: i64,
+) -> Result<PageResult<Candidate>, String> {
+    let where_sql = if where_clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_clauses.join(" AND "))
+    };
+
+    let count_sql = format!("SELECT COUNT(1) FROM candidates{where_sql}");
+    let total: i64 = conn
+        .query_row(&count_sql, params_from_iter(params.iter()), |row| {
+            row.get(0)
+        })
+        .map_err(|error| error.to_string())?;
+
+    let mut query_params = params.to_vec();
+    query_params.push(SqlValue::Integer(page_size));
+    query_params.push(SqlValue::Integer((page - 1) * page_size));
+
+    let list_sql = format!(
+        "SELECT id, external_id, source, name, current_company, linked_job_id, linked_job_title, score, age, gender, years_of_experience, address, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates{where_sql} ORDER BY {order_by} LIMIT ? OFFSET ?"
+    );
+    let mut stmt = conn.prepare(&list_sql).map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(params_from_iter(query_params.iter()), |row| {
+            candidate_from_row(row, cipher)
+        })
+        .map_err(|error| error.to_string())?;
+    let items = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    Ok(PageResult {
+        items,
+        page,
+        page_size,
+        total,
+    })
+}
+
+fn normalize_sort_order(order: Option<&str>) -> &'static str {
+    match order
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("asc") => "ASC",
+        _ => "DESC",
+    }
+}
+
+#[tauri::command]
+pub(crate) fn list_candidates_page(
+    state: State<'_, AppState>,
+    input: Option<CandidateListQuery>,
+) -> Result<PageResult<Candidate>, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let query = input.unwrap_or(CandidateListQuery {
+        page: crate::models::common::PageQuery {
+            page: None,
+            page_size: None,
+        },
+        job_id: None,
+        name_like: None,
+        stage: None,
+        sort_by: None,
+        sort_order: None,
+    });
+
+    let mut where_clauses = Vec::<String>::new();
+    let mut params = Vec::<SqlValue>::new();
+
+    if let Some(job_id) = query.job_id {
+        where_clauses.push("linked_job_id = ?".to_string());
+        params.push(SqlValue::Integer(job_id));
+    }
+    if let Some(stage) = query.stage {
+        where_clauses.push("stage = ?".to_string());
+        params.push(SqlValue::Text(stage.as_db().to_string()));
+    }
+    if let Some(name_like) = query
+        .name_like
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        where_clauses.push("name LIKE ?".to_string());
+        params.push(SqlValue::Text(format!("%{name_like}%")));
+    }
+
+    let sort_order = normalize_sort_order(query.sort_order.as_deref());
+    let order_by = match query
+        .sort_by
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("score") => format!("score {sort_order}, updated_at DESC"),
+        Some("updated_at") => format!("updated_at {sort_order}, id DESC"),
+        Some("created_at") => format!("created_at {sort_order}, id DESC"),
+        Some("job_title") => format!("linked_job_title {sort_order}, score DESC"),
+        _ => "linked_job_title ASC, score DESC, updated_at DESC".to_string(),
+    };
+
+    read_candidates_page(
+        &conn,
+        &state.cipher,
+        &where_clauses,
+        &params,
+        &order_by,
+        query.page.normalized_page(),
+        query.page.normalized_page_size(),
+    )
+}
+
+#[tauri::command]
+pub(crate) fn list_interview_candidates_page(
+    state: State<'_, AppState>,
+    input: Option<InterviewListQuery>,
+) -> Result<PageResult<Candidate>, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let query = input.unwrap_or(InterviewListQuery {
+        page: crate::models::common::PageQuery {
+            page: None,
+            page_size: None,
+        },
+        job_id: None,
+        name_like: None,
+    });
+
+    let mut where_clauses = vec!["stage = 'INTERVIEW'".to_string()];
+    let mut params = Vec::<SqlValue>::new();
+    if let Some(job_id) = query.job_id {
+        where_clauses.push("linked_job_id = ?".to_string());
+        params.push(SqlValue::Integer(job_id));
+    }
+    if let Some(name_like) = query
+        .name_like
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        where_clauses.push("name LIKE ?".to_string());
+        params.push(SqlValue::Text(format!("%{name_like}%")));
+    }
+
+    read_candidates_page(
+        &conn,
+        &state.cipher,
+        &where_clauses,
+        &params,
+        "updated_at DESC",
+        query.page.normalized_page(),
+        query.page.normalized_page_size(),
+    )
+}
+
+#[tauri::command]
+pub(crate) fn list_decision_candidates_page(
+    state: State<'_, AppState>,
+    input: Option<DecisionListQuery>,
+) -> Result<PageResult<Candidate>, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let query = input.unwrap_or(DecisionListQuery {
+        page: crate::models::common::PageQuery {
+            page: None,
+            page_size: None,
+        },
+        job_id: None,
+        name_like: None,
+        interview_passed: None,
+    });
+
+    let mut where_clauses = vec![
+        "(EXISTS (SELECT 1 FROM interview_evaluations ie WHERE ie.candidate_id = candidates.id) OR EXISTS (SELECT 1 FROM hiring_decisions hd WHERE hd.candidate_id = candidates.id))"
+            .to_string(),
+    ];
+    let mut params = Vec::<SqlValue>::new();
+    if let Some(job_id) = query.job_id {
+        where_clauses.push("linked_job_id = ?".to_string());
+        params.push(SqlValue::Integer(job_id));
+    }
+    if let Some(name_like) = query
+        .name_like
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        where_clauses.push("name LIKE ?".to_string());
+        params.push(SqlValue::Text(format!("%{name_like}%")));
+    }
+    if let Some(interview_passed) = query.interview_passed {
+        if interview_passed {
+            where_clauses.push("EXISTS (SELECT 1 FROM interview_evaluations ie2 WHERE ie2.candidate_id = candidates.id AND ie2.recommendation = 'HIRE')".to_string());
+        } else {
+            where_clauses.push("EXISTS (SELECT 1 FROM interview_evaluations ie2 WHERE ie2.candidate_id = candidates.id) AND NOT EXISTS (SELECT 1 FROM interview_evaluations ie3 WHERE ie3.candidate_id = candidates.id AND ie3.recommendation = 'HIRE')".to_string());
+        }
+    }
+
+    read_candidates_page(
+        &conn,
+        &state.cipher,
+        &where_clauses,
+        &params,
+        "updated_at DESC",
+        query.page.normalized_page(),
+        query.page.normalized_page_size(),
+    )
+}
+
+fn build_pending_dedupe_key(name: &str, age: Option<i32>, address: Option<&str>) -> String {
+    let normalized_name = name.trim().to_lowercase();
+    let normalized_age = age.map(|value| value.to_string()).unwrap_or_default();
+    let normalized_address = address.unwrap_or("").trim().to_lowercase();
+    format!("{normalized_name}|{normalized_age}|{normalized_address}")
+}
+
+fn pending_candidate_from_row(
+    row: &rusqlite::Row<'_>,
+    cipher: &FieldCipher,
+) -> Result<PendingCandidate, rusqlite::Error> {
+    let tags_text: String = row.get("tags_json")?;
+    let resume_parsed_text: String = row.get("resume_parsed_json")?;
+    let phone_masked = row
+        .get::<_, Option<String>>("phone_enc")?
+        .and_then(|value| cipher.decrypt(&value).ok())
+        .map(|value| mask_phone(&value));
+    let email_masked = row
+        .get::<_, Option<String>>("email_enc")?
+        .and_then(|value| cipher.decrypt(&value).ok())
+        .map(|value| mask_email(&value));
+
+    Ok(PendingCandidate {
+        id: row.get("id")?,
+        source: row.get("source")?,
+        external_id: row.get("external_id")?,
+        name: row.get("name")?,
+        current_company: row.get("current_company")?,
+        job_id: row.get("linked_job_id")?,
+        job_title: row.get("linked_job_title")?,
+        age: row.get("age")?,
+        gender: row.get("gender")?,
+        years_of_experience: row.get("years_of_experience")?,
+        tags: serde_json::from_str(&tags_text).unwrap_or_default(),
+        phone_masked,
+        email_masked,
+        address: row.get("address")?,
+        extra_notes: row.get("extra_notes")?,
+        resume_raw_text: row.get("resume_raw_text")?,
+        resume_parsed: serde_json::from_str(&resume_parsed_text)
+            .unwrap_or(Value::Object(Default::default())),
+        dedupe_key: row.get("dedupe_key")?,
+        sync_status: row.get("sync_status")?,
+        sync_error_code: row.get("sync_error_code")?,
+        sync_error_message: row.get("sync_error_message")?,
+        candidate_id: row.get("candidate_id")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+#[tauri::command]
+pub(crate) fn upsert_pending_candidates(
+    state: State<'_, AppState>,
+    input: UpsertPendingCandidatesInput,
+) -> Result<Vec<PendingCandidate>, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let now = now_iso();
+    let mut upserted = Vec::<PendingCandidate>::new();
+
+    for item in input.items {
+        let name = item.name.trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+
+        let source = item
+            .source
+            .unwrap_or(SourceType::Manual)
+            .as_db()
+            .to_string();
+        let years = item.years_of_experience.unwrap_or(0.0).max(0.0);
+        let tags = merge_candidate_tags(&[], &item.tags.unwrap_or_default());
+        let tags_json = serde_json::to_string(&tags).map_err(|error| error.to_string())?;
+        let resume_parsed = item
+            .resume_parsed
+            .unwrap_or(Value::Object(Default::default()));
+        let dedupe_key = item
+            .dedupe_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                build_pending_dedupe_key(
+                    &name,
+                    item.age.filter(|value| *value >= 0),
+                    item.address.as_deref(),
+                )
+            });
+
+        let normalized_phone = item
+            .phone
+            .as_deref()
+            .map(normalize_phone)
+            .filter(|value| !value.is_empty());
+        let phone_hash = normalized_phone.as_deref().map(hash_value);
+        let phone_enc = normalized_phone
+            .as_deref()
+            .map(|value| state.cipher.encrypt(value))
+            .transpose()
+            .map_err(|error| error.to_string())?;
+
+        let normalized_email = item
+            .email
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let email_hash = normalized_email.as_deref().map(hash_value);
+        let email_enc = normalized_email
+            .as_deref()
+            .map(|value| state.cipher.encrypt(value))
+            .transpose()
+            .map_err(|error| error.to_string())?;
+
+        let (linked_job_id, linked_job_title) = if let Some(job_id) = item.job_id {
+            let job_title = conn
+                .query_row("SELECT title FROM jobs WHERE id = ?1", [job_id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("Job {} not found", job_id))?;
+            (Some(job_id), Some(job_title))
+        } else {
+            (None, None)
+        };
+
+        conn.execute(
+            r#"
+            INSERT INTO pending_candidates(
+                source, external_id, name, current_company, linked_job_id, linked_job_title,
+                age, gender, years_of_experience, tags_json,
+                phone_enc, phone_hash, email_enc, email_hash,
+                address, extra_notes, resume_raw_text, resume_parsed_json,
+                dedupe_key, sync_status, created_at, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, 'UNSYNCED', ?20, ?21)
+            ON CONFLICT(dedupe_key)
+            DO UPDATE SET
+                source = excluded.source,
+                external_id = excluded.external_id,
+                name = excluded.name,
+                current_company = excluded.current_company,
+                linked_job_id = excluded.linked_job_id,
+                linked_job_title = excluded.linked_job_title,
+                age = excluded.age,
+                gender = excluded.gender,
+                years_of_experience = excluded.years_of_experience,
+                tags_json = excluded.tags_json,
+                phone_enc = COALESCE(pending_candidates.phone_enc, excluded.phone_enc),
+                phone_hash = COALESCE(pending_candidates.phone_hash, excluded.phone_hash),
+                email_enc = COALESCE(pending_candidates.email_enc, excluded.email_enc),
+                email_hash = COALESCE(pending_candidates.email_hash, excluded.email_hash),
+                address = excluded.address,
+                extra_notes = excluded.extra_notes,
+                resume_raw_text = excluded.resume_raw_text,
+                resume_parsed_json = excluded.resume_parsed_json,
+                sync_status = CASE
+                    WHEN pending_candidates.sync_status = 'SYNCED' THEN pending_candidates.sync_status
+                    ELSE 'UNSYNCED'
+                END,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                source,
+                item.external_id,
+                name,
+                item.current_company,
+                linked_job_id,
+                linked_job_title,
+                item.age.filter(|value| *value >= 0),
+                item.gender,
+                years,
+                tags_json,
+                phone_enc,
+                phone_hash,
+                email_enc,
+                email_hash,
+                item.address,
+                item.extra_notes,
+                item.resume_raw_text,
+                resume_parsed.to_string(),
+                dedupe_key,
+                now,
+                now,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+        let pending = conn
+            .query_row(
+                "SELECT id, source, external_id, name, current_company, linked_job_id, linked_job_title, age, gender, years_of_experience, tags_json, phone_enc, email_enc, address, extra_notes, resume_raw_text, resume_parsed_json, dedupe_key, sync_status, sync_error_code, sync_error_message, candidate_id, created_at, updated_at FROM pending_candidates WHERE dedupe_key = ?1",
+                [dedupe_key],
+                |row| pending_candidate_from_row(row, &state.cipher),
+            )
+            .map_err(|error| error.to_string())?;
+        upserted.push(pending);
+    }
+
+    write_audit(
+        &conn,
+        "pending_candidates.upsert",
+        "pending_candidate",
+        None,
+        serde_json::json!({ "count": upserted.len() }),
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(upserted)
+}
+
+#[tauri::command]
+pub(crate) fn list_pending_candidates(
+    state: State<'_, AppState>,
+    input: Option<PendingCandidateListQuery>,
+) -> Result<PageResult<PendingCandidate>, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let query = input.unwrap_or(PendingCandidateListQuery {
+        page: crate::models::common::PageQuery {
+            page: None,
+            page_size: None,
+        },
+        sync_status: None,
+        name_like: None,
+        job_id: None,
+    });
+
+    let mut where_clauses = Vec::<String>::new();
+    let mut params = Vec::<SqlValue>::new();
+    if let Some(sync_status) = query
+        .sync_status
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        where_clauses.push("sync_status = ?".to_string());
+        params.push(SqlValue::Text(sync_status.to_uppercase()));
+    }
+    if let Some(name_like) = query
+        .name_like
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        where_clauses.push("name LIKE ?".to_string());
+        params.push(SqlValue::Text(format!("%{name_like}%")));
+    }
+    if let Some(job_id) = query.job_id {
+        where_clauses.push("linked_job_id = ?".to_string());
+        params.push(SqlValue::Integer(job_id));
+    }
+
+    let where_sql = if where_clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_clauses.join(" AND "))
+    };
+    let total_sql = format!("SELECT COUNT(1) FROM pending_candidates{where_sql}");
+    let total: i64 = conn
+        .query_row(&total_sql, params_from_iter(params.iter()), |row| {
+            row.get(0)
+        })
+        .map_err(|error| error.to_string())?;
+
+    let page = query.page.normalized_page();
+    let page_size = query.page.normalized_page_size();
+    let mut query_params = params.clone();
+    query_params.push(SqlValue::Integer(page_size));
+    query_params.push(SqlValue::Integer(query.page.offset()));
+
+    let list_sql = format!(
+        "SELECT id, source, external_id, name, current_company, linked_job_id, linked_job_title, age, gender, years_of_experience, tags_json, phone_enc, email_enc, address, extra_notes, resume_raw_text, resume_parsed_json, dedupe_key, sync_status, sync_error_code, sync_error_message, candidate_id, created_at, updated_at FROM pending_candidates{where_sql} ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+    );
+    let mut stmt = conn.prepare(&list_sql).map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(params_from_iter(query_params.iter()), |row| {
+            pending_candidate_from_row(row, &state.cipher)
+        })
+        .map_err(|error| error.to_string())?;
+    let items = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    Ok(PageResult {
+        items,
+        page,
+        page_size,
+        total,
+    })
+}
+
+#[tauri::command]
+pub(crate) fn sync_pending_candidate_to_candidate(
+    state: State<'_, AppState>,
+    input: SyncPendingCandidateInput,
+) -> Result<Candidate, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+
+    let pending = conn
+        .query_row(
+            "SELECT id, source, external_id, name, current_company, linked_job_id, linked_job_title, age, gender, years_of_experience, tags_json, phone_enc, phone_hash, email_enc, email_hash, address, resume_raw_text, resume_parsed_json, candidate_id FROM pending_candidates WHERE id = ?1",
+            [input.pending_candidate_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<i32>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, f64>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, Option<String>>(13)?,
+                    row.get::<_, Option<String>>(14)?,
+                    row.get::<_, Option<String>>(15)?,
+                    row.get::<_, Option<String>>(16)?,
+                    row.get::<_, String>(17)?,
+                    row.get::<_, Option<i64>>(18)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Pending candidate {} not found", input.pending_candidate_id))?;
+
+    let existing_candidate_id = if let Some(candidate_id) = pending.18 {
+        conn.query_row(
+            "SELECT id FROM candidates WHERE id = ?1",
+            [candidate_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    } else if let Some(email_hash) = pending.14.as_deref() {
+        conn.query_row(
+            "SELECT id FROM candidates WHERE email_hash = ?1 LIMIT 1",
+            [email_hash],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    } else if let Some(phone_hash) = pending.12.as_deref() {
+        conn.query_row(
+            "SELECT id FROM candidates WHERE phone_hash = ?1 LIMIT 1",
+            [phone_hash],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    } else {
+        None
+    };
+
+    let pending_tags: Vec<String> = serde_json::from_str(&pending.10).unwrap_or_default();
+    let now = now_iso();
+    let candidate_id = if let Some(candidate_id) = existing_candidate_id {
+        let existing_tags_json: String = conn
+            .query_row(
+                "SELECT tags_json FROM candidates WHERE id = ?1",
+                [candidate_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let existing_tags: Vec<String> =
+            serde_json::from_str(&existing_tags_json).unwrap_or_default();
+        let merged_tags = merge_candidate_tags(&existing_tags, &pending_tags);
+        let merged_tags_json =
+            serde_json::to_string(&merged_tags).map_err(|error| error.to_string())?;
+
+        conn.execute(
+            r#"
+            UPDATE candidates
+            SET
+                external_id = COALESCE(external_id, ?1),
+                source = ?2,
+                name = ?3,
+                current_company = CASE
+                    WHEN (current_company IS NULL OR trim(current_company) = '') AND ?4 IS NOT NULL
+                    THEN ?4
+                    ELSE current_company
+                END,
+                linked_job_id = COALESCE(linked_job_id, ?5),
+                linked_job_title = COALESCE(linked_job_title, ?6),
+                age = COALESCE(age, ?7),
+                gender = COALESCE(gender, ?8),
+                years_of_experience = CASE
+                    WHEN ?9 > years_of_experience THEN ?9
+                    ELSE years_of_experience
+                END,
+                address = CASE
+                    WHEN (address IS NULL OR trim(address) = '') AND ?10 IS NOT NULL
+                    THEN ?10
+                    ELSE address
+                END,
+                tags_json = ?11,
+                phone_enc = COALESCE(phone_enc, ?12),
+                phone_hash = COALESCE(phone_hash, ?13),
+                email_enc = COALESCE(email_enc, ?14),
+                email_hash = COALESCE(email_hash, ?15),
+                updated_at = ?16
+            WHERE id = ?17
+            "#,
+            params![
+                pending.2,
+                pending.1,
+                pending.3,
+                pending.4,
+                pending.5,
+                pending.6,
+                pending.7,
+                pending.8,
+                pending.9,
+                pending.15,
+                merged_tags_json,
+                pending.11,
+                pending.12,
+                pending.13,
+                pending.14,
+                now,
+                candidate_id,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+        candidate_id
+    } else {
+        conn.execute(
+            r#"
+            INSERT INTO candidates(
+                external_id, source, name, current_company, linked_job_id, linked_job_title,
+                score, age, gender, years_of_experience, address, stage,
+                phone_enc, phone_hash, email_enc, email_hash, tags_json, created_at, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, 'NEW', ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+            "#,
+            params![
+                pending.2,
+                pending.1,
+                pending.3,
+                pending.4,
+                pending.5,
+                pending.6,
+                pending.7,
+                pending.8,
+                pending.9,
+                pending.15,
+                pending.11,
+                pending.12,
+                pending.13,
+                pending.14,
+                pending.10,
+                now,
+                now,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        conn.last_insert_rowid()
+    };
+
+    if let Some(job_id) = pending.5 {
+        let stage_text: String = conn
+            .query_row(
+                "SELECT stage FROM candidates WHERE id = ?1",
+                [candidate_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        conn.execute(
+            r#"
+            INSERT INTO applications(job_id, candidate_id, stage, notes, created_at, updated_at)
+            VALUES (?1, ?2, ?3, NULL, ?4, ?5)
+            ON CONFLICT(job_id, candidate_id)
+            DO UPDATE SET stage = excluded.stage, updated_at = excluded.updated_at
+            "#,
+            params![job_id, candidate_id, stage_text, now, now],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    let resume_raw_text = pending
+        .16
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_default();
+    if !resume_raw_text.is_empty() || pending.17 != "{}" {
+        conn.execute(
+            r#"
+            INSERT INTO resumes(candidate_id, source, raw_text, parsed_json, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(candidate_id)
+            DO UPDATE SET source = excluded.source, raw_text = excluded.raw_text, parsed_json = excluded.parsed_json, updated_at = excluded.updated_at
+            "#,
+            params![candidate_id, pending.1, resume_raw_text, pending.17, now, now],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    conn.execute(
+        r#"
+        UPDATE pending_candidates
+        SET sync_status = 'SYNCED',
+            sync_error_code = NULL,
+            sync_error_message = NULL,
+            candidate_id = ?1,
+            updated_at = ?2
+        WHERE id = ?3
+        "#,
+        params![candidate_id, now_iso(), input.pending_candidate_id],
+    )
+    .map_err(|error| error.to_string())?;
+
+    sync_candidate_search(&conn, candidate_id).map_err(|error| error.to_string())?;
+    let _ = input.run_screening.unwrap_or(false);
+
+    let candidate = read_candidate_by_id(&conn, candidate_id, &state.cipher)?;
+    write_audit(
+        &conn,
+        "pending_candidate.sync",
+        "pending_candidate",
+        Some(input.pending_candidate_id.to_string()),
+        serde_json::json!({
+            "pendingCandidateId": input.pending_candidate_id,
+            "candidateId": candidate.id
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(candidate)
 }
 
 #[tauri::command]

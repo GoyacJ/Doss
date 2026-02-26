@@ -41,6 +41,7 @@ pub(crate) fn migrate_db(db_path: &Path) -> AppResult<()> {
             age INTEGER,
             gender TEXT,
             years_of_experience REAL NOT NULL DEFAULT 0,
+            address TEXT,
             stage TEXT NOT NULL DEFAULT 'NEW',
             phone_enc TEXT,
             phone_hash TEXT,
@@ -140,6 +141,7 @@ pub(crate) fn migrate_db(db_path: &Path) -> AppResult<()> {
             risk_level TEXT NOT NULL,
             evidence_json TEXT NOT NULL,
             verification_points_json TEXT NOT NULL,
+            structured_result_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
             FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
             FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE SET NULL,
@@ -228,6 +230,10 @@ pub(crate) fn migrate_db(db_path: &Path) -> AppResult<()> {
             error_code TEXT,
             payload_json TEXT NOT NULL,
             snapshot_json TEXT,
+            schedule_type TEXT NOT NULL DEFAULT 'ONCE',
+            schedule_time TEXT,
+            schedule_day INTEGER,
+            next_run_at TEXT,
             started_at TEXT,
             finished_at TEXT,
             created_at TEXT NOT NULL,
@@ -254,6 +260,37 @@ pub(crate) fn migrate_db(db_path: &Path) -> AppResult<()> {
             UNIQUE(task_id, dedupe_key)
         );
 
+        CREATE TABLE IF NOT EXISTS pending_candidates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL DEFAULT 'manual',
+            external_id TEXT,
+            name TEXT NOT NULL,
+            current_company TEXT,
+            linked_job_id INTEGER,
+            linked_job_title TEXT,
+            age INTEGER,
+            gender TEXT,
+            years_of_experience REAL NOT NULL DEFAULT 0,
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            phone_enc TEXT,
+            phone_hash TEXT,
+            email_enc TEXT,
+            email_hash TEXT,
+            address TEXT,
+            extra_notes TEXT,
+            resume_raw_text TEXT,
+            resume_parsed_json TEXT NOT NULL DEFAULT '{}',
+            dedupe_key TEXT NOT NULL,
+            sync_status TEXT NOT NULL DEFAULT 'UNSYNCED',
+            sync_error_code TEXT,
+            sync_error_message TEXT,
+            candidate_id INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE SET NULL,
+            UNIQUE(dedupe_key)
+        );
+
         CREATE TABLE IF NOT EXISTS audit_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             action TEXT NOT NULL,
@@ -274,8 +311,11 @@ pub(crate) fn migrate_db(db_path: &Path) -> AppResult<()> {
         CREATE INDEX IF NOT EXISTS idx_candidates_stage ON candidates(stage);
         CREATE INDEX IF NOT EXISTS idx_applications_job_stage ON applications(job_id, stage);
         CREATE INDEX IF NOT EXISTS idx_crawl_tasks_status ON crawl_tasks(status);
+        CREATE INDEX IF NOT EXISTS idx_crawl_tasks_next_run_at ON crawl_tasks(next_run_at);
         CREATE INDEX IF NOT EXISTS idx_crawl_task_people_task ON crawl_task_people(task_id, updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_crawl_task_people_sync ON crawl_task_people(task_id, sync_status);
+        CREATE INDEX IF NOT EXISTS idx_pending_candidates_dedupe ON pending_candidates(dedupe_key);
+        CREATE INDEX IF NOT EXISTS idx_pending_candidates_sync_status ON pending_candidates(sync_status, updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_screening_results_candidate ON screening_results(candidate_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_interview_kits_candidate ON interview_kits(candidate_id, updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_interview_feedback_candidate ON interview_feedback(candidate_id, created_at DESC);
@@ -306,6 +346,21 @@ pub(crate) fn migrate_db(db_path: &Path) -> AppResult<()> {
         "ALTER TABLE candidates ADD COLUMN linked_job_title TEXT",
         [],
     );
+    let _ = conn.execute("ALTER TABLE candidates ADD COLUMN address TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE screening_results ADD COLUMN structured_result_json TEXT NOT NULL DEFAULT '{}'",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE crawl_tasks ADD COLUMN schedule_type TEXT NOT NULL DEFAULT 'ONCE'",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE crawl_tasks ADD COLUMN schedule_time TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE crawl_tasks ADD COLUMN schedule_day INTEGER",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE crawl_tasks ADD COLUMN next_run_at TEXT", []);
 
     let _ = conn.execute(
         r#"

@@ -23,6 +23,19 @@ export type PipelineStage =
   | "OFFERED";
 
 export type CandidateGender = "male" | "female" | "other";
+export type CrawlTaskScheduleType = "ONCE" | "DAILY" | "MONTHLY";
+
+export interface PageQuery {
+  page?: number;
+  page_size?: number;
+}
+
+export interface PageResult<T> {
+  items: T[];
+  page: number;
+  page_size: number;
+  total: number;
+}
 
 export interface CandidateBasic {
   name: string;
@@ -124,6 +137,7 @@ export interface ScreeningResult {
   risk_level: ScreeningRiskLevel;
   evidence: string[];
   verification_points: string[];
+  structured_result: Record<string, unknown>;
   created_at: string;
 }
 
@@ -215,6 +229,7 @@ export interface CandidateRecord {
   age?: number | null;
   gender?: CandidateGender | null;
   years_of_experience: number;
+  address?: string | null;
   stage: PipelineStage;
   tags: string[];
   phone_masked?: string | null;
@@ -243,10 +258,33 @@ export interface CrawlTaskRecord {
   error_code?: string | null;
   payload: Record<string, unknown>;
   snapshot?: Record<string, unknown> | null;
+  schedule_type?: CrawlTaskScheduleType;
+  schedule_time?: string | null;
+  schedule_day?: number | null;
+  next_run_at?: string | null;
   started_at?: string | null;
   finished_at?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface CandidateListQuery extends PageQuery {
+  job_id?: number;
+  name_like?: string;
+  stage?: PipelineStage;
+  sort_by?: "job_title" | "score" | "updated_at" | "created_at";
+  sort_order?: "asc" | "desc";
+}
+
+export interface InterviewListQuery extends PageQuery {
+  job_id?: number;
+  name_like?: string;
+}
+
+export interface DecisionListQuery extends PageQuery {
+  job_id?: number;
+  name_like?: string;
+  interview_passed?: boolean;
 }
 
 export type CrawlTaskPersonSyncStatus = "UNSYNCED" | "SYNCED" | "FAILED";

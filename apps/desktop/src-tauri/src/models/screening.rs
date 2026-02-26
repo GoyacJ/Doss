@@ -71,5 +71,6 @@ pub(crate) struct ScreeningResultRecord {
     pub(crate) risk_level: String,
     pub(crate) evidence: Vec<String>,
     pub(crate) verification_points: Vec<String>,
+    pub(crate) structured_result: Value,
     pub(crate) created_at: String,
 }
