@@ -85,3 +85,16 @@ pub(crate) struct InterviewEvaluationPayload {
     pub(crate) verification_points: Vec<String>,
     pub(crate) uncertainty: String,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SaveInterviewRecordingInput {
+    pub(crate) file_name: String,
+    pub(crate) content_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SaveInterviewRecordingOutput {
+    pub(crate) recording_path: String,
+    pub(crate) size: usize,
+    pub(crate) created_at: String,
+}

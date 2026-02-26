@@ -15,7 +15,7 @@ use crate::models::crawl::{
 
 fn read_task_by_id(conn: &Connection, task_id: i64) -> Result<CrawlTask, String> {
     conn.query_row(
-        "SELECT id, source, mode, task_type, status, retry_count, error_code, payload_json, snapshot_json, started_at, finished_at, created_at, updated_at FROM crawl_tasks WHERE id = ?1",
+        "SELECT id, source, mode, task_type, status, retry_count, error_code, payload_json, snapshot_json, schedule_type, schedule_time, schedule_day, next_run_at, started_at, finished_at, created_at, updated_at FROM crawl_tasks WHERE id = ?1",
         [task_id],
         |row| {
             let payload_text: String = row.get(7)?;
@@ -30,10 +30,14 @@ fn read_task_by_id(conn: &Connection, task_id: i64) -> Result<CrawlTask, String>
                 error_code: row.get(6)?,
                 payload: serde_json::from_str(&payload_text).unwrap_or(Value::Null),
                 snapshot: snapshot_text.and_then(|value| serde_json::from_str(&value).ok()),
-                started_at: row.get(9)?,
-                finished_at: row.get(10)?,
-                created_at: row.get(11)?,
-                updated_at: row.get(12)?,
+                schedule_type: row.get(9)?,
+                schedule_time: row.get(10)?,
+                schedule_day: row.get(11)?,
+                next_run_at: row.get(12)?,
+                started_at: row.get(13)?,
+                finished_at: row.get(14)?,
+                created_at: row.get(15)?,
+                updated_at: row.get(16)?,
             })
         },
     )
@@ -46,6 +50,18 @@ fn normalize_sync_status(input: Option<&str>) -> String {
         normalized
     } else {
         "UNSYNCED".to_string()
+    }
+}
+
+fn normalize_schedule_type(value: Option<&str>) -> &'static str {
+    match value
+        .map(|raw| raw.trim().to_uppercase())
+        .unwrap_or_else(|| "ONCE".to_string())
+        .as_str()
+    {
+        "DAILY" => "DAILY",
+        "MONTHLY" => "MONTHLY",
+        _ => "ONCE",
     }
 }
 
@@ -114,18 +130,27 @@ pub(crate) fn create_crawl_task(
 ) -> Result<CrawlTask, String> {
     let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
     let now = now_iso();
+    let schedule_type = normalize_schedule_type(input.schedule_type.as_deref());
     conn.execute(
         r#"
-        INSERT INTO crawl_tasks(source, mode, task_type, status, retry_count, error_code, payload_json, snapshot_json, started_at, finished_at, created_at, updated_at)
-        VALUES (?1, ?2, ?3, 'PENDING', 0, NULL, ?4, NULL, NULL, NULL, ?5, ?6)
+        INSERT INTO crawl_tasks(
+            source, mode, task_type, status, retry_count, error_code, payload_json, snapshot_json,
+            schedule_type, schedule_time, schedule_day, next_run_at,
+            started_at, finished_at, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, 'PENDING', 0, NULL, ?4, NULL, ?5, ?6, ?7, ?8, NULL, NULL, ?9, ?10)
         "#,
         params![
             input.source.as_db(),
             input.mode.as_db(),
             input.task_type,
             input.payload.to_string(),
+            schedule_type,
+            input.schedule_time,
+            input.schedule_day,
+            input.next_run_at,
             now,
-            now,
+            now
         ],
     )
     .map_err(|error| error.to_string())?;
@@ -174,6 +199,10 @@ pub(crate) fn update_crawl_task(
     } else {
         None
     };
+    let schedule_type = input
+        .schedule_type
+        .as_deref()
+        .map(|value| normalize_schedule_type(Some(value)).to_string());
 
     conn.execute(
         r#"
@@ -182,16 +211,24 @@ pub(crate) fn update_crawl_task(
             retry_count = COALESCE(?2, retry_count),
             error_code = ?3,
             snapshot_json = ?4,
-            started_at = COALESCE(?5, started_at),
-            finished_at = COALESCE(?6, finished_at),
-            updated_at = ?7
-        WHERE id = ?8
+            schedule_type = COALESCE(?5, schedule_type),
+            schedule_time = COALESCE(?6, schedule_time),
+            schedule_day = COALESCE(?7, schedule_day),
+            next_run_at = COALESCE(?8, next_run_at),
+            started_at = COALESCE(?9, started_at),
+            finished_at = COALESCE(?10, finished_at),
+            updated_at = ?11
+        WHERE id = ?12
         "#,
         params![
             input.status.as_db(),
             input.retry_count,
             input.error_code,
             input.snapshot.map(|value| value.to_string()),
+            schedule_type,
+            input.schedule_time,
+            input.schedule_day,
+            input.next_run_at,
             started_at,
             finished_at,
             now,
@@ -219,7 +256,7 @@ pub(crate) fn list_crawl_tasks(state: State<'_, AppState>) -> Result<Vec<CrawlTa
     let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, source, mode, task_type, status, retry_count, error_code, payload_json, snapshot_json, started_at, finished_at, created_at, updated_at FROM crawl_tasks ORDER BY updated_at DESC",
+            "SELECT id, source, mode, task_type, status, retry_count, error_code, payload_json, snapshot_json, schedule_type, schedule_time, schedule_day, next_run_at, started_at, finished_at, created_at, updated_at FROM crawl_tasks ORDER BY updated_at DESC",
         )
         .map_err(|error| error.to_string())?;
 
@@ -237,10 +274,14 @@ pub(crate) fn list_crawl_tasks(state: State<'_, AppState>) -> Result<Vec<CrawlTa
                 error_code: row.get(6)?,
                 payload: serde_json::from_str(&payload_text).unwrap_or(Value::Null),
                 snapshot: snapshot_text.and_then(|value| serde_json::from_str(&value).ok()),
-                started_at: row.get(9)?,
-                finished_at: row.get(10)?,
-                created_at: row.get(11)?,
-                updated_at: row.get(12)?,
+                schedule_type: row.get(9)?,
+                schedule_time: row.get(10)?,
+                schedule_day: row.get(11)?,
+                next_run_at: row.get(12)?,
+                started_at: row.get(13)?,
+                finished_at: row.get(14)?,
+                created_at: row.get(15)?,
+                updated_at: row.get(16)?,
             })
         })
         .map_err(|error| error.to_string())?;

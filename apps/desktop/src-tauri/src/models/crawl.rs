@@ -14,6 +14,10 @@ pub(crate) struct CrawlTask {
     pub(crate) error_code: Option<String>,
     pub(crate) payload: Value,
     pub(crate) snapshot: Option<Value>,
+    pub(crate) schedule_type: String,
+    pub(crate) schedule_time: Option<String>,
+    pub(crate) schedule_day: Option<i32>,
+    pub(crate) next_run_at: Option<String>,
     pub(crate) started_at: Option<String>,
     pub(crate) finished_at: Option<String>,
     pub(crate) created_at: String,
@@ -26,6 +30,10 @@ pub(crate) struct NewCrawlTaskInput {
     pub(crate) mode: CrawlMode,
     pub(crate) task_type: String,
     pub(crate) payload: Value,
+    pub(crate) schedule_type: Option<String>,
+    pub(crate) schedule_time: Option<String>,
+    pub(crate) schedule_day: Option<i32>,
+    pub(crate) next_run_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -35,6 +43,10 @@ pub(crate) struct UpdateCrawlTaskInput {
     pub(crate) retry_count: Option<i32>,
     pub(crate) error_code: Option<String>,
     pub(crate) snapshot: Option<Value>,
+    pub(crate) schedule_type: Option<String>,
+    pub(crate) schedule_time: Option<String>,
+    pub(crate) schedule_day: Option<i32>,
+    pub(crate) next_run_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

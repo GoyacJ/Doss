@@ -1,5 +1,8 @@
+use base64::prelude::*;
 use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
+use std::fs;
+use std::path::Path;
 use tauri::State;
 
 use crate::core::state::AppState;
@@ -14,8 +17,47 @@ use crate::infra::db::open_connection;
 use crate::models::interview::{
     GenerateInterviewKitInput, InterviewEvaluationRecord, InterviewFeedbackRecord,
     InterviewKitRecord, InterviewQuestion, RunInterviewEvaluationInput, SaveInterviewKitInput,
-    SubmitInterviewFeedbackInput,
+    SaveInterviewRecordingInput, SaveInterviewRecordingOutput, SubmitInterviewFeedbackInput,
 };
+
+fn safe_recording_file_stem(file_name: &str) -> String {
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("interview")
+        .trim();
+    let normalized = stem
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if normalized.is_empty() {
+        "interview".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn safe_recording_extension(file_name: &str) -> &'static str {
+    match Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.trim().to_lowercase())
+        .as_deref()
+    {
+        Some("wav") => "wav",
+        Some("mp3") => "mp3",
+        Some("m4a") => "m4a",
+        Some("aac") => "aac",
+        Some("ogg") => "ogg",
+        _ => "webm",
+    }
+}
 
 #[tauri::command]
 pub(crate) fn generate_interview_kit(
@@ -233,6 +275,43 @@ pub(crate) fn save_interview_kit(
     .map_err(|error| error.to_string())?;
 
     Ok(record)
+}
+
+#[tauri::command]
+pub(crate) fn save_interview_recording(
+    state: State<'_, AppState>,
+    input: SaveInterviewRecordingInput,
+) -> Result<SaveInterviewRecordingOutput, String> {
+    let bytes = BASE64_STANDARD
+        .decode(input.content_base64.trim())
+        .map_err(|error| error.to_string())?;
+    if bytes.is_empty() {
+        return Err("interview_recording_empty".to_string());
+    }
+
+    let created_at = now_iso();
+    let file_stem = safe_recording_file_stem(&input.file_name);
+    let extension = safe_recording_extension(&input.file_name);
+    let recordings_dir = state
+        .db_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("interview-recordings");
+    fs::create_dir_all(&recordings_dir).map_err(|error| error.to_string())?;
+
+    let file_name = format!(
+        "{}-{}.{extension}",
+        file_stem,
+        created_at.replace([':', '.'], "-")
+    );
+    let file_path = recordings_dir.join(file_name);
+    fs::write(&file_path, &bytes).map_err(|error| error.to_string())?;
+
+    Ok(SaveInterviewRecordingOutput {
+        recording_path: file_path.to_string_lossy().to_string(),
+        size: bytes.len(),
+        created_at,
+    })
 }
 
 #[tauri::command]

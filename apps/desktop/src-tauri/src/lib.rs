@@ -17,9 +17,11 @@ use domains::ai_settings::{
     upsert_ai_provider_settings, upsert_task_runtime_settings,
 };
 use domains::candidate::{
-    create_candidate, delete_candidate, list_analysis, list_candidates, list_pipeline_events,
-    merge_candidate_import, move_candidate_stage, parse_resume_file, run_candidate_analysis,
-    set_candidate_qualification, update_candidate, upsert_resume,
+    create_candidate, delete_candidate, list_analysis, list_candidates, list_candidates_page,
+    list_decision_candidates_page, list_interview_candidates_page, list_pending_candidates,
+    list_pipeline_events, merge_candidate_import, move_candidate_stage, parse_resume_file,
+    run_candidate_analysis, set_candidate_qualification, sync_pending_candidate_to_candidate,
+    update_candidate, upsert_pending_candidates, upsert_resume,
 };
 use domains::crawl_task::{
     create_crawl_task, delete_crawl_task, list_crawl_task_people, list_crawl_tasks,
@@ -28,7 +30,7 @@ use domains::crawl_task::{
 use domains::hiring::{finalize_hiring_decision, list_hiring_decisions};
 use domains::interview::{
     generate_interview_kit, list_interview_evaluations, run_interview_evaluation,
-    save_interview_kit, submit_interview_feedback,
+    save_interview_kit, save_interview_recording, submit_interview_feedback,
 };
 use domains::jobs::{create_job, delete_job, list_jobs, stop_job, update_job};
 use domains::screening::{
@@ -104,10 +106,16 @@ pub fn run() {
             set_candidate_qualification,
             merge_candidate_import,
             list_candidates,
+            list_candidates_page,
+            list_interview_candidates_page,
+            list_decision_candidates_page,
             move_candidate_stage,
             list_pipeline_events,
             upsert_resume,
             parse_resume_file,
+            upsert_pending_candidates,
+            list_pending_candidates,
+            sync_pending_candidate_to_candidate,
             get_screening_template,
             upsert_screening_template,
             list_screening_templates,
@@ -119,6 +127,7 @@ pub fn run() {
             list_screening_results,
             generate_interview_kit,
             save_interview_kit,
+            save_interview_recording,
             submit_interview_feedback,
             run_interview_evaluation,
             list_interview_evaluations,
