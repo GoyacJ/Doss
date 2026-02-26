@@ -116,6 +116,10 @@ const profileForm = reactive({
 const selectedProvider = computed(() => providerCatalog.value.find((item) => item.id === profileForm.provider) ?? null);
 const selectedProviderModels = computed(() => selectedProvider.value?.models ?? []);
 const sidecarBadge = computed(() => sidecarHealthBadge(store.sidecarHealthy));
+const sidecarErrorMessage = computed(() => {
+  const message = store.sidecarError?.trim();
+  return message && message.length > 0 ? message : null;
+});
 
 type ScreeningDimensionFormItem = {
   key: string;
@@ -615,6 +619,11 @@ onMounted(async () => {
         <UiInfoRow label="数据库路径" :value="store.health?.dbPath || '-'" />
         <UiInfoRow label="Sidecar">
           <UiBadge :tone="sidecarBadge.tone">{{ sidecarBadge.label }}</UiBadge>
+        </UiInfoRow>
+        <UiInfoRow label="Sidecar 错误" muted>
+          <span class="break-all" :class="sidecarErrorMessage ? 'text-danger' : 'text-muted'">
+            {{ sidecarErrorMessage || "-" }}
+          </span>
         </UiInfoRow>
       </div>
     </UiPanel>

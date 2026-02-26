@@ -1,5 +1,27 @@
 use super::super::*;
 
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SidecarCrawlJobsInput {
+    source: String,
+    mode: String,
+    keyword: String,
+    city: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SidecarCrawlCandidatesInput {
+    source: String,
+    mode: String,
+    job_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SidecarCrawlResumeInput {
+    source: String,
+    mode: String,
+    candidate_id: String,
+}
+
 pub(crate) fn sidecar_base_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}")
 }
@@ -20,7 +42,10 @@ fn sidecar_port_available(port: u16) -> bool {
 
 fn sidecar_health_ok(port: u16) -> bool {
     let endpoint = format!("{}/health", sidecar_base_url(port));
-    let client = match Client::builder().timeout(Duration::from_millis(850)).build() {
+    let client = match Client::builder()
+        .timeout(Duration::from_millis(850))
+        .build()
+    {
         Ok(client) => client,
         Err(_) => return false,
     };
@@ -192,7 +217,98 @@ pub(crate) fn ensure_sidecar_running(state: &AppState) -> Result<SidecarRuntime,
     Err(error_text)
 }
 
+fn sidecar_post_json(state: &AppState, path: &str, payload: Value) -> Result<Value, String> {
+    let runtime = ensure_sidecar_running(state)?;
+    let endpoint = format!("{}{}", runtime.base_url, path);
+    let client = Client::builder()
+        .timeout(Duration::from_secs(600))
+        .build()
+        .map_err(|error| format!("sidecar_client_build_failed:{error}"))?;
+
+    let response = client
+        .post(endpoint)
+        .json(&payload)
+        .send()
+        .map_err(|error| format!("sidecar_request_failed:{error}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().unwrap_or_default();
+        let body_text = body.trim();
+        if body_text.is_empty() {
+            return Err(format!("sidecar_http_{}", status.as_u16()));
+        }
+        return Err(format!("sidecar_http_{}:{body_text}", status.as_u16()));
+    }
+
+    response
+        .json::<Value>()
+        .map_err(|error| format!("sidecar_invalid_json:{error}"))
+}
+
 #[tauri::command]
 pub(crate) fn ensure_sidecar(state: State<'_, AppState>) -> Result<SidecarRuntime, String> {
     ensure_sidecar_running(state.inner())
+}
+
+#[tauri::command]
+pub(crate) fn sidecar_health(state: State<'_, AppState>) -> Result<Value, String> {
+    ensure_sidecar_running(state.inner())?;
+    Ok(serde_json::json!({
+      "ok": true,
+      "service": "crawler-sidecar"
+    }))
+}
+
+#[tauri::command]
+pub(crate) fn sidecar_crawl_jobs(
+    state: State<'_, AppState>,
+    input: SidecarCrawlJobsInput,
+) -> Result<Value, String> {
+    sidecar_post_json(
+        state.inner(),
+        "/v1/crawl/jobs",
+        serde_json::json!({
+          "source": input.source,
+          "mode": input.mode,
+          "params": {
+            "keyword": input.keyword,
+            "city": input.city
+          }
+        }),
+    )
+}
+
+#[tauri::command]
+pub(crate) fn sidecar_crawl_candidates(
+    state: State<'_, AppState>,
+    input: SidecarCrawlCandidatesInput,
+) -> Result<Value, String> {
+    sidecar_post_json(
+        state.inner(),
+        "/v1/crawl/candidates",
+        serde_json::json!({
+          "source": input.source,
+          "mode": input.mode,
+          "params": {
+            "jobId": input.job_id
+          }
+        }),
+    )
+}
+
+#[tauri::command]
+pub(crate) fn sidecar_crawl_resume(
+    state: State<'_, AppState>,
+    input: SidecarCrawlResumeInput,
+) -> Result<Value, String> {
+    sidecar_post_json(
+        state.inner(),
+        "/v1/crawl/resume",
+        serde_json::json!({
+          "source": input.source,
+          "mode": input.mode,
+          "candidateId": input.candidate_id
+        }),
+    )
 }

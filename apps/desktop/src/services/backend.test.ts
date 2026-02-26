@@ -7,6 +7,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import {
+  checkSidecarHealth,
+  ensureSidecar,
   createScreeningTemplate,
   createCandidate,
   createCrawlTask,
@@ -34,6 +36,9 @@ import {
   setDefaultAiProviderProfile,
   submitInterviewFeedback,
   testAiProviderProfile,
+  triggerSidecarCrawlCandidates,
+  triggerSidecarCrawlJobs,
+  triggerSidecarCrawlResume,
   setJobScreeningTemplate,
   stopJob,
   listCrawlTaskPeople,
@@ -74,6 +79,86 @@ describe("backend AI profile commands", () => {
 
     expect(invokeMock).toHaveBeenCalledWith("test_ai_provider_profile", {
       profileId: "profile-3",
+    });
+  });
+
+  it("routes sidecar health and crawl calls via tauri invoke", async () => {
+    invokeMock
+      .mockResolvedValueOnce({
+        ok: true,
+        port: 3791,
+        base_url: "http://127.0.0.1:3791",
+        source: "existing",
+        restart_count: 0,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        service: "crawler-sidecar",
+      })
+      .mockResolvedValueOnce({
+        id: "jobs-1",
+        source: "boss",
+        mode: "compliant",
+        status: "SUCCEEDED",
+        attempts: 1,
+      })
+      .mockResolvedValueOnce({
+        id: "candidates-1",
+        source: "boss",
+        mode: "compliant",
+        status: "SUCCEEDED",
+        attempts: 1,
+      })
+      .mockResolvedValueOnce({
+        id: "resume-1",
+        source: "boss",
+        mode: "compliant",
+        status: "SUCCEEDED",
+        attempts: 1,
+      });
+
+    await ensureSidecar();
+    await checkSidecarHealth();
+    await triggerSidecarCrawlJobs({
+      source: "boss",
+      mode: "compliant",
+      keyword: "前端",
+      city: "上海",
+    });
+    await triggerSidecarCrawlCandidates({
+      source: "boss",
+      mode: "compliant",
+      jobId: "job-101",
+    });
+    await triggerSidecarCrawlResume({
+      source: "boss",
+      mode: "compliant",
+      candidateId: "candidate-7",
+    });
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "ensure_sidecar");
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "sidecar_health");
+    expect(invokeMock).toHaveBeenNthCalledWith(3, "sidecar_crawl_jobs", {
+      input: {
+        source: "boss",
+        mode: "compliant",
+        keyword: "前端",
+        city: "上海",
+      },
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(4, "sidecar_crawl_candidates", {
+      input: {
+        source: "boss",
+        mode: "compliant",
+        job_id: "job-101",
+      },
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(5, "sidecar_crawl_resume", {
+      input: {
+        source: "boss",
+        mode: "compliant",
+        candidate_id: "candidate-7",
+      },
     });
   });
 
@@ -255,6 +340,7 @@ describe("backend AI profile commands", () => {
       phone: "13900000000",
       email: "lisi@example.com",
       tags: ["vue3", "candidate"],
+      job_id: 9,
     });
     await setCandidateQualification({
       candidate_id: 18,
@@ -275,6 +361,7 @@ describe("backend AI profile commands", () => {
         phone: "13900000000",
         email: "lisi@example.com",
         tags: ["vue3", "candidate"],
+        job_id: 9,
       },
     });
     expect(invokeMock).toHaveBeenCalledWith("set_candidate_qualification", {
@@ -285,7 +372,7 @@ describe("backend AI profile commands", () => {
       },
     });
     expect(invokeMock).toHaveBeenCalledWith("delete_candidate", {
-      candidate_id: 18,
+      candidateId: 18,
     });
   });
 

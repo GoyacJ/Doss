@@ -60,7 +60,10 @@ fn build_person_dedupe_key(
     format!("{source}:sha256:{}", hash_value(&seed))
 }
 
-fn read_task_people_by_task(conn: &Connection, task_id: i64) -> Result<Vec<CrawlTaskPerson>, String> {
+fn read_task_people_by_task(
+    conn: &Connection,
+    task_id: i64,
+) -> Result<Vec<CrawlTaskPerson>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, task_id, source, external_id, name, current_company, years_of_experience, sync_status, sync_error_code, sync_error_message, candidate_id, created_at, updated_at FROM crawl_task_people WHERE task_id = ?1 ORDER BY updated_at DESC, id DESC",

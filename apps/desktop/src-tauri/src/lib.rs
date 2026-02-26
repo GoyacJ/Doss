@@ -38,7 +38,10 @@ use domains::crawl_task::{
     update_crawl_task, update_crawl_task_people_sync, upsert_crawl_task_people,
 };
 use domains::search::search_candidates;
-use domains::sidecar_runtime::{ensure_sidecar, ensure_sidecar_running};
+use domains::sidecar_runtime::{
+    ensure_sidecar, ensure_sidecar_running, sidecar_crawl_candidates, sidecar_crawl_jobs,
+    sidecar_crawl_resume, sidecar_health,
+};
 
 #[derive(Debug, Error)]
 enum AppError {
@@ -309,13 +312,8 @@ impl AiProvider {
             "deepseek" => AiProvider::Deepseek,
             "minimax" => AiProvider::Minimax,
             "glm" => AiProvider::Glm,
-            "openapi"
-            | "open-api"
-            | "openapi_compatible"
-            | "openapi-compatible"
-            | "openai_compatible"
-            | "openai-compatible"
-            | "openai" => AiProvider::OpenApi,
+            "openapi" | "open-api" | "openapi_compatible" | "openapi-compatible"
+            | "openai_compatible" | "openai-compatible" | "openai" => AiProvider::OpenApi,
             "mock" => AiProvider::Qwen,
             _ => AiProvider::Qwen,
         }
@@ -438,7 +436,11 @@ impl AiProvider {
             label: self.label().to_string(),
             default_model: self.default_model().to_string(),
             default_base_url: self.default_base_url().to_string(),
-            models: self.models().iter().map(|item| (*item).to_string()).collect(),
+            models: self
+                .models()
+                .iter()
+                .map(|item| (*item).to_string())
+                .collect(),
             docs: self.docs().iter().map(|item| (*item).to_string()).collect(),
         }
     }
@@ -632,6 +634,8 @@ struct Candidate {
     source: String,
     name: String,
     current_company: Option<String>,
+    job_id: Option<i64>,
+    job_title: Option<String>,
     score: Option<f64>,
     age: Option<i32>,
     gender: Option<String>,
@@ -665,6 +669,7 @@ struct UpdateCandidateInput {
     candidate_id: i64,
     name: String,
     current_company: Option<String>,
+    job_id: Option<i64>,
     score: Option<f64>,
     age: Option<i32>,
     gender: Option<String>,
@@ -1193,7 +1198,9 @@ fn resolve_qualification_stage(current_stage: &str, qualified: bool) -> Option<&
 
 fn open_connection(db_path: &Path) -> AppResult<Connection> {
     let conn = Connection::open(db_path)?;
-    conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+    conn.execute_batch(
+        "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
+    )?;
     Ok(conn)
 }
 
@@ -1221,6 +1228,8 @@ fn migrate_db(db_path: &Path) -> AppResult<()> {
             source TEXT NOT NULL,
             name TEXT NOT NULL,
             current_company TEXT,
+            linked_job_id INTEGER,
+            linked_job_title TEXT,
             score REAL,
             age INTEGER,
             gender TEXT,
@@ -1482,6 +1491,44 @@ fn migrate_db(db_path: &Path) -> AppResult<()> {
     let _ = conn.execute("ALTER TABLE candidates ADD COLUMN age INTEGER", []);
     let _ = conn.execute("ALTER TABLE candidates ADD COLUMN gender TEXT", []);
     let _ = conn.execute("ALTER TABLE candidates ADD COLUMN score REAL", []);
+    let _ = conn.execute(
+        "ALTER TABLE candidates ADD COLUMN linked_job_id INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE candidates ADD COLUMN linked_job_title TEXT",
+        [],
+    );
+
+    let _ = conn.execute(
+        r#"
+        UPDATE candidates
+        SET linked_job_id = (
+            SELECT a.job_id
+            FROM applications a
+            WHERE a.candidate_id = candidates.id
+            ORDER BY a.updated_at DESC, a.id DESC
+            LIMIT 1
+        )
+        WHERE linked_job_id IS NULL
+        "#,
+        [],
+    );
+    let _ = conn.execute(
+        r#"
+        UPDATE candidates
+        SET linked_job_title = (
+            SELECT j.title
+            FROM applications a
+            JOIN jobs j ON j.id = a.job_id
+            WHERE a.candidate_id = candidates.id
+            ORDER BY a.updated_at DESC, a.id DESC
+            LIMIT 1
+        )
+        WHERE linked_job_title IS NULL
+        "#,
+        [],
+    );
 
     Ok(())
 }
@@ -1496,14 +1543,18 @@ fn sync_candidate_search(conn: &Connection, candidate_id: i64) -> AppResult<()> 
         "#,
     )?;
 
-    let (name, tags_json, raw_text): (String, String, String) = stmt.query_row([candidate_id], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-    })?;
+    let (name, tags_json, raw_text): (String, String, String) = stmt
+        .query_row([candidate_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
 
     let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
     let tags_text = tags.join(" ");
 
-    conn.execute("DELETE FROM candidate_search WHERE candidate_id = ?1", [candidate_id])?;
+    conn.execute(
+        "DELETE FROM candidate_search WHERE candidate_id = ?1",
+        [candidate_id],
+    )?;
     conn.execute(
         "INSERT INTO candidate_search(candidate_id, name, tags, raw_text) VALUES (?1, ?2, ?3, ?4)",
         params![candidate_id, name, tags_text, raw_text],
@@ -1659,7 +1710,11 @@ fn parse_dimension_scores(value: &Value) -> Vec<DimensionScore> {
 
     rows.iter()
         .filter_map(|item| {
-            let key = item.get("key").and_then(|field| field.as_str())?.trim().to_string();
+            let key = item
+                .get("key")
+                .and_then(|field| field.as_str())?
+                .trim()
+                .to_string();
             if key.is_empty() {
                 return None;
             }
@@ -1766,7 +1821,9 @@ fn ensure_analysis_payload(
     }
 
     for score in &fallback.dimension_scores {
-        dimensions.entry(score.key.clone()).or_insert_with(|| score.clone());
+        dimensions
+            .entry(score.key.clone())
+            .or_insert_with(|| score.clone());
     }
 
     let ordered_keys = ["skill_match", "experience", "compensation", "stability"];
@@ -1789,7 +1846,7 @@ fn ensure_analysis_payload(
                 item.score as f64 * weight
             })
             .sum::<f64>())
-            .round() as i32,
+        .round() as i32,
     );
 
     let overall_score = if payload.overall_score > 0 {
@@ -1938,7 +1995,9 @@ fn normalize_profile_in_place(profile: &mut StoredAiProviderProfile, ordinal: us
     }
 }
 
-fn active_profile<'a>(profiles: &'a StoredAiProviderProfiles) -> Option<&'a StoredAiProviderProfile> {
+fn active_profile<'a>(
+    profiles: &'a StoredAiProviderProfiles,
+) -> Option<&'a StoredAiProviderProfile> {
     profiles
         .profiles
         .iter()
@@ -1963,7 +2022,10 @@ fn read_legacy_ai_settings(conn: &Connection) -> AppResult<StoredAiProviderSetti
     Ok(StoredAiProviderSettings::defaults(AiProvider::Qwen))
 }
 
-fn write_legacy_ai_settings(conn: &Connection, settings: &StoredAiProviderSettings) -> AppResult<()> {
+fn write_legacy_ai_settings(
+    conn: &Connection,
+    settings: &StoredAiProviderSettings,
+) -> AppResult<()> {
     let value = serde_json::to_string(settings)?;
     let now = now_iso();
     conn.execute(
@@ -2112,14 +2174,12 @@ fn provider_specific_api_key(provider: &AiProvider) -> Option<String> {
         AiProvider::Deepseek => &["DOSS_DEEPSEEK_API_KEY"],
         AiProvider::Minimax => &["DOSS_MINIMAX_API_KEY"],
         AiProvider::Glm => &["DOSS_GLM_API_KEY"],
-        AiProvider::OpenApi => {
-            &[
-                "DOSS_OPENAPI_API_KEY",
-                "DOSS_OPENAI_COMPAT_API_KEY",
-                "DOSS_OPENAI_API_KEY",
-                "OPENAI_API_KEY",
-            ]
-        }
+        AiProvider::OpenApi => &[
+            "DOSS_OPENAPI_API_KEY",
+            "DOSS_OPENAI_COMPAT_API_KEY",
+            "DOSS_OPENAI_API_KEY",
+            "OPENAI_API_KEY",
+        ],
     };
 
     for key_name in key_names {
@@ -2236,7 +2296,12 @@ fn resolve_ai_settings_with_input_overrides(
     let provider_changed = requested_provider != resolved.provider;
     resolved.provider = requested_provider;
 
-    if let Some(model) = input.model.as_deref().map(str::trim).filter(|item| !item.is_empty()) {
+    if let Some(model) = input
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
         resolved.model = model.to_string();
     } else if provider_changed || resolved.model.trim().is_empty() {
         resolved.model = resolved.provider.default_model().to_string();
@@ -2400,7 +2465,10 @@ fn parse_minimax_content(response: &Value) -> Result<String, String> {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .unwrap_or("unknown_error");
-            return Err(format!("provider_api_error_{}: {}", status_code, status_msg));
+            return Err(format!(
+                "provider_api_error_{}: {}",
+                status_code, status_msg
+            ));
         }
     }
 
@@ -2450,7 +2518,11 @@ fn call_openai_compatible_provider(
     let status = response.status();
     let body_text = response.text().map_err(|error| error.to_string())?;
     if !status.is_success() {
-        return Err(format!("provider_http_{}: {}", status.as_u16(), trim_resume_excerpt(&body_text, 300)));
+        return Err(format!(
+            "provider_http_{}: {}",
+            status.as_u16(),
+            trim_resume_excerpt(&body_text, 300)
+        ));
     }
 
     let body_json = serde_json::from_str::<Value>(&body_text).map_err(|error| error.to_string())?;
@@ -2584,8 +2656,9 @@ fn candidate_from_row(
     cipher: &FieldCipher,
 ) -> Result<Candidate, rusqlite::Error> {
     let stage_text: String = row.get("stage")?;
-    let stage = PipelineStage::from_db(&stage_text)
-        .map_err(|err| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err)))?;
+    let stage = PipelineStage::from_db(&stage_text).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+    })?;
 
     let tags_json: String = row.get("tags_json")?;
     let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
@@ -2606,6 +2679,8 @@ fn candidate_from_row(
         source: row.get("source")?,
         name: row.get("name")?,
         current_company: row.get("current_company")?,
+        job_id: row.get("linked_job_id")?,
+        job_title: row.get("linked_job_title")?,
         score: row.get("score")?,
         age: row.get("age")?,
         gender: row.get("gender")?,
@@ -2623,7 +2698,11 @@ fn candidate_from_row(
 fn create_job(state: State<'_, AppState>, input: NewJobInput) -> Result<Job, String> {
     let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
     let now = now_iso();
-    let source = input.source.unwrap_or(SourceType::Manual).as_db().to_string();
+    let source = input
+        .source
+        .unwrap_or(SourceType::Manual)
+        .as_db()
+        .to_string();
     let title = input.title.trim().to_string();
     let company = input.company.trim().to_string();
     if title.is_empty() || company.is_empty() {
@@ -2768,7 +2847,15 @@ fn update_job(state: State<'_, AppState>, input: UpdateJobInput) -> Result<Job, 
                 updated_at = ?6
             WHERE id = ?7
             "#,
-            params![title, company, city, salary_k, description, now, input.job_id],
+            params![
+                title,
+                company,
+                city,
+                salary_k,
+                description,
+                now,
+                input.job_id
+            ],
         )
         .map_err(|error| error.to_string())?;
 
@@ -2913,12 +3000,6 @@ fn list_jobs(state: State<'_, AppState>) -> Result<Vec<Job>, String> {
     Ok(jobs)
 }
 
-
-
-
-
-
-
 fn parse_skills(parsed: &Value) -> Vec<String> {
     parsed
         .get("skills")
@@ -3034,7 +3115,11 @@ fn parse_dimensions_from_config(value: &Value) -> Option<Vec<ScreeningDimension>
         .cloned()?;
     let mut dimensions = Vec::new();
     for item in array {
-        let key = item.get("key").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let key = item
+            .get("key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
         let label = item
             .get("label")
             .and_then(|v| v.as_str())
@@ -3116,8 +3201,8 @@ fn read_screening_template_by_id(
     let config_json: Value = serde_json::from_str(&row.4).unwrap_or(Value::Null);
     let mut dimensions = load_screening_dimensions(conn, row.0)?;
     if dimensions.is_empty() {
-        dimensions = parse_dimensions_from_config(&config_json)
-            .unwrap_or_else(default_screening_dimensions);
+        dimensions =
+            parse_dimensions_from_config(&config_json).unwrap_or_else(default_screening_dimensions);
     }
     let risk_rules = config_json
         .get("riskRules")
@@ -3586,7 +3671,11 @@ fn build_generated_interview_questions(
         .unwrap_or_else(|| "岗位核心能力".to_string());
     let missing_skills = required_skills
         .iter()
-        .filter(|item| !normalized_extracted.iter().any(|owned| owned.contains(&item.to_lowercase())))
+        .filter(|item| {
+            !normalized_extracted
+                .iter()
+                .any(|owned| owned.contains(&item.to_lowercase()))
+        })
         .take(2)
         .cloned()
         .collect::<Vec<_>>();
@@ -3655,7 +3744,10 @@ fn build_generated_interview_questions(
         });
     } else {
         questions.push(InterviewQuestion {
-            primary_question: format!("请现场拆解一个 {} 场景中的复杂问题，你会如何定义成功标准？", role_label),
+            primary_question: format!(
+                "请现场拆解一个 {} 场景中的复杂问题，你会如何定义成功标准？",
+                role_label
+            ),
             follow_ups: vec![
                 "第一周和第一个月的推进计划是什么？".to_string(),
                 "你会如何设计监控指标和回滚策略？".to_string(),
@@ -3732,7 +3824,13 @@ fn evaluate_interview_feedback_payload(
     let normalized_scores = raw_scores
         .into_iter()
         .filter(|value| value.is_finite())
-        .map(|value| if value > 0.0 && value <= 1.0 { value * 5.0 } else { value })
+        .map(|value| {
+            if value > 0.0 && value <= 1.0 {
+                value * 5.0
+            } else {
+                value
+            }
+        })
         .map(|value| value.clamp(0.0, 5.0))
         .collect::<Vec<_>>();
     let score_count = normalized_scores.len();
@@ -3758,7 +3856,8 @@ fn evaluate_interview_feedback_payload(
     } else {
         score_avg * 20.0
     };
-    let mut overall_score = clamp_score((structured_quality * 0.7 + transcript_quality * 0.3).round() as i32);
+    let mut overall_score =
+        clamp_score((structured_quality * 0.7 + transcript_quality * 0.3).round() as i32);
 
     let mut evidence = build_interview_evidence(transcript_text);
     if let Some(summary) = structured_feedback
@@ -3767,10 +3866,7 @@ fn evaluate_interview_feedback_payload(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        evidence.push(format!(
-            "面试官总结: {}",
-            trim_resume_excerpt(summary, 120)
-        ));
+        evidence.push(format!("面试官总结: {}", trim_resume_excerpt(summary, 120)));
     }
     let red_flags = structured_feedback
         .get("red_flags")
@@ -3931,7 +4027,8 @@ fn extract_text_from_docx_bytes(bytes: &[u8]) -> Result<String, String> {
             || name.starts_with("word/footer")
         {
             let mut xml = Vec::new();
-            file.read_to_end(&mut xml).map_err(|error| error.to_string())?;
+            file.read_to_end(&mut xml)
+                .map_err(|error| error.to_string())?;
             let text = extract_docx_xml_text(&xml)?;
             if !text.trim().is_empty() {
                 sections.push(text);
@@ -4040,7 +4137,11 @@ fn build_structured_resume_fields(raw_text: &str) -> Value {
     let years_regex = Regex::new(r"(?i)(\d{1,2}(?:\.\d+)?)\s*年").expect("years regex");
     let years_of_experience = years_regex
         .captures_iter(raw_text)
-        .filter_map(|capture| capture.get(1).and_then(|value| value.as_str().parse::<f64>().ok()))
+        .filter_map(|capture| {
+            capture
+                .get(1)
+                .and_then(|value| value.as_str().parse::<f64>().ok())
+        })
         .fold(0.0_f64, f64::max);
 
     let salary_context_regex = Regex::new(
@@ -4112,20 +4213,6 @@ fn build_structured_resume_fields(raw_text: &str) -> Value {
     })
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #[tauri::command]
 fn get_screening_template(
     state: State<'_, AppState>,
@@ -4141,7 +4228,11 @@ fn upsert_screening_template(
     input: UpsertScreeningTemplateInput,
 ) -> Result<ScreeningTemplateRecord, String> {
     let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
-    let scope = if input.job_id.is_some() { "job" } else { "global" };
+    let scope = if input.job_id.is_some() {
+        "job"
+    } else {
+        "global"
+    };
     let dimensions = normalize_screening_dimensions(input.dimensions)?;
     let risk_rules = input.risk_rules.unwrap_or_else(|| serde_json::json!({}));
     let name = input
@@ -4185,7 +4276,9 @@ fn upsert_screening_template(
 }
 
 #[tauri::command]
-fn list_screening_templates(state: State<'_, AppState>) -> Result<Vec<ScreeningTemplateRecord>, String> {
+fn list_screening_templates(
+    state: State<'_, AppState>,
+) -> Result<Vec<ScreeningTemplateRecord>, String> {
     let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
     let mut templates = list_global_screening_templates(&conn)?;
     if templates.is_empty() {
@@ -4218,12 +4311,7 @@ fn create_screening_template(
         .map(str::to_string)
         .unwrap_or_else(|| "新评分模板".to_string());
 
-    let template = create_global_screening_template_internal(
-        &conn,
-        name,
-        dimensions,
-        risk_rules,
-    )?;
+    let template = create_global_screening_template_internal(&conn, name, dimensions, risk_rules)?;
 
     write_audit(
         &conn,
@@ -4252,7 +4340,8 @@ fn update_screening_template(
         return Err("screening_template_scope_invalid".to_string());
     }
 
-    let dimensions = normalize_screening_dimensions(input.dimensions.or(Some(existing.dimensions.clone())))?;
+    let dimensions =
+        normalize_screening_dimensions(input.dimensions.or(Some(existing.dimensions.clone())))?;
     let risk_rules = input.risk_rules.unwrap_or(existing.risk_rules.clone());
     let name = input
         .name
@@ -4303,8 +4392,11 @@ fn delete_screening_template(
         ));
     }
 
-    conn.execute("DELETE FROM screening_templates WHERE id = ?1", [template_id])
-        .map_err(|error| error.to_string())?;
+    conn.execute(
+        "DELETE FROM screening_templates WHERE id = ?1",
+        [template_id],
+    )
+    .map_err(|error| error.to_string())?;
 
     write_audit(
         &conn,
@@ -4350,11 +4442,9 @@ fn set_job_screening_template(
 ) -> Result<Job, String> {
     let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
     let job_exists = conn
-        .query_row(
-            "SELECT id FROM jobs WHERE id = ?1",
-            [input.job_id],
-            |row| row.get::<_, i64>(0),
-        )
+        .query_row("SELECT id FROM jobs WHERE id = ?1", [input.job_id], |row| {
+            row.get::<_, i64>(0)
+        })
         .optional()
         .map_err(|error| error.to_string())?;
     if job_exists.is_none() {
@@ -4487,12 +4577,13 @@ fn run_resume_screening(
 
     let inferred_job_id = conn
         .query_row(
-            "SELECT job_id FROM applications WHERE candidate_id = ?1 ORDER BY updated_at DESC LIMIT 1",
+            "SELECT linked_job_id FROM candidates WHERE id = ?1",
             [input.candidate_id],
-            |row| row.get::<_, i64>(0),
+            |row| row.get::<_, Option<i64>>(0),
         )
         .optional()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?
+        .flatten();
     let effective_job_id = input.job_id.or(inferred_job_id);
 
     let template = resolve_screening_template(&conn, effective_job_id)?;
@@ -4504,7 +4595,12 @@ fn run_resume_screening(
             .query_row(
                 "SELECT description, salary_k FROM jobs WHERE id = ?1",
                 [job_id],
-                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|error| error.to_string())?
@@ -4525,7 +4621,11 @@ fn run_resume_screening(
         .collect::<Vec<_>>();
     let matched_skill_count = required_skills
         .iter()
-        .filter(|required| normalized_skills.iter().any(|owned| owned.contains(*required)))
+        .filter(|required| {
+            normalized_skills
+                .iter()
+                .any(|owned| owned.contains(*required))
+        })
         .count();
 
     let skill_coverage = if required_skills.is_empty() {
@@ -4602,7 +4702,8 @@ fn run_resume_screening(
     };
 
     let fine_score = clamp_score(
-        ((education_score + years_match_score + industry_risk_score + salary_match_score) as f64 / 4.0)
+        ((education_score + years_match_score + industry_risk_score + salary_match_score) as f64
+            / 4.0)
             .round() as i32,
     );
 
@@ -4620,9 +4721,10 @@ fn run_resume_screening(
     if !required_skills.is_empty() && matched_skill_count == required_skills.len() {
         bonus_score += 4;
     }
-    if normalized_skills.iter().any(|skill| {
-        skill.contains("playwright") || skill.contains("rust") || skill.contains("go")
-    }) {
+    if normalized_skills
+        .iter()
+        .any(|skill| skill.contains("playwright") || skill.contains("rust") || skill.contains("go"))
+    {
         bonus_score += 3;
     }
     bonus_score = bonus_score.clamp(0, 15);
@@ -4816,12 +4918,13 @@ fn generate_interview_kit(
 
     let inferred_job_id = conn
         .query_row(
-            "SELECT job_id FROM applications WHERE candidate_id = ?1 ORDER BY updated_at DESC LIMIT 1",
+            "SELECT linked_job_id FROM candidates WHERE id = ?1",
             [input.candidate_id],
-            |row| row.get::<_, i64>(0),
+            |row| row.get::<_, Option<i64>>(0),
         )
         .optional()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?
+        .flatten();
     let effective_job_id = input.job_id.or(inferred_job_id);
 
     let mut role_title: Option<String> = None;
@@ -4831,12 +4934,7 @@ fn generate_interview_kit(
             .query_row(
                 "SELECT title, description FROM jobs WHERE id = ?1",
                 [job_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                    ))
-                },
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
             )
             .optional()
             .map_err(|error| error.to_string())?
@@ -5082,8 +5180,8 @@ fn submit_interview_feedback(
             [id],
             |row| {
                 let structured_text: String = row.get(4)?;
-                let structured_feedback =
-                    serde_json::from_str(&structured_text).unwrap_or(Value::Object(Default::default()));
+                let structured_feedback = serde_json::from_str(&structured_text)
+                    .unwrap_or(Value::Object(Default::default()));
                 Ok(InterviewFeedbackRecord {
                     id: row.get(0)?,
                     candidate_id: row.get(1)?,
@@ -5121,14 +5219,13 @@ fn run_interview_evaluation(
 ) -> Result<InterviewEvaluationRecord, String> {
     let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
 
-    let parse_feedback_row = |row: &rusqlite::Row<'_>| -> Result<(i64, i64, Option<i64>, String, Value), rusqlite::Error> {
+    let parse_feedback_row = |row: &rusqlite::Row<'_>| -> Result<
+        (i64, i64, Option<i64>, String, Value),
+        rusqlite::Error,
+    > {
         let structured_text: String = row.get(4)?;
         let structured_feedback = serde_json::from_str(&structured_text).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(
-                4,
-                rusqlite::types::Type::Text,
-                Box::new(err),
-            )
+            rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(err))
         })?;
         Ok((
             row.get::<_, i64>(0)?,
@@ -5207,7 +5304,8 @@ fn run_interview_evaluation(
             payload.overall_score,
             payload.confidence,
             serde_json::to_string(&payload.evidence).map_err(|error| error.to_string())?,
-            serde_json::to_string(&payload.verification_points).map_err(|error| error.to_string())?,
+            serde_json::to_string(&payload.verification_points)
+                .map_err(|error| error.to_string())?,
             payload.uncertainty,
             created_at,
         ],
@@ -5325,23 +5423,22 @@ fn finalize_hiring_decision(
     if current_stage_text != target_stage.as_db()
         && !is_valid_transition(&current_stage_text, target_stage.as_db())
     {
-        return Err(
-            AppError::InvalidTransition {
-                from: current_stage_text.clone(),
-                to: target_stage.as_db().to_string(),
-            }
-            .to_string(),
-        );
+        return Err(AppError::InvalidTransition {
+            from: current_stage_text.clone(),
+            to: target_stage.as_db().to_string(),
+        }
+        .to_string());
     }
 
     let inferred_job_id = conn
         .query_row(
-            "SELECT job_id FROM applications WHERE candidate_id = ?1 ORDER BY updated_at DESC LIMIT 1",
+            "SELECT linked_job_id FROM candidates WHERE id = ?1",
             [input.candidate_id],
-            |row| row.get::<_, i64>(0),
+            |row| row.get::<_, Option<i64>>(0),
         )
         .optional()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?
+        .flatten();
     let effective_job_id = input.job_id.or(inferred_job_id);
 
     let latest_evaluation = if let Some(job_id) = effective_job_id {
@@ -5436,8 +5533,12 @@ fn finalize_hiring_decision(
 
         let stage_note = note
             .as_deref()
-            .map(|value| format!("final_decision={final_decision}; reason_code={reason_code}; note={value}"))
-            .unwrap_or_else(|| format!("final_decision={final_decision}; reason_code={reason_code}"));
+            .map(|value| {
+                format!("final_decision={final_decision}; reason_code={reason_code}; note={value}")
+            })
+            .unwrap_or_else(|| {
+                format!("final_decision={final_decision}; reason_code={reason_code}")
+            });
 
         conn.execute(
             r#"
@@ -5564,7 +5665,9 @@ fn dashboard_metrics(state: State<'_, AppState>) -> Result<DashboardMetrics, Str
         )
         .map_err(|error| error.to_string())?;
     let hiring_decisions_total: i64 = conn
-        .query_row("SELECT COUNT(*) FROM hiring_decisions", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM hiring_decisions", [], |row| {
+            row.get(0)
+        })
         .map_err(|error| error.to_string())?;
     let ai_deviation_count: i64 = conn
         .query_row(
@@ -5633,7 +5736,10 @@ fn app_health(state: State<'_, AppState>) -> Result<Value, String> {
 }
 
 fn resolve_db_path(app: &AppHandle) -> AppResult<PathBuf> {
-    let data_dir = app.path().app_data_dir().map_err(|_| AppError::NotFound("app_data_dir".to_string()))?;
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| AppError::NotFound("app_data_dir".to_string()))?;
     fs::create_dir_all(&data_dir)?;
     Ok(data_dir.join("doss.sqlite3"))
 }
@@ -5654,7 +5760,10 @@ fn resolve_local_key(app: &AppHandle, value: Option<String>) -> AppResult<String
         return Ok(key);
     }
 
-    let data_dir = app.path().app_data_dir().map_err(|_| AppError::NotFound("app_data_dir".to_string()))?;
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| AppError::NotFound("app_data_dir".to_string()))?;
     fs::create_dir_all(&data_dir)?;
     let key_path = data_dir.join("doss.local.key");
 
@@ -5718,6 +5827,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_health,
             ensure_sidecar,
+            sidecar_health,
+            sidecar_crawl_jobs,
+            sidecar_crawl_candidates,
+            sidecar_crawl_resume,
             create_job,
             update_job,
             stop_job,
@@ -5794,18 +5907,9 @@ mod tests {
             resolve_qualification_stage("SCREENING", false),
             Some("REJECTED")
         );
-        assert_eq!(
-            resolve_qualification_stage("REJECTED", false),
-            None
-        );
-        assert_eq!(
-            resolve_qualification_stage("REJECTED", true),
-            Some("NEW")
-        );
-        assert_eq!(
-            resolve_qualification_stage("INTERVIEW", true),
-            None
-        );
+        assert_eq!(resolve_qualification_stage("REJECTED", false), None);
+        assert_eq!(resolve_qualification_stage("REJECTED", true), Some("NEW"));
+        assert_eq!(resolve_qualification_stage("INTERVIEW", true), None);
     }
 
     #[test]
@@ -5920,7 +6024,9 @@ mod tests {
             .and_then(|value| value.as_array())
             .expect("skills");
         assert!(skills.iter().any(|value| value.as_str() == Some("Vue3")));
-        assert!(skills.iter().any(|value| value.as_str() == Some("TypeScript")));
+        assert!(skills
+            .iter()
+            .any(|value| value.as_str() == Some("TypeScript")));
 
         let expected_salary = parsed
             .get("expectedSalaryK")
@@ -5988,7 +6094,10 @@ mod tests {
         );
 
         assert_eq!(payload.recommendation, "HOLD");
-        assert!(payload.verification_points.iter().any(|item| item.contains("补充")));
+        assert!(payload
+            .verification_points
+            .iter()
+            .any(|item| item.contains("补充")));
     }
 
     #[test]
@@ -6006,14 +6115,12 @@ mod tests {
             ids,
             vec!["qwen", "doubao", "deepseek", "minimax", "glm", "openapi"]
         );
-        assert!(
-            providers
-                .iter()
-                .all(|item| !item.default_model.trim().is_empty()
-                    && !item.default_base_url.trim().is_empty()
-                    && !item.models.is_empty()
-                    && !item.docs.is_empty())
-        );
+        assert!(providers
+            .iter()
+            .all(|item| !item.default_model.trim().is_empty()
+                && !item.default_base_url.trim().is_empty()
+                && !item.models.is_empty()
+                && !item.docs.is_empty()));
     }
 
     #[test]

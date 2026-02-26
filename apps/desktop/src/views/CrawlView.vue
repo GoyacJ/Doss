@@ -171,7 +171,7 @@ function syncStatusTone(status: CrawlTaskPersonSyncStatus): "success" | "warning
 }
 
 function toggleTaskLabel(task: CrawlTaskRecord): string {
-  return task.status === "RUNNING" ? "停止" : "恢复";
+  return task.status === "RUNNING" ? "停止" : "启动";
 }
 
 function runStatusLabel(status: CrawlTaskRecord["status"]): string {
@@ -418,13 +418,13 @@ onMounted(async () => {
     <div
       v-if="createModalOpen"
       class="fixed inset-0 z-50 bg-black/42 backdrop-blur-[2px] px-4 py-6 flex items-center justify-center"
-      @click.self="closeCreateModal"
+      @click.self="closeCreateModal()"
     >
       <UiPanel class="w-full max-w-2xl max-h-[86vh] overflow-y-auto">
         <template #header>
           <div class="flex items-center justify-between gap-2 mb-2.5">
             <h3 class="text-lg font-700">新增采集任务</h3>
-            <UiButton variant="ghost" @click="closeCreateModal">关闭</UiButton>
+            <UiButton variant="ghost" @click="closeCreateModal()">关闭</UiButton>
           </div>
         </template>
 
@@ -464,7 +464,7 @@ onMounted(async () => {
         </div>
 
         <div class="flex items-center justify-end gap-2">
-          <UiButton variant="secondary" @click="closeCreateModal">取消</UiButton>
+          <UiButton variant="secondary" @click="closeCreateModal()">取消</UiButton>
           <UiButton :disabled="creatingTask" @click="submitCreateTask">
             {{ creatingTask ? "创建中..." : "创建任务" }}
           </UiButton>

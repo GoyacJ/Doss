@@ -459,6 +459,39 @@ describe("recruiting store auto workflow", () => {
     ]);
   });
 
+  it("captures ensure_sidecar failures for diagnostics", async () => {
+    backend.ensureSidecar.mockRejectedValueOnce(new Error("sidecar_port_conflict"));
+
+    const store = useRecruitingStore();
+    await store.refreshSidecarHealth();
+
+    expect(store.sidecarHealthy).toBe(false);
+    expect(store.sidecarError).toBe("sidecar_port_conflict");
+    expect(backend.checkSidecarHealth).not.toHaveBeenCalled();
+  });
+
+  it("polls sidecar health by interval and supports stop", async () => {
+    vi.useFakeTimers();
+    const store = useRecruitingStore();
+
+    try {
+      store.startSidecarHealthPolling(1_000);
+      await vi.advanceTimersByTimeAsync(3_100);
+
+      expect(backend.ensureSidecar).toHaveBeenCalledTimes(3);
+      expect(backend.checkSidecarHealth).toHaveBeenCalledTimes(3);
+
+      store.stopSidecarHealthPolling();
+      const ensureCalls = backend.ensureSidecar.mock.calls.length;
+
+      await vi.advanceTimersByTimeAsync(2_100);
+      expect(backend.ensureSidecar).toHaveBeenCalledTimes(ensureCalls);
+    } finally {
+      store.stopSidecarHealthPolling();
+      vi.useRealTimers();
+    }
+  });
+
   it("auto-fetches resumes and triggers analysis after candidate import", async () => {
     const store = useRecruitingStore();
     await store.bootstrap();

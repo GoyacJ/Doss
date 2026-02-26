@@ -172,6 +172,7 @@ function parseCandidatesTaskPayload(task: CrawlTaskRecord): CrawlCandidatesTaskP
 }
 
 export const useRecruitingStore = defineStore("recruiting", () => {
+  const SIDECAR_HEALTH_REFRESH_INTERVAL_MS = 15_000;
   const loading = ref(false);
   const lastError = ref<string | null>(null);
 
@@ -182,6 +183,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
   const metrics = ref<DashboardMetrics | null>(null);
   const health = ref<AppHealth | null>(null);
   const sidecarHealthy = ref<boolean | null>(null);
+  const sidecarError = ref<string | null>(null);
 
   const analyses = ref<Record<number, UiAnalysisRecord[]>>({});
   const screeningResults = ref<Record<number, ScreeningResultRecord[]>>({});
@@ -206,6 +208,8 @@ export const useRecruitingStore = defineStore("recruiting", () => {
   const stageSummary = computed(() => metrics.value?.stage_stats ?? []);
   const taskLoopTimers = new Map<number, ReturnType<typeof setTimeout>>();
   const taskLoopLocks = new Set<number>();
+  let sidecarHealthTimer: ReturnType<typeof setInterval> | null = null;
+  let sidecarHealthRefreshing = false;
 
   function setError(error: unknown) {
     if (error instanceof Error) {
@@ -213,6 +217,55 @@ export const useRecruitingStore = defineStore("recruiting", () => {
       return;
     }
     lastError.value = "Unknown error";
+  }
+
+  function resolveErrorMessage(error: unknown, fallback: string): string {
+    if (error instanceof Error && error.message.trim()) {
+      return error.message;
+    }
+    if (typeof error === "string" && error.trim()) {
+      return error;
+    }
+    return fallback;
+  }
+
+  async function refreshSidecarHealth(options: { ensure?: boolean } = {}) {
+    if (sidecarHealthRefreshing) {
+      return;
+    }
+
+    sidecarHealthRefreshing = true;
+    try {
+      if (options.ensure !== false) {
+        await ensureSidecar();
+      }
+
+      const sidecar = await checkSidecarHealth();
+      sidecarHealthy.value = sidecar.ok;
+      sidecarError.value = sidecar.ok ? null : "sidecar_health_not_ok";
+    } catch (error) {
+      sidecarHealthy.value = false;
+      sidecarError.value = resolveErrorMessage(error, "sidecar_unavailable");
+    } finally {
+      sidecarHealthRefreshing = false;
+    }
+  }
+
+  function startSidecarHealthPolling(intervalMs = SIDECAR_HEALTH_REFRESH_INTERVAL_MS) {
+    if (sidecarHealthTimer) {
+      return;
+    }
+    sidecarHealthTimer = setInterval(() => {
+      void refreshSidecarHealth();
+    }, Math.max(1_000, Math.trunc(intervalMs)));
+  }
+
+  function stopSidecarHealthPolling() {
+    if (!sidecarHealthTimer) {
+      return;
+    }
+    clearInterval(sidecarHealthTimer);
+    sidecarHealthTimer = null;
   }
 
   async function bootstrap() {
@@ -237,13 +290,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
       metrics.value = metricsData;
       health.value = healthData;
 
-      try {
-        await ensureSidecar();
-        const sidecar = await checkSidecarHealth();
-        sidecarHealthy.value = sidecar.ok;
-      } catch {
-        sidecarHealthy.value = false;
-      }
+      await refreshSidecarHealth();
 
       try {
         aiSettings.value = await getAiProviderSettings();
@@ -1043,6 +1090,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     metrics,
     health,
     sidecarHealthy,
+    sidecarError,
     analyses,
     screeningResults,
     interviewKits,
@@ -1060,6 +1108,9 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     hasBootstrapped,
     stageSummary,
     bootstrap,
+    refreshSidecarHealth,
+    startSidecarHealthPolling,
+    stopSidecarHealthPolling,
     refreshMetrics,
     refreshTasks,
     addJob,

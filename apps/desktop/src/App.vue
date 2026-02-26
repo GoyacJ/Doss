@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { RouterLink, RouterView } from "vue-router";
 import GlobalToastViewport from "./components/GlobalToastViewport.vue";
 import UiBadge from "./components/UiBadge.vue";
@@ -21,7 +21,22 @@ const navItems = [
 const sidecarBadge = computed(() => sidecarHealthBadge(store.sidecarHealthy));
 const lastErrorToast = ref<string | null>(null);
 
+function refreshSidecarStatus() {
+  void store.refreshSidecarHealth();
+}
+
+function handleVisibilityChange() {
+  if (document.visibilityState === "visible") {
+    refreshSidecarStatus();
+  }
+}
+
 onMounted(async () => {
+  store.startSidecarHealthPolling();
+  window.addEventListener("focus", refreshSidecarStatus);
+  document.addEventListener("visibilitychange", handleVisibilityChange);
+  refreshSidecarStatus();
+
   if (!store.hasBootstrapped) {
     try {
       await store.bootstrap();
@@ -30,6 +45,12 @@ onMounted(async () => {
       toast.danger(`初始化失败：${message}`);
     }
   }
+});
+
+onUnmounted(() => {
+  store.stopSidecarHealthPolling();
+  window.removeEventListener("focus", refreshSidecarStatus);
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
 });
 
 watch(

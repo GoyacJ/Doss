@@ -56,6 +56,7 @@ export interface UpdateCandidatePayload {
   candidate_id: number;
   name: string;
   current_company?: string;
+  job_id?: number | null;
   score?: number;
   age?: number;
   gender?: CandidateGender;
@@ -484,7 +485,7 @@ export async function updateCandidate(input: UpdateCandidatePayload): Promise<Ca
 }
 
 export async function deleteCandidate(candidate_id: number): Promise<boolean> {
-  return invoke<boolean>("delete_candidate", { candidate_id });
+  return invoke<boolean>("delete_candidate", { candidateId: candidate_id });
 }
 
 export async function setCandidateQualification(input: SetCandidateQualificationPayload): Promise<CandidateRecord> {
@@ -706,76 +707,23 @@ export async function loadDashboardMetrics(): Promise<DashboardMetrics> {
   return invoke<DashboardMetrics>("dashboard_metrics");
 }
 
-let sidecarBaseUrl = "http://127.0.0.1:3791";
-
-function sidecarUrl(path: string): string {
-  return `${sidecarBaseUrl}${path}`;
-}
-
-function setSidecarBaseUrl(baseUrl: string) {
-  const trimmed = baseUrl.trim().replace(/\/+$/, "");
-  if (trimmed) {
-    sidecarBaseUrl = trimmed;
-  }
-}
-
-function wait(delayMs: number): Promise<void> {
-  if (delayMs <= 0) {
-    return Promise.resolve();
-  }
-  return new Promise((resolve) => setTimeout(resolve, delayMs));
-}
-
 export async function ensureSidecar(): Promise<SidecarRuntime> {
   const runtime = await invoke<SidecarRuntime>("ensure_sidecar");
   if (!runtime.ok) {
     throw new Error(runtime.message || "Sidecar unavailable");
   }
-  setSidecarBaseUrl(runtime.base_url);
   return runtime;
 }
 
-async function fetchSidecar(path: string, init: RequestInit, retryOnReconnect: boolean): Promise<Response> {
-  const execute = async () => fetch(sidecarUrl(path), init);
-  try {
-    return await execute();
-  } catch (error) {
-    if (!retryOnReconnect) {
-      throw error;
-    }
-
-    await ensureSidecar();
-    return execute();
+async function invokeSidecar<T>(command: string, input?: Record<string, unknown>): Promise<T> {
+  if (input) {
+    return invoke<T>(command, { input });
   }
+  return invoke<T>(command);
 }
 
 export async function checkSidecarHealth(): Promise<{ ok: boolean; service?: string }> {
-  const retryDelays = [0, 250, 700];
-  let lastError: unknown = null;
-
-  for (let index = 0; index < retryDelays.length; index += 1) {
-    if (index > 0) {
-      await wait(retryDelays[index] || 0);
-    }
-
-    try {
-      if (index > 0) {
-        await ensureSidecar();
-      }
-      const response = await fetch(sidecarUrl("/health"), {
-        method: "GET",
-      });
-      if (!response.ok) {
-        throw new Error(`Sidecar health failed: ${response.status}`);
-      }
-
-      return response.json() as Promise<{ ok: boolean; service?: string }>;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error("Sidecar health failed");
+  return invokeSidecar<{ ok: boolean; service?: string }>("sidecar_health");
 }
 
 export async function triggerSidecarCrawlJobs(payload: {
@@ -784,26 +732,12 @@ export async function triggerSidecarCrawlJobs(payload: {
   keyword: string;
   city?: string;
 }): Promise<SidecarQueueResult> {
-  const response = await fetchSidecar("/v1/crawl/jobs", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      source: payload.source,
-      mode: payload.mode,
-      params: {
-        keyword: payload.keyword,
-        city: payload.city,
-      },
-    }),
-  }, true);
-
-  if (!response.ok) {
-    throw new Error(`Sidecar crawl failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<SidecarQueueResult>;
+  return invokeSidecar<SidecarQueueResult>("sidecar_crawl_jobs", {
+    source: payload.source,
+    mode: payload.mode,
+    keyword: payload.keyword,
+    city: payload.city,
+  });
 }
 
 export async function triggerSidecarCrawlCandidates(payload: {
@@ -811,25 +745,11 @@ export async function triggerSidecarCrawlCandidates(payload: {
   mode: CrawlMode;
   jobId: string;
 }): Promise<SidecarQueueResult> {
-  const response = await fetchSidecar("/v1/crawl/candidates", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      source: payload.source,
-      mode: payload.mode,
-      params: {
-        jobId: payload.jobId,
-      },
-    }),
-  }, true);
-
-  if (!response.ok) {
-    throw new Error(`Sidecar candidate crawl failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<SidecarQueueResult>;
+  return invokeSidecar<SidecarQueueResult>("sidecar_crawl_candidates", {
+    source: payload.source,
+    mode: payload.mode,
+    job_id: payload.jobId,
+  });
 }
 
 export async function triggerSidecarCrawlResume(payload: {
@@ -837,21 +757,9 @@ export async function triggerSidecarCrawlResume(payload: {
   mode: CrawlMode;
   candidateId: string;
 }): Promise<SidecarQueueResult> {
-  const response = await fetchSidecar("/v1/crawl/resume", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      source: payload.source,
-      mode: payload.mode,
-      candidateId: payload.candidateId,
-    }),
-  }, true);
-
-  if (!response.ok) {
-    throw new Error(`Sidecar resume crawl failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<SidecarQueueResult>;
+  return invokeSidecar<SidecarQueueResult>("sidecar_crawl_resume", {
+    source: payload.source,
+    mode: payload.mode,
+    candidate_id: payload.candidateId,
+  });
 }

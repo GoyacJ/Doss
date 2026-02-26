@@ -7,7 +7,7 @@ fn read_candidate_by_id(
 ) -> Result<Candidate, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, external_id, source, name, current_company, score, age, gender, years_of_experience, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates WHERE id = ?1",
+            "SELECT id, external_id, source, name, current_company, linked_job_id, linked_job_title, score, age, gender, years_of_experience, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates WHERE id = ?1",
         )
         .map_err(|error| error.to_string())?;
 
@@ -48,19 +48,33 @@ pub(crate) fn create_candidate(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let (linked_job_id, linked_job_title) = if let Some(job_id) = input.job_id {
+        let job_title = conn
+            .query_row("SELECT title FROM jobs WHERE id = ?1", [job_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("Job {} not found", job_id))?;
+        (Some(job_id), Some(job_title))
+    } else {
+        (None, None)
+    };
 
     conn.execute(
         r#"
         INSERT INTO candidates(
-            external_id, source, name, current_company, score, age, gender, years_of_experience, stage,
+            external_id, source, name, current_company, linked_job_id, linked_job_title, score, age, gender, years_of_experience, stage,
             phone_enc, phone_hash, email_enc, email_hash, tags_json, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'NEW', ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'NEW', ?11, ?12, ?13, ?14, ?15, ?16, ?17)
         "#,
         params![
             input.external_id,
             input.source.unwrap_or(SourceType::Manual).as_db(),
             input.name,
             input.current_company,
+            linked_job_id,
+            linked_job_title,
             score,
             age,
             gender,
@@ -159,6 +173,18 @@ pub(crate) fn update_candidate(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let (linked_job_id, linked_job_title) = if let Some(job_id) = input.job_id {
+        let job_title = conn
+            .query_row("SELECT title FROM jobs WHERE id = ?1", [job_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("Job {} not found", job_id))?;
+        (Some(job_id), Some(job_title))
+    } else {
+        (None, None)
+    };
     let now = now_iso();
     let affected = conn
         .execute(
@@ -176,8 +202,10 @@ pub(crate) fn update_candidate(
                 phone_hash = CASE WHEN ?9 IS NOT NULL THEN ?9 ELSE phone_hash END,
                 email_enc = CASE WHEN ?10 IS NOT NULL THEN ?10 ELSE email_enc END,
                 email_hash = CASE WHEN ?11 IS NOT NULL THEN ?11 ELSE email_hash END,
-                updated_at = ?12
-            WHERE id = ?13
+                linked_job_id = ?12,
+                linked_job_title = ?13,
+                updated_at = ?14
+            WHERE id = ?15
             "#,
             params![
                 name,
@@ -191,6 +219,8 @@ pub(crate) fn update_candidate(
                 phone_hash,
                 email_enc,
                 email_hash,
+                linked_job_id,
+                linked_job_title,
                 now,
                 input.candidate_id,
             ],
@@ -199,6 +229,26 @@ pub(crate) fn update_candidate(
 
     if affected == 0 {
         return Err(format!("Candidate {} not found", input.candidate_id));
+    }
+
+    if let Some(job_id) = linked_job_id {
+        let stage_text: String = conn
+            .query_row(
+                "SELECT stage FROM candidates WHERE id = ?1",
+                [input.candidate_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        conn.execute(
+            r#"
+            INSERT INTO applications(job_id, candidate_id, stage, notes, created_at, updated_at)
+            VALUES (?1, ?2, ?3, NULL, ?4, ?5)
+            ON CONFLICT(job_id, candidate_id)
+            DO UPDATE SET stage = excluded.stage, updated_at = excluded.updated_at
+            "#,
+            params![job_id, input.candidate_id, stage_text, now, now],
+        )
+        .map_err(|error| error.to_string())?;
     }
 
     sync_candidate_search(&conn, input.candidate_id).map_err(|error| error.to_string())?;
@@ -332,12 +382,13 @@ pub(crate) fn merge_candidate_import(
         .optional()
         .map_err(|error| error.to_string())?;
 
-    let existing_tags_json = existing
-        .ok_or_else(|| format!("Candidate {} not found", input.candidate_id))?;
+    let existing_tags_json =
+        existing.ok_or_else(|| format!("Candidate {} not found", input.candidate_id))?;
     let existing_tags: Vec<String> = serde_json::from_str(&existing_tags_json).unwrap_or_default();
     let incoming_tags = input.tags.unwrap_or_default();
     let merged_tags = merge_candidate_tags(&existing_tags, &incoming_tags);
-    let merged_tags_json = serde_json::to_string(&merged_tags).map_err(|error| error.to_string())?;
+    let merged_tags_json =
+        serde_json::to_string(&merged_tags).map_err(|error| error.to_string())?;
 
     let incoming_company = input
         .current_company
@@ -433,6 +484,19 @@ pub(crate) fn merge_candidate_import(
             params![job_id, input.candidate_id, stage_text, now, now],
         )
         .map_err(|error| error.to_string())?;
+
+        let linked_job_title = conn
+            .query_row("SELECT title FROM jobs WHERE id = ?1", [job_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("Job {} not found", job_id))?;
+        conn.execute(
+            "UPDATE candidates SET linked_job_id = ?1, linked_job_title = ?2, updated_at = ?3 WHERE id = ?4",
+            params![job_id, linked_job_title, now, input.candidate_id],
+        )
+        .map_err(|error| error.to_string())?;
     }
 
     sync_candidate_search(&conn, input.candidate_id).map_err(|error| error.to_string())?;
@@ -465,18 +529,20 @@ pub(crate) fn list_candidates(
     if let Some(filter_stage) = stage {
         let mut stmt = conn
             .prepare(
-                "SELECT id, external_id, source, name, current_company, score, age, gender, years_of_experience, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates WHERE stage = ?1 ORDER BY updated_at DESC",
+                "SELECT id, external_id, source, name, current_company, linked_job_id, linked_job_title, score, age, gender, years_of_experience, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates WHERE stage = ?1 ORDER BY updated_at DESC",
             )
             .map_err(|error| error.to_string())?;
         let rows = stmt
-            .query_map([filter_stage.as_db()], |row| candidate_from_row(row, &state.cipher))
+            .query_map([filter_stage.as_db()], |row| {
+                candidate_from_row(row, &state.cipher)
+            })
             .map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())
     } else {
         let mut stmt = conn
             .prepare(
-                "SELECT id, external_id, source, name, current_company, score, age, gender, years_of_experience, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates ORDER BY updated_at DESC",
+                "SELECT id, external_id, source, name, current_company, linked_job_id, linked_job_title, score, age, gender, years_of_experience, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates ORDER BY updated_at DESC",
             )
             .map_err(|error| error.to_string())?;
         let rows = stmt
@@ -505,13 +571,11 @@ pub(crate) fn move_candidate_stage(
         .ok_or_else(|| format!("Candidate {} not found", input.candidate_id))?;
 
     if !is_valid_transition(&current_stage_text, input.to_stage.as_db()) {
-        return Err(
-            AppError::InvalidTransition {
-                from: current_stage_text,
-                to: input.to_stage.as_db().to_string(),
-            }
-            .to_string(),
-        );
+        return Err(AppError::InvalidTransition {
+            from: current_stage_text,
+            to: input.to_stage.as_db().to_string(),
+        }
+        .to_string());
     }
 
     let now = now_iso();
@@ -653,7 +717,11 @@ pub(crate) fn upsert_resume(
 ) -> Result<ResumeRecord, String> {
     let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
     let now = now_iso();
-    let source = input.source.unwrap_or(SourceType::Manual).as_db().to_string();
+    let source = input
+        .source
+        .unwrap_or(SourceType::Manual)
+        .as_db()
+        .to_string();
     let parsed_json = input.parsed.to_string();
 
     conn.execute(
@@ -823,7 +891,12 @@ pub(crate) fn run_candidate_analysis(
             .query_row(
                 "SELECT description, salary_k FROM jobs WHERE id = ?1",
                 [job_id],
-                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|error| error.to_string())?
@@ -852,7 +925,11 @@ pub(crate) fn run_candidate_analysis(
 
     let matched = required_skills
         .iter()
-        .filter(|required| normalized_skills.iter().any(|owned| owned.contains(*required)))
+        .filter(|required| {
+            normalized_skills
+                .iter()
+                .any(|owned| owned.contains(*required))
+        })
         .count() as i32;
 
     let skill_score = if required_skills.is_empty() {
@@ -979,7 +1056,8 @@ pub(crate) fn run_candidate_analysis(
         resume_parsed: resume_row.1,
     };
 
-    let ai_settings = resolve_ai_settings(&conn, &state.cipher).map_err(|error| error.to_string())?;
+    let ai_settings =
+        resolve_ai_settings(&conn, &state.cipher).map_err(|error| error.to_string())?;
     let provider_name = ai_settings.provider.as_db().to_string();
     let model_name = ai_settings.model.clone();
 
@@ -1021,7 +1099,8 @@ pub(crate) fn run_candidate_analysis(
             input.candidate_id,
             input.job_id,
             final_payload.overall_score,
-            serde_json::to_string(&final_payload.dimension_scores).map_err(|error| error.to_string())?,
+            serde_json::to_string(&final_payload.dimension_scores)
+                .map_err(|error| error.to_string())?,
             serde_json::to_string(&final_payload.risks).map_err(|error| error.to_string())?,
             serde_json::to_string(&final_payload.highlights).map_err(|error| error.to_string())?,
             serde_json::to_string(&final_payload.suggestions).map_err(|error| error.to_string())?,

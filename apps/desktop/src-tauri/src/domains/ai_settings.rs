@@ -62,7 +62,12 @@ pub(crate) fn upsert_ai_provider_profile(
 
     profile.provider = requested_provider.as_db().to_string();
 
-    if let Some(name) = input.name.as_deref().map(str::trim).filter(|item| !item.is_empty()) {
+    if let Some(name) = input
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
         profile.name = name.to_string();
     } else if profile.name.trim().is_empty() {
         let ordinal = existing_index.unwrap_or(profiles_state.profiles.len()) + 1;
@@ -115,7 +120,10 @@ pub(crate) fn upsert_ai_provider_profile(
         .temperature
         .unwrap_or(profile.temperature)
         .clamp(0.0, 1.2);
-    profile.max_tokens = input.max_tokens.unwrap_or(profile.max_tokens).clamp(200, 8192);
+    profile.max_tokens = input
+        .max_tokens
+        .unwrap_or(profile.max_tokens)
+        .clamp(200, 8192);
     profile.timeout_secs = input
         .timeout_secs
         .unwrap_or(profile.timeout_secs)
@@ -369,8 +377,14 @@ pub(crate) fn upsert_ai_provider_settings(
         .temperature
         .unwrap_or(stored.temperature)
         .clamp(0.0, 1.2);
-    stored.max_tokens = input.max_tokens.unwrap_or(stored.max_tokens).clamp(200, 8192);
-    stored.timeout_secs = input.timeout_secs.unwrap_or(stored.timeout_secs).clamp(8, 180);
+    stored.max_tokens = input
+        .max_tokens
+        .unwrap_or(stored.max_tokens)
+        .clamp(200, 8192);
+    stored.timeout_secs = input
+        .timeout_secs
+        .unwrap_or(stored.timeout_secs)
+        .clamp(8, 180);
     stored.retry_count = input.retry_count.unwrap_or(stored.retry_count).clamp(1, 5);
 
     if let Some(api_key_raw) = input.api_key {

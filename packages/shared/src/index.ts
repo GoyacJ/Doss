@@ -209,6 +209,8 @@ export interface CandidateRecord {
   source: string;
   name: string;
   current_company?: string | null;
+  job_id?: number | null;
+  job_title?: string | null;
   score?: number | null;
   age?: number | null;
   gender?: CandidateGender | null;

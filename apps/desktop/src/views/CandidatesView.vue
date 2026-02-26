@@ -27,10 +27,13 @@ const candidateDialogSubmitting = ref(false);
 const candidateDrawerOpen = ref(false);
 const candidateDrawerSubmitting = ref(false);
 const candidateDrawerLoading = ref(false);
+const deleteConfirmCandidate = ref<CandidateRecord | null>(null);
+const deletingCandidateId = ref<number | null>(null);
 
 const candidateForm = reactive({
   name: "",
   current_company: "",
+  job_id: "",
   score: null as number | null | "",
   age: null as number | null | "",
   gender: "" as CandidateGender | "",
@@ -45,6 +48,7 @@ const candidateDialogResumeEnableOcr = ref(false);
 const candidateDrawerForm = reactive({
   name: "",
   current_company: "",
+  job_id: "",
   score: null as number | null | "",
   age: null as number | null | "",
   gender: "" as CandidateGender | "",
@@ -81,6 +85,33 @@ const sidecarResumeModeOptions: UiSelectOption[] = [
 const selectedCandidate = computed(() =>
   store.candidates.find((item) => item.id === selectedCandidateId.value) ?? null,
 );
+
+const candidateJobOptions = computed<UiSelectOption[]>(() =>
+  store.jobs.map((job) => ({
+    label: `${job.title} · ${job.company}`,
+    value: String(job.id),
+  })),
+);
+
+const candidateDrawerJobOptions = computed<UiSelectOption[]>(() => {
+  const options = [...candidateJobOptions.value];
+  const selected = selectedCandidate.value;
+  if (!selected?.job_id) {
+    return options;
+  }
+
+  const selectedValue = String(selected.job_id);
+  const exists = options.some((item) => String(item.value) === selectedValue);
+  if (exists) {
+    return options;
+  }
+
+  options.unshift({
+    label: `${selected.job_title || `职位 #${selected.job_id}`}（已删除）`,
+    value: selectedValue,
+  });
+  return options;
+});
 
 const selectedAnalysis = computed(() => {
   if (!selectedCandidateId.value) {
@@ -138,9 +169,31 @@ function normalizeCandidateScore(value: number | null | ""): number | undefined 
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
+function normalizeCandidateJobId(value: string | number | null | undefined): number | undefined {
+  if (value === "" || value === null || value === undefined) {
+    return undefined;
+  }
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return undefined;
+  }
+  return parsed;
+}
+
+function formatCandidateJob(candidate: CandidateRecord): string {
+  if (candidate.job_title && candidate.job_title.trim()) {
+    return candidate.job_title;
+  }
+  if (candidate.job_id) {
+    return `职位 #${candidate.job_id}`;
+  }
+  return "-";
+}
+
 function resetCandidateForm() {
   candidateForm.name = "";
   candidateForm.current_company = "";
+  candidateForm.job_id = "";
   candidateForm.score = null;
   candidateForm.age = null;
   candidateForm.gender = "";
@@ -182,6 +235,7 @@ function resolveErrorMessage(error: unknown, fallback: string): string {
 function hydrateCandidateDrawerForm(candidate: CandidateRecord) {
   candidateDrawerForm.name = candidate.name;
   candidateDrawerForm.current_company = candidate.current_company ?? "";
+  candidateDrawerForm.job_id = candidate.job_id ? String(candidate.job_id) : "";
   candidateDrawerForm.score = candidate.score ?? null;
   candidateDrawerForm.age = candidate.age ?? null;
   candidateDrawerForm.gender = candidate.gender ?? "";
@@ -229,6 +283,7 @@ async function saveCandidateFromDrawer() {
       candidate_id: candidate.id,
       name: candidateDrawerForm.name.trim(),
       current_company: candidateDrawerForm.current_company || undefined,
+      job_id: normalizeCandidateJobId(candidateDrawerForm.job_id),
       score: normalizeCandidateScore(candidateDrawerForm.score),
       age: normalizeCandidateAge(candidateDrawerForm.age),
       gender: normalizeCandidateGender(candidateDrawerForm.gender),
@@ -299,6 +354,7 @@ async function submitCandidate() {
   const payload = {
     name: candidateForm.name,
     current_company: candidateForm.current_company || undefined,
+    job_id: normalizeCandidateJobId(candidateForm.job_id),
     score: normalizeCandidateScore(candidateForm.score),
     age: normalizeCandidateAge(candidateForm.age),
     gender: normalizeCandidateGender(candidateForm.gender),
@@ -432,17 +488,37 @@ async function doSearch() {
   }
 }
 
-async function deleteCandidateInList(candidate: CandidateRecord) {
-  const confirmed = window.confirm(`确认删除候选人「${candidate.name}」吗？`);
-  if (!confirmed) {
+function askDeleteCandidate(candidate: CandidateRecord) {
+  deleteConfirmCandidate.value = candidate;
+}
+
+function cancelDeleteCandidate() {
+  if (deletingCandidateId.value !== null) {
     return;
   }
-  await store.deleteCandidate(candidate.id);
-  if (selectedCandidateId.value === candidate.id) {
-    selectedCandidateId.value = null;
-    candidateDrawerOpen.value = false;
+  deleteConfirmCandidate.value = null;
+}
+
+async function removeCandidate() {
+  const candidate = deleteConfirmCandidate.value;
+  if (!candidate) {
+    return;
   }
-  toast.success("候选人已删除");
+
+  deletingCandidateId.value = candidate.id;
+  try {
+    await store.deleteCandidate(candidate.id);
+    if (selectedCandidateId.value === candidate.id) {
+      selectedCandidateId.value = null;
+      candidateDrawerOpen.value = false;
+    }
+    deleteConfirmCandidate.value = null;
+    toast.success("候选人已删除");
+  } catch (error) {
+    toast.danger(resolveErrorMessage(error, "删除候选人失败"));
+  } finally {
+    deletingCandidateId.value = null;
+  }
 }
 
 async function toggleCandidateQualification(candidate: CandidateRecord) {
@@ -519,6 +595,7 @@ function screeningLabel(recommendation: "PASS" | "REVIEW" | "REJECT") {
             <tr>
               <UiTh>姓名</UiTh>
               <UiTh>当前公司</UiTh>
+              <UiTh>职位</UiTh>
               <UiTh>评分</UiTh>
               <UiTh>年龄</UiTh>
               <UiTh>性别</UiTh>
@@ -532,6 +609,7 @@ function screeningLabel(recommendation: "PASS" | "REVIEW" | "REJECT") {
             <tr v-for="candidate in store.candidates" :key="candidate.id">
               <UiTd>{{ candidate.name }}</UiTd>
               <UiTd>{{ candidate.current_company || "-" }}</UiTd>
+              <UiTd>{{ formatCandidateJob(candidate) }}</UiTd>
               <UiTd>{{ candidate.score ?? "-" }}</UiTd>
               <UiTd>{{ candidate.age ?? "-" }}</UiTd>
               <UiTd>{{ formatGender(candidate.gender) }}</UiTd>
@@ -546,7 +624,13 @@ function screeningLabel(recommendation: "PASS" | "REVIEW" | "REJECT") {
                   <UiButton variant="ghost" @click="toggleCandidateQualification(candidate)">
                     {{ candidate.stage === "REJECTED" ? "启用资格" : "取消资格" }}
                   </UiButton>
-                  <UiButton variant="ghost" @click="deleteCandidateInList(candidate)">删除</UiButton>
+                  <UiButton
+                    variant="ghost"
+                    :disabled="deletingCandidateId === candidate.id"
+                    @click="askDeleteCandidate(candidate)"
+                  >
+                    {{ deletingCandidateId === candidate.id ? "删除中..." : "删除" }}
+                  </UiButton>
                 </div>
               </UiTd>
             </tr>
@@ -592,6 +676,13 @@ function screeningLabel(recommendation: "PASS" | "REVIEW" | "REJECT") {
           </UiField>
           <UiField label="当前公司">
             <input v-model="candidateForm.current_company" placeholder="当前就职公司" />
+          </UiField>
+          <UiField label="关联职位">
+            <UiSelect
+              v-model="candidateForm.job_id"
+              :options="candidateJobOptions"
+              placeholder="不关联职位"
+            />
           </UiField>
           <UiField label="评分">
             <input v-model.number="candidateForm.score" type="number" min="0" max="100" step="1" placeholder="评分（0-100）" />
@@ -670,6 +761,13 @@ function screeningLabel(recommendation: "PASS" | "REVIEW" | "REJECT") {
             </UiField>
             <UiField label="当前公司">
               <input v-model="candidateDrawerForm.current_company" placeholder="当前就职公司" />
+            </UiField>
+            <UiField label="关联职位">
+              <UiSelect
+                v-model="candidateDrawerForm.job_id"
+                :options="candidateDrawerJobOptions"
+                placeholder="不关联职位"
+              />
             </UiField>
             <UiField label="评分">
               <input
@@ -838,6 +936,37 @@ function screeningLabel(recommendation: "PASS" | "REVIEW" | "REJECT") {
 
         <p v-if="candidateDrawerLoading" class="m-0 mt-3 text-sm text-muted">正在刷新候选人上下文...</p>
       </aside>
+    </div>
+  </Teleport>
+
+  <Teleport to="body">
+    <div
+      v-if="deleteConfirmCandidate"
+      class="fixed inset-0 z-[85] flex items-center justify-center bg-black/35 p-4"
+      @click.self="cancelDeleteCandidate()"
+    >
+      <div class="w-full max-w-md">
+        <UiPanel title="删除候选人">
+          <p class="m-0">
+            确认删除候选人「{{ deleteConfirmCandidate.name }}」吗？此操作不可撤销。
+          </p>
+          <div class="mt-4 flex flex-wrap justify-end gap-2">
+            <UiButton
+              variant="ghost"
+              :disabled="deletingCandidateId === deleteConfirmCandidate.id"
+              @click="cancelDeleteCandidate()"
+            >
+              取消
+            </UiButton>
+            <UiButton
+              :disabled="deletingCandidateId === deleteConfirmCandidate.id"
+              @click="removeCandidate()"
+            >
+              {{ deletingCandidateId === deleteConfirmCandidate.id ? "删除中..." : "确认删除" }}
+            </UiButton>
+          </div>
+        </UiPanel>
+      </div>
     </div>
   </Teleport>
 </template>
