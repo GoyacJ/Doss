@@ -311,7 +311,6 @@ pub(crate) fn migrate_db(db_path: &Path) -> AppResult<()> {
         CREATE INDEX IF NOT EXISTS idx_candidates_stage ON candidates(stage);
         CREATE INDEX IF NOT EXISTS idx_applications_job_stage ON applications(job_id, stage);
         CREATE INDEX IF NOT EXISTS idx_crawl_tasks_status ON crawl_tasks(status);
-        CREATE INDEX IF NOT EXISTS idx_crawl_tasks_next_run_at ON crawl_tasks(next_run_at);
         CREATE INDEX IF NOT EXISTS idx_crawl_task_people_task ON crawl_task_people(task_id, updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_crawl_task_people_sync ON crawl_task_people(task_id, sync_status);
         CREATE INDEX IF NOT EXISTS idx_pending_candidates_dedupe ON pending_candidates(dedupe_key);
@@ -361,6 +360,10 @@ pub(crate) fn migrate_db(db_path: &Path) -> AppResult<()> {
         [],
     );
     let _ = conn.execute("ALTER TABLE crawl_tasks ADD COLUMN next_run_at TEXT", []);
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_crawl_tasks_next_run_at ON crawl_tasks(next_run_at)",
+        [],
+    )?;
 
     let _ = conn.execute(
         r#"

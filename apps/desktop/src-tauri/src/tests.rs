@@ -433,3 +433,58 @@ fn migrate_db_applies_refactor_schema_extensions() {
 
     let _ = std::fs::remove_file(db_path);
 }
+
+#[test]
+fn migrate_db_handles_legacy_crawl_tasks_without_schedule_columns() {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("duration since epoch")
+        .as_millis();
+    let db_path = std::env::temp_dir().join(format!("doss-legacy-migrate-{millis}.sqlite3"));
+    let conn = Connection::open(&db_path).expect("open legacy db");
+
+    conn.execute_batch(
+        r#"
+        CREATE TABLE crawl_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            task_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            error_code TEXT,
+            payload_json TEXT NOT NULL,
+            snapshot_json TEXT,
+            started_at TEXT,
+            finished_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        "#,
+    )
+    .expect("create legacy crawl_tasks");
+    drop(conn);
+
+    migrate_db(&db_path).expect("migrate legacy db");
+
+    let conn = Connection::open(&db_path).expect("open migrated db");
+    let crawl_has_schedule_fields: i64 = conn
+        .query_row(
+            "SELECT COUNT(1) FROM pragma_table_info('crawl_tasks') WHERE name IN ('schedule_type', 'schedule_time', 'schedule_day', 'next_run_at')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("check schedule fields");
+    assert_eq!(crawl_has_schedule_fields, 4);
+
+    let schedule_index_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(1) FROM sqlite_master WHERE type = 'index' AND name = 'idx_crawl_tasks_next_run_at'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("check next_run_at index");
+    assert_eq!(schedule_index_exists, 1);
+
+    let _ = std::fs::remove_file(db_path);
+}
