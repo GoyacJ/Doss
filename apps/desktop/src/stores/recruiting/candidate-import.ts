@@ -21,30 +21,30 @@ function normalizeText(value: string | null | undefined): string {
     .replace(/\s+/g, " ");
 }
 
-function buildCandidateIdentityKey(item: {
-  name: string;
-  current_company?: string | null;
-}): string {
-  return `${normalizeText(item.name)}|${normalizeText(item.current_company)}`;
+function buildCandidateNameKey(name: string): string {
+  return normalizeText(name);
 }
 
-function mergeConflictReasons(existing: CandidateRecord, incoming: {
-  current_company?: string | null;
-  years_of_experience: number;
-}): string[] {
-  const reasons: string[] = [];
-  const existingCompany = normalizeText(existing.current_company);
-  const incomingCompany = normalizeText(incoming.current_company);
-
-  if (existingCompany && incomingCompany && existingCompany !== incomingCompany) {
-    reasons.push("company_mismatch");
+function matchesDedupeRule(existing: CandidateRecord, incoming: CandidateImportItem): boolean {
+  if (buildCandidateNameKey(existing.name) !== buildCandidateNameKey(incoming.name)) {
+    return false;
   }
 
-  if (Math.abs(existing.years_of_experience - incoming.years_of_experience) > 2) {
-    reasons.push("years_gap_gt_2");
+  if (
+    typeof existing.age === "number"
+    && typeof incoming.age === "number"
+    && existing.age !== incoming.age
+  ) {
+    return false;
   }
 
-  return reasons;
+  const existingAddress = normalizeText(existing.address);
+  const incomingAddress = normalizeText(incoming.address);
+  if (existingAddress && incomingAddress && existingAddress !== incomingAddress) {
+    return false;
+  }
+
+  return true;
 }
 
 function replaceCandidateInStore(candidates: Ref<CandidateRecord[]>, updated: CandidateRecord) {
@@ -75,6 +75,8 @@ export interface CandidateImportModuleDeps {
     name: string;
     current_company?: string;
     years_of_experience: number;
+    age?: number;
+    address?: string;
     phone?: string;
     email?: string;
     tags: string[];
@@ -84,6 +86,7 @@ export interface CandidateImportModuleDeps {
     candidate_id: number;
     current_company?: string;
     years_of_experience?: number;
+    address?: string;
     tags?: string[];
     phone?: string;
     email?: string;
@@ -164,12 +167,12 @@ export function createCandidateImportModule(deps: CandidateImportModuleDeps) {
         .map((item) => item.external_id)
         .filter((item): item is string => Boolean(item)),
     );
-    const existingByIdentity = new Map<string, CandidateRecord[]>();
+    const existingByName = new Map<string, CandidateRecord[]>();
     for (const candidate of deps.candidates.value) {
-      const key = buildCandidateIdentityKey(candidate);
-      const list = existingByIdentity.get(key) ?? [];
+      const key = buildCandidateNameKey(candidate.name);
+      const list = existingByName.get(key) ?? [];
       list.push(candidate);
-      existingByIdentity.set(key, list);
+      existingByName.set(key, list);
     }
 
     const inserted: CandidateRecord[] = [];
@@ -184,30 +187,17 @@ export function createCandidateImportModule(deps: CandidateImportModuleDeps) {
         continue;
       }
 
-      const identity = buildCandidateIdentityKey(item);
-      const identityMatches = existingByIdentity.get(identity) ?? [];
+      const nameKey = buildCandidateNameKey(item.name);
+      const nameMatches = existingByName.get(nameKey) ?? [];
+      const identityMatches = nameMatches.filter((candidate) => matchesDedupeRule(candidate, item));
 
       if (identityMatches.length === 1) {
         const target = identityMatches[0];
-        const reasons = mergeConflictReasons(target, item);
-        if (reasons.length > 0) {
-          conflicts.push({
-            id: `${target.id}-${Date.now()}-${conflicts.length}`,
-            source,
-            mode,
-            localJobId,
-            existingCandidate: target,
-            imported: item,
-            reasons,
-            createdAt: new Date().toISOString(),
-          });
-          continue;
-        }
-
         const mergedRecord = await deps.mergeCandidateImport({
           candidate_id: target.id,
           current_company: item.current_company,
           years_of_experience: item.years_of_experience,
+          address: item.address,
           tags: mergeTag ? [...item.tags, mergeTag] : item.tags,
           phone: item.phone,
           email: item.email,
@@ -226,7 +216,7 @@ export function createCandidateImportModule(deps: CandidateImportModuleDeps) {
 
       if (identityMatches.length > 1) {
         conflicts.push({
-          id: `multi-${identity}-${Date.now()}-${conflicts.length}`,
+          id: `multi-${nameKey}-${Date.now()}-${conflicts.length}`,
           source,
           mode,
           localJobId,
@@ -244,6 +234,8 @@ export function createCandidateImportModule(deps: CandidateImportModuleDeps) {
         name: item.name,
         current_company: item.current_company,
         years_of_experience: item.years_of_experience,
+        age: item.age,
+        address: item.address,
         tags: item.tags,
         phone: item.phone,
         email: item.email,
@@ -260,9 +252,9 @@ export function createCandidateImportModule(deps: CandidateImportModuleDeps) {
           externalCandidateId: created.external_id,
         });
       }
-      const list = existingByIdentity.get(identity) ?? [];
+      const list = existingByName.get(nameKey) ?? [];
       list.push(created);
-      existingByIdentity.set(identity, list);
+      existingByName.set(nameKey, list);
     }
 
     if (conflicts.length > 0) {

@@ -6,6 +6,7 @@ import type {
   CrawlMode,
   CrawlTaskPersonRecord,
   CrawlTaskRecord,
+  CrawlTaskScheduleType,
   CrawlTaskSource,
   DashboardMetrics,
   JobRecord,
@@ -114,7 +115,9 @@ const DEFAULT_CANDIDATE_TASK_PAYLOAD: CrawlCandidatesTaskPayload = {
   localJobTitle: "",
   localJobCity: "",
   batchSize: 50,
-  crawlIntervalSeconds: 300,
+  scheduleType: "ONCE",
+  scheduleTime: "09:30",
+  scheduleDay: 1,
   retryCount: 1,
   retryBackoffMs: 450,
   autoSyncToCandidates: true,
@@ -154,17 +157,105 @@ function asBoolean(value: unknown, fallback: boolean): boolean {
   return fallback;
 }
 
+function normalizeScheduleType(value: unknown): CrawlTaskScheduleType {
+  if (typeof value !== "string") {
+    return "ONCE";
+  }
+  const normalized = value.trim().toUpperCase();
+  if (normalized === "DAILY" || normalized === "MONTHLY") {
+    return normalized;
+  }
+  return "ONCE";
+}
+
+function normalizeScheduleTime(value: unknown, fallback = "09:30"): string {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+  const trimmed = value.trim();
+  if (!/^\d{2}:\d{2}$/.test(trimmed)) {
+    return fallback;
+  }
+  const [hoursText, minutesText] = trimmed.split(":");
+  const hours = Number(hoursText);
+  const minutes = Number(minutesText);
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes)) {
+    return fallback;
+  }
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+    return fallback;
+  }
+  return `${hoursText}:${minutesText}`;
+}
+
+function normalizeScheduleDay(value: unknown, fallback = 1): number {
+  const day = Math.trunc(asNumber(value, fallback));
+  if (!Number.isFinite(day)) {
+    return fallback;
+  }
+  return Math.min(31, Math.max(1, day));
+}
+
+function parseTimeParts(scheduleTime: string): { hours: number; minutes: number } {
+  const [hoursText, minutesText] = scheduleTime.split(":");
+  return {
+    hours: Number(hoursText),
+    minutes: Number(minutesText),
+  };
+}
+
+function lastDayOfMonth(year: number, monthIndex: number): number {
+  return new Date(year, monthIndex + 1, 0).getDate();
+}
+
+function computeNextRunAt(
+  scheduleType: CrawlTaskScheduleType,
+  scheduleTime: string,
+  scheduleDay: number,
+  now = new Date(),
+): string | null {
+  if (scheduleType === "ONCE") {
+    return now.toISOString();
+  }
+
+  const { hours, minutes } = parseTimeParts(scheduleTime);
+  if (scheduleType === "DAILY") {
+    const candidate = new Date(now);
+    candidate.setHours(hours, minutes, 0, 0);
+    if (candidate.getTime() <= now.getTime()) {
+      candidate.setDate(candidate.getDate() + 1);
+    }
+    return candidate.toISOString();
+  }
+
+  const candidate = new Date(now);
+  candidate.setHours(hours, minutes, 0, 0);
+  const targetDay = Math.min(scheduleDay, lastDayOfMonth(candidate.getFullYear(), candidate.getMonth()));
+  candidate.setDate(targetDay);
+  if (candidate.getTime() <= now.getTime()) {
+    candidate.setMonth(candidate.getMonth() + 1, 1);
+    const nextTargetDay = Math.min(scheduleDay, lastDayOfMonth(candidate.getFullYear(), candidate.getMonth()));
+    candidate.setDate(nextTargetDay);
+    candidate.setHours(hours, minutes, 0, 0);
+  }
+  return candidate.toISOString();
+}
+
 function parseCandidatesTaskPayload(task: CrawlTaskRecord): CrawlCandidatesTaskPayload {
   const payload = task.payload ?? {};
+  const legacyIntervalSeconds = Math.max(1, Math.trunc(asNumber(
+    payload.crawlIntervalSeconds,
+    300,
+  )));
+  const fallbackScheduleType = legacyIntervalSeconds > 0 ? "DAILY" : "ONCE";
   return {
     localJobId: Math.max(0, Math.trunc(asNumber(payload.localJobId, DEFAULT_CANDIDATE_TASK_PAYLOAD.localJobId))),
     localJobTitle: asString(payload.localJobTitle, DEFAULT_CANDIDATE_TASK_PAYLOAD.localJobTitle).trim(),
     localJobCity: asString(payload.localJobCity, DEFAULT_CANDIDATE_TASK_PAYLOAD.localJobCity).trim(),
     batchSize: Math.max(1, Math.trunc(asNumber(payload.batchSize, DEFAULT_CANDIDATE_TASK_PAYLOAD.batchSize))),
-    crawlIntervalSeconds: Math.max(1, Math.trunc(asNumber(
-      payload.crawlIntervalSeconds,
-      DEFAULT_CANDIDATE_TASK_PAYLOAD.crawlIntervalSeconds,
-    ))),
+    scheduleType: normalizeScheduleType(task.schedule_type ?? payload.scheduleType ?? fallbackScheduleType),
+    scheduleTime: normalizeScheduleTime(task.schedule_time ?? payload.scheduleTime ?? DEFAULT_CANDIDATE_TASK_PAYLOAD.scheduleTime),
+    scheduleDay: normalizeScheduleDay(task.schedule_day ?? payload.scheduleDay ?? DEFAULT_CANDIDATE_TASK_PAYLOAD.scheduleDay),
     retryCount: Math.max(0, Math.trunc(asNumber(payload.retryCount, DEFAULT_CANDIDATE_TASK_PAYLOAD.retryCount))),
     retryBackoffMs: Math.max(100, Math.trunc(asNumber(payload.retryBackoffMs, DEFAULT_CANDIDATE_TASK_PAYLOAD.retryBackoffMs))),
     autoSyncToCandidates: asBoolean(payload.autoSyncToCandidates, DEFAULT_CANDIDATE_TASK_PAYLOAD.autoSyncToCandidates),
@@ -337,6 +428,18 @@ export const useRecruitingStore = defineStore("recruiting", () => {
       });
     }, Math.max(0, delayMs));
     taskLoopTimers.set(taskId, timer);
+  }
+
+  function resolveTaskNextRunDelayMs(task: CrawlTaskRecord): number {
+    if (!task.next_run_at) {
+      return 0;
+    }
+    const runAtMs = Date.parse(task.next_run_at);
+    if (!Number.isFinite(runAtMs)) {
+      return 0;
+    }
+    const now = Date.now();
+    return Math.max(0, runAtMs - now);
   }
 
   function findTaskById(taskId: number): CrawlTaskRecord | undefined {
@@ -555,6 +658,12 @@ export const useRecruitingStore = defineStore("recruiting", () => {
       return;
     }
 
+    const pendingDelayMs = resolveTaskNextRunDelayMs(task);
+    if (pendingDelayMs > 250) {
+      scheduleTaskLoop(taskId, pendingDelayMs);
+      return;
+    }
+
     taskLoopLocks.add(taskId);
     try {
       const payload = parseCandidatesTaskPayload(task);
@@ -563,10 +672,20 @@ export const useRecruitingStore = defineStore("recruiting", () => {
       while (attempts <= payload.retryCount) {
         try {
           const result = await runCrawlTaskCycle(task);
+          const nextRunAt = computeNextRunAt(
+            payload.scheduleType,
+            payload.scheduleTime ?? DEFAULT_CANDIDATE_TASK_PAYLOAD.scheduleTime ?? "09:30",
+            payload.scheduleDay ?? DEFAULT_CANDIDATE_TASK_PAYLOAD.scheduleDay ?? 1,
+          );
+          const nextStatus = payload.scheduleType === "ONCE" ? "SUCCEEDED" : "RUNNING";
           await updateCrawlTask({
             task_id: taskId,
-            status: "RUNNING",
+            status: nextStatus,
             error_code: undefined,
+            schedule_type: payload.scheduleType,
+            schedule_time: payload.scheduleTime,
+            schedule_day: payload.scheduleDay,
+            next_run_at: payload.scheduleType === "ONCE" ? undefined : nextRunAt ?? undefined,
             snapshot: {
               ...(task.snapshot ?? {}),
               lastRunAt: new Date().toISOString(),
@@ -574,13 +693,16 @@ export const useRecruitingStore = defineStore("recruiting", () => {
               syncedPeople: result.syncedPeople,
               failedPeople: result.failedPeople,
               platformSummaries: result.platformSummaries,
-              intervalSeconds: payload.crawlIntervalSeconds,
+              scheduleType: payload.scheduleType,
+              scheduleTime: payload.scheduleTime,
+              scheduleDay: payload.scheduleDay,
+              nextRunAt: nextRunAt ?? null,
             },
           });
           await refreshTasks();
           const latest = findTaskById(taskId);
           if (latest?.status === "RUNNING") {
-            scheduleTaskLoop(taskId, payload.crawlIntervalSeconds * 1000);
+            scheduleTaskLoop(taskId, resolveTaskNextRunDelayMs(latest));
           }
           return;
         } catch (error) {
@@ -624,7 +746,11 @@ export const useRecruitingStore = defineStore("recruiting", () => {
 
     for (const taskId of runningIds) {
       if (!taskLoopTimers.has(taskId)) {
-        scheduleTaskLoop(taskId, 0);
+        const task = findTaskById(taskId);
+        if (!task) {
+          continue;
+        }
+        scheduleTaskLoop(taskId, resolveTaskNextRunDelayMs(task));
       }
     }
   }
@@ -696,6 +822,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     age?: number;
     gender?: "male" | "female" | "other";
     years_of_experience: number;
+    address?: string;
     phone?: string;
     email?: string;
     tags: string[];
@@ -769,7 +896,9 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     mode: CrawlMode;
     localJobId: number;
     batchSize: number;
-    crawlIntervalSeconds: number;
+    scheduleType: CrawlTaskScheduleType;
+    scheduleTime?: string;
+    scheduleDay?: number;
     retryCount: number;
     retryBackoffMs: number;
     autoSyncToCandidates: boolean;
@@ -779,16 +908,27 @@ export const useRecruitingStore = defineStore("recruiting", () => {
       throw new Error("local_active_job_required");
     }
 
+    const scheduleType = normalizeScheduleType(payload.scheduleType);
+    const scheduleTime = normalizeScheduleTime(payload.scheduleTime, DEFAULT_CANDIDATE_TASK_PAYLOAD.scheduleTime);
+    const scheduleDay = normalizeScheduleDay(payload.scheduleDay, DEFAULT_CANDIDATE_TASK_PAYLOAD.scheduleDay);
+    const nextRunAt = computeNextRunAt(scheduleType, scheduleTime, scheduleDay);
+
     const task = await createCrawlTask({
       source: payload.source,
       mode: payload.mode,
       task_type: "crawl_candidates",
+      schedule_type: scheduleType,
+      schedule_time: scheduleTime,
+      schedule_day: scheduleDay,
+      next_run_at: nextRunAt ?? undefined,
       payload: {
         localJobId: localJob.id,
         localJobTitle: localJob.title,
         localJobCity: localJob.city ?? "",
         batchSize: payload.batchSize,
-        crawlIntervalSeconds: payload.crawlIntervalSeconds,
+        scheduleType,
+        scheduleTime,
+        scheduleDay,
         retryCount: payload.retryCount,
         retryBackoffMs: payload.retryBackoffMs,
         autoSyncToCandidates: payload.autoSyncToCandidates,
@@ -1025,9 +1165,21 @@ export const useRecruitingStore = defineStore("recruiting", () => {
       return;
     }
 
+    const payload = parseCandidatesTaskPayload(task);
+    const nextRunAt = task.next_run_at
+      ?? computeNextRunAt(
+        payload.scheduleType,
+        payload.scheduleTime ?? DEFAULT_CANDIDATE_TASK_PAYLOAD.scheduleTime ?? "09:30",
+        payload.scheduleDay ?? DEFAULT_CANDIDATE_TASK_PAYLOAD.scheduleDay ?? 1,
+      )
+      ?? undefined;
     await updateCrawlTask({
       task_id: taskId,
       status: "RUNNING",
+      schedule_type: payload.scheduleType,
+      schedule_time: payload.scheduleTime,
+      schedule_day: payload.scheduleDay,
+      next_run_at: nextRunAt,
     });
     await refreshTasks();
     await runCrawlTaskOnce(taskId);

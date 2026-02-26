@@ -1,6 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from "vue";
-import type { CrawlTaskRecord, CrawlTaskSource, CrawlTaskPersonRecord, CrawlTaskPersonSyncStatus, CrawlMode } from "@doss/shared";
+import type {
+  CrawlMode,
+  CrawlTaskPersonRecord,
+  CrawlTaskPersonSyncStatus,
+  CrawlTaskRecord,
+  CrawlTaskScheduleType,
+  CrawlTaskSource,
+} from "@doss/shared";
 import { useRecruitingStore } from "../stores/recruiting";
 import UiBadge from "../components/UiBadge.vue";
 import UiButton from "../components/UiButton.vue";
@@ -15,8 +22,6 @@ import { useToastStore } from "../stores/toast";
 
 const store = useRecruitingStore();
 const toast = useToastStore();
-
-type IntervalUnit = "hour" | "minute" | "second";
 
 const creatingTask = ref(false);
 const createModalOpen = ref(false);
@@ -33,8 +38,9 @@ const newTaskForm = reactive({
   mode: "compliant" as CrawlMode,
   localJobId: 0,
   batchSize: 50,
-  crawlIntervalValue: 5,
-  crawlIntervalUnit: "minute" as IntervalUnit,
+  scheduleType: "ONCE" as CrawlTaskScheduleType,
+  scheduleTime: "09:30",
+  scheduleDay: 1,
   retryCount: 1,
   retryBackoffMs: 450,
   autoSyncToCandidates: true,
@@ -68,10 +74,10 @@ const modeOptions = [
   { value: "advanced", label: "高级模式" },
 ];
 
-const intervalUnitOptions = [
-  { value: "hour", label: "小时" },
-  { value: "minute", label: "分钟" },
-  { value: "second", label: "秒" },
+const scheduleTypeOptions = [
+  { value: "ONCE", label: "单次执行" },
+  { value: "DAILY", label: "每日固定时间" },
+  { value: "MONTHLY", label: "每月固定日时间" },
 ];
 
 const autoSyncOptions = [
@@ -100,50 +106,31 @@ function resolveErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-function toIntervalSeconds(value: number, unit: IntervalUnit): number {
-  const safeValue = Math.max(1, Math.trunc(value || 1));
-  if (unit === "hour") {
-    return safeValue * 3600;
+function scheduleLabel(task: CrawlTaskRecord): string {
+  const type = (task.schedule_type ?? "ONCE").toUpperCase();
+  const scheduleTime = task.schedule_time ?? "09:30";
+  if (type === "DAILY") {
+    return `每日 ${scheduleTime}`;
   }
-  if (unit === "minute") {
-    return safeValue * 60;
+  if (type === "MONTHLY") {
+    const scheduleDay = task.schedule_day ?? 1;
+    return `每月 ${scheduleDay} 日 ${scheduleTime}`;
   }
-  return safeValue;
-}
-
-function fromIntervalSeconds(seconds: number): { value: number; unit: IntervalUnit } {
-  const normalized = Math.max(1, Math.trunc(seconds || 1));
-  if (normalized % 3600 === 0) {
-    return {
-      value: normalized / 3600,
-      unit: "hour",
-    };
-  }
-  if (normalized % 60 === 0) {
-    return {
-      value: normalized / 60,
-      unit: "minute",
-    };
-  }
-  return {
-    value: normalized,
-    unit: "second",
-  };
+  return "单次";
 }
 
 function parseTaskPayload(task: CrawlTaskRecord) {
   const payload = task.payload ?? {};
-  const interval = fromIntervalSeconds(Number(payload.crawlIntervalSeconds ?? 300));
   return {
     localJobId: Number(payload.localJobId ?? 0),
     localJobTitle: typeof payload.localJobTitle === "string" ? payload.localJobTitle : "-",
     localJobCity: typeof payload.localJobCity === "string" ? payload.localJobCity : "",
     batchSize: Number(payload.batchSize ?? 0),
-    crawlIntervalSeconds: Number(payload.crawlIntervalSeconds ?? 300),
-    crawlIntervalLabel: `${interval.value}${interval.unit === "hour" ? "小时" : interval.unit === "minute" ? "分钟" : "秒"}`,
+    scheduleLabel: scheduleLabel(task),
     retryCount: Number(payload.retryCount ?? 0),
     retryBackoffMs: Number(payload.retryBackoffMs ?? 0),
     autoSyncToCandidates: Boolean(payload.autoSyncToCandidates ?? false),
+    nextRunAt: task.next_run_at,
     syncedPeople: Number((task.snapshot ?? {}).syncedPeople ?? 0),
     failedPeople: Number((task.snapshot ?? {}).failedPeople ?? 0),
     fetchedPeople: Number((task.snapshot ?? {}).fetchedPeople ?? 0),
@@ -195,8 +182,9 @@ function resetCreateForm() {
   newTaskForm.mode = "compliant";
   newTaskForm.localJobId = activeJobs.value[0]?.id ?? 0;
   newTaskForm.batchSize = 50;
-  newTaskForm.crawlIntervalValue = 5;
-  newTaskForm.crawlIntervalUnit = "minute";
+  newTaskForm.scheduleType = "ONCE";
+  newTaskForm.scheduleTime = "09:30";
+  newTaskForm.scheduleDay = 1;
   newTaskForm.retryCount = 1;
   newTaskForm.retryBackoffMs = 450;
   newTaskForm.autoSyncToCandidates = true;
@@ -230,7 +218,9 @@ async function submitCreateTask() {
       mode: newTaskForm.mode,
       localJobId: Number(newTaskForm.localJobId),
       batchSize: Math.max(1, Math.trunc(newTaskForm.batchSize || 1)),
-      crawlIntervalSeconds: toIntervalSeconds(newTaskForm.crawlIntervalValue, newTaskForm.crawlIntervalUnit),
+      scheduleType: newTaskForm.scheduleType,
+      scheduleTime: newTaskForm.scheduleTime,
+      scheduleDay: Math.max(1, Math.min(31, Math.trunc(newTaskForm.scheduleDay || 1))),
       retryCount: Math.max(0, Math.trunc(newTaskForm.retryCount || 0)),
       retryBackoffMs: Math.max(100, Math.trunc(newTaskForm.retryBackoffMs || 100)),
       autoSyncToCandidates: newTaskForm.autoSyncToCandidates,
@@ -362,7 +352,7 @@ onMounted(async () => {
             <UiTh>职位</UiTh>
             <UiTh>模式</UiTh>
             <UiTh>每批人数</UiTh>
-            <UiTh>抓取间隔</UiTh>
+            <UiTh>调度</UiTh>
             <UiTh>重试参数</UiTh>
             <UiTh>自动同步</UiTh>
             <UiTh>状态</UiTh>
@@ -379,7 +369,7 @@ onMounted(async () => {
             </UiTd>
             <UiTd>{{ modeLabel(task.mode) }}</UiTd>
             <UiTd>{{ parseTaskPayload(task).batchSize }}</UiTd>
-            <UiTd>{{ parseTaskPayload(task).crawlIntervalLabel }}</UiTd>
+            <UiTd>{{ parseTaskPayload(task).scheduleLabel }}</UiTd>
             <UiTd>
               {{ parseTaskPayload(task).retryCount }} 次 / {{ parseTaskPayload(task).retryBackoffMs }} ms
             </UiTd>
@@ -446,11 +436,14 @@ onMounted(async () => {
           <UiField label="每批抓取人数">
             <input v-model.number="newTaskForm.batchSize" type="number" min="1" max="500" step="1" />
           </UiField>
-          <UiField label="抓取间隔">
-            <div class="grid grid-cols-[1fr_110px] gap-2">
-              <input v-model.number="newTaskForm.crawlIntervalValue" type="number" min="1" step="1" />
-              <UiSelect v-model="newTaskForm.crawlIntervalUnit" :options="intervalUnitOptions" />
-            </div>
+          <UiField label="调度类型">
+            <UiSelect v-model="newTaskForm.scheduleType" :options="scheduleTypeOptions" />
+          </UiField>
+          <UiField label="调度时间">
+            <input v-model="newTaskForm.scheduleTime" type="time" />
+          </UiField>
+          <UiField v-if="newTaskForm.scheduleType === 'MONTHLY'" label="每月日期">
+            <input v-model.number="newTaskForm.scheduleDay" type="number" min="1" max="31" step="1" />
           </UiField>
           <UiField label="失败重试次数">
             <input v-model.number="newTaskForm.retryCount" type="number" min="0" max="8" step="1" />
@@ -501,7 +494,8 @@ onMounted(async () => {
             <UiInfoRow label="职位名称" :value="parseTaskPayload(selectedTask).localJobTitle || '-'" />
             <UiInfoRow label="城市" :value="parseTaskPayload(selectedTask).localJobCity || '-'" />
             <UiInfoRow label="每批抓取人数" :value="parseTaskPayload(selectedTask).batchSize" />
-            <UiInfoRow label="抓取间隔" :value="parseTaskPayload(selectedTask).crawlIntervalLabel" />
+            <UiInfoRow label="调度" :value="parseTaskPayload(selectedTask).scheduleLabel" />
+            <UiInfoRow label="下次执行时间" :value="parseTaskPayload(selectedTask).nextRunAt || '-'" />
             <UiInfoRow label="失败重试次数" :value="parseTaskPayload(selectedTask).retryCount" />
             <UiInfoRow label="重试退避(ms)" :value="parseTaskPayload(selectedTask).retryBackoffMs" />
             <UiInfoRow label="自动同步到候选人" :value="parseTaskPayload(selectedTask).autoSyncToCandidates ? '是' : '否'" />
