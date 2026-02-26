@@ -1,0 +1,13 @@
+{
+  "name": "doss",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.11.0",
+  "scripts": {
+    "dev": "pnpm --filter @doss/desktop tauri dev",
+    "dev:web": "pnpm --filter @doss/desktop dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  }
+}
