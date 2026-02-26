@@ -1,4 +1,6 @@
-export type SourceType = "boss" | "zhilian" | "wuba" | "lagou" | "manual";
+export type SourceType = "boss" | "zhilian" | "wuba" | "lagou" | "all" | "manual";
+export type CrawlTaskSource = "boss" | "zhilian" | "wuba" | "lagou" | "all";
+export type CrawlPlatformSource = "boss" | "zhilian" | "wuba" | "lagou";
 
 export type CrawlMode = "compliant" | "advanced";
 
@@ -10,6 +12,8 @@ export type CrawlTaskStatus =
   | "SUCCEEDED"
   | "FAILED";
 
+export type JobStatus = "ACTIVE" | "STOPPED";
+
 export type PipelineStage =
   | "NEW"
   | "SCREENING"
@@ -17,6 +21,8 @@ export type PipelineStage =
   | "HOLD"
   | "REJECTED"
   | "OFFERED";
+
+export type CandidateGender = "male" | "female" | "other";
 
 export interface CandidateBasic {
   name: string;
@@ -190,6 +196,9 @@ export interface JobRecord {
   city?: string | null;
   salary_k?: string | null;
   description?: string | null;
+  status?: JobStatus;
+  screening_template_id?: number | null;
+  screening_template_name?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -200,6 +209,9 @@ export interface CandidateRecord {
   source: string;
   name: string;
   current_company?: string | null;
+  score?: number | null;
+  age?: number | null;
+  gender?: CandidateGender | null;
   years_of_experience: number;
   stage: PipelineStage;
   tags: string[];
@@ -231,6 +243,24 @@ export interface CrawlTaskRecord {
   snapshot?: Record<string, unknown> | null;
   started_at?: string | null;
   finished_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type CrawlTaskPersonSyncStatus = "UNSYNCED" | "SYNCED" | "FAILED";
+
+export interface CrawlTaskPersonRecord {
+  id: number;
+  task_id: number;
+  source: CrawlPlatformSource;
+  external_id?: string | null;
+  name: string;
+  current_company?: string | null;
+  years_of_experience: number;
+  sync_status: CrawlTaskPersonSyncStatus;
+  sync_error_code?: string | null;
+  sync_error_message?: string | null;
+  candidate_id?: number | null;
   created_at: string;
   updated_at: string;
 }

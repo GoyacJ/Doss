@@ -7,14 +7,21 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import {
+  createScreeningTemplate,
   createCandidate,
   createCrawlTask,
+  createJob,
+  deleteCandidate,
+  deleteCrawlTask,
   deleteAiProviderProfile,
+  deleteJob,
+  deleteScreeningTemplate,
   finalizeHiringDecision,
   listAnalysis,
   listHiringDecisions,
   listInterviewEvaluations,
   listPipelineEvents,
+  listScreeningTemplates,
   listScreeningResults,
   parseResumeFile,
   generateInterviewKit,
@@ -23,11 +30,20 @@ import {
   runInterviewEvaluation,
   runResumeScreening,
   saveInterviewKit,
+  setCandidateQualification,
   setDefaultAiProviderProfile,
   submitInterviewFeedback,
   testAiProviderProfile,
+  setJobScreeningTemplate,
+  stopJob,
+  listCrawlTaskPeople,
+  updateCandidate,
+  updateJob,
+  updateScreeningTemplate,
   updateCrawlTask,
+  updateCrawlTaskPeopleSync,
   upsertResume,
+  upsertCrawlTaskPeople,
   upsertTaskRuntimeSettings,
 } from "./backend";
 
@@ -79,7 +95,7 @@ describe("backend AI profile commands", () => {
     });
   });
 
-  it("passes snake_case args for candidate timeline and analysis commands", async () => {
+  it("passes camelCase args for candidate timeline and analysis commands", async () => {
     await listPipelineEvents(101);
     await listAnalysis(102);
     await listScreeningResults(103);
@@ -91,19 +107,19 @@ describe("backend AI profile commands", () => {
     });
 
     expect(invokeMock).toHaveBeenCalledWith("list_pipeline_events", {
-      candidate_id: 101,
+      candidateId: 101,
     });
     expect(invokeMock).toHaveBeenCalledWith("list_analysis", {
-      candidate_id: 102,
+      candidateId: 102,
     });
     expect(invokeMock).toHaveBeenCalledWith("list_screening_results", {
-      candidate_id: 103,
+      candidateId: 103,
     });
     expect(invokeMock).toHaveBeenCalledWith("list_hiring_decisions", {
-      candidate_id: 104,
+      candidateId: 104,
     });
     expect(invokeMock).toHaveBeenCalledWith("list_interview_evaluations", {
-      candidate_id: 105,
+      candidateId: 105,
     });
     expect(invokeMock).toHaveBeenCalledWith("run_candidate_analysis", {
       input: {
@@ -119,6 +135,9 @@ describe("backend AI profile commands", () => {
       external_id: "ext-1",
       name: "张三",
       current_company: "Doss",
+      score: 88,
+      age: 28,
+      gender: "male",
       years_of_experience: 5,
       phone: "13800000000",
       email: "zhangsan@example.com",
@@ -139,7 +158,7 @@ describe("backend AI profile commands", () => {
       enable_ocr: true,
     });
     await createCrawlTask({
-      source: "manual",
+      source: "boss",
       mode: "compliant",
       task_type: "candidate",
       payload: {
@@ -167,6 +186,9 @@ describe("backend AI profile commands", () => {
         external_id: "ext-1",
         name: "张三",
         current_company: "Doss",
+        score: 88,
+        age: 28,
+        gender: "male",
         years_of_experience: 5,
         phone: "13800000000",
         email: "zhangsan@example.com",
@@ -193,7 +215,7 @@ describe("backend AI profile commands", () => {
     });
     expect(invokeMock).toHaveBeenCalledWith("create_crawl_task", {
       input: {
-        source: "manual",
+        source: "boss",
         mode: "compliant",
         task_type: "candidate",
         payload: {
@@ -217,6 +239,236 @@ describe("backend AI profile commands", () => {
         auto_batch_concurrency: 4,
         auto_retry_count: 2,
         auto_retry_backoff_ms: 500,
+      },
+    });
+  });
+
+  it("passes nested input payloads for candidate edit/delete/qualification commands", async () => {
+    await updateCandidate({
+      candidate_id: 18,
+      name: "李四",
+      current_company: "Doss Labs",
+      score: 92,
+      age: 31,
+      gender: "female",
+      years_of_experience: 6.5,
+      phone: "13900000000",
+      email: "lisi@example.com",
+      tags: ["vue3", "candidate"],
+    });
+    await setCandidateQualification({
+      candidate_id: 18,
+      qualified: false,
+      note: "背景核验未通过",
+    });
+    await deleteCandidate(18);
+
+    expect(invokeMock).toHaveBeenCalledWith("update_candidate", {
+      input: {
+        candidate_id: 18,
+        name: "李四",
+        current_company: "Doss Labs",
+        score: 92,
+        age: 31,
+        gender: "female",
+        years_of_experience: 6.5,
+        phone: "13900000000",
+        email: "lisi@example.com",
+        tags: ["vue3", "candidate"],
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith("set_candidate_qualification", {
+      input: {
+        candidate_id: 18,
+        qualified: false,
+        note: "背景核验未通过",
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith("delete_candidate", {
+      candidate_id: 18,
+    });
+  });
+
+  it("passes payloads for job CRUD and stop commands", async () => {
+    await createJob({
+      source: "manual",
+      title: "前端工程师",
+      company: "示例科技",
+      city: "上海",
+      salary_k: "30-45",
+      description: "Vue3 + TS",
+    });
+    await updateJob({
+      job_id: 12,
+      title: "高级前端工程师",
+      company: "示例科技",
+      city: "杭州",
+      salary_k: "35-50",
+      description: "Vue3 + TS + Playwright",
+    });
+    await stopJob(12);
+    await deleteJob(12);
+
+    expect(invokeMock).toHaveBeenCalledWith("create_job", {
+      input: {
+        source: "manual",
+        title: "前端工程师",
+        company: "示例科技",
+        city: "上海",
+        salary_k: "30-45",
+        description: "Vue3 + TS",
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith("update_job", {
+      input: {
+        job_id: 12,
+        title: "高级前端工程师",
+        company: "示例科技",
+        city: "杭州",
+        salary_k: "35-50",
+        description: "Vue3 + TS + Playwright",
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith("stop_job", {
+      job_id: 12,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("delete_job", {
+      jobId: 12,
+    });
+  });
+
+  it("passes payloads for screening template list/crud and job binding commands", async () => {
+    await listScreeningTemplates();
+    await createScreeningTemplate({
+      name: "前端筛选模板",
+      dimensions: [
+        {
+          key: "goal_orientation",
+          label: "目标导向",
+          weight: 100,
+        },
+      ],
+      risk_rules: {
+        highRiskKeywords: ["频繁跳槽"],
+      },
+    });
+    await updateScreeningTemplate({
+      template_id: 6,
+      name: "前端筛选模板 v2",
+      dimensions: [
+        {
+          key: "team_collaboration",
+          label: "团队协作",
+          weight: 100,
+        },
+      ],
+      risk_rules: {},
+    });
+    await setJobScreeningTemplate({
+      job_id: 12,
+      template_id: 6,
+    });
+    await deleteScreeningTemplate(6);
+
+    expect(invokeMock).toHaveBeenCalledWith("list_screening_templates");
+    expect(invokeMock).toHaveBeenCalledWith("create_screening_template", {
+      input: {
+        name: "前端筛选模板",
+        dimensions: [
+          {
+            key: "goal_orientation",
+            label: "目标导向",
+            weight: 100,
+          },
+        ],
+        risk_rules: {
+          highRiskKeywords: ["频繁跳槽"],
+        },
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith("update_screening_template", {
+      input: {
+        template_id: 6,
+        name: "前端筛选模板 v2",
+        dimensions: [
+          {
+            key: "team_collaboration",
+            label: "团队协作",
+            weight: 100,
+          },
+        ],
+        risk_rules: {},
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith("set_job_screening_template", {
+      input: {
+        job_id: 12,
+        template_id: 6,
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith("delete_screening_template", {
+      templateId: 6,
+    });
+  });
+
+  it("passes payloads for crawl task people commands", async () => {
+    await deleteCrawlTask(21);
+    await listCrawlTaskPeople(21);
+    await upsertCrawlTaskPeople({
+      task_id: 21,
+      people: [
+        {
+          source: "boss",
+          external_id: "boss-candidate-21",
+          name: "王五",
+          current_company: "示例科技",
+          years_of_experience: 4,
+          sync_status: "UNSYNCED",
+        },
+      ],
+    });
+    await updateCrawlTaskPeopleSync({
+      task_id: 21,
+      updates: [
+        {
+          person_id: 2101,
+          sync_status: "SYNCED",
+          candidate_id: 88,
+        },
+      ],
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("delete_crawl_task", {
+      taskId: 21,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("list_crawl_task_people", {
+      taskId: 21,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("upsert_crawl_task_people", {
+      input: {
+        task_id: 21,
+        people: [
+          {
+            source: "boss",
+            external_id: "boss-candidate-21",
+            name: "王五",
+            current_company: "示例科技",
+            years_of_experience: 4,
+            sync_status: "UNSYNCED",
+          },
+        ],
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith("update_crawl_task_people_sync", {
+      input: {
+        task_id: 21,
+        updates: [
+          {
+            person_id: 2101,
+            sync_status: "SYNCED",
+            candidate_id: 88,
+          },
+        ],
       },
     });
   });

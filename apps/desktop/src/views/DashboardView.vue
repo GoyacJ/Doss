@@ -5,7 +5,6 @@ import { formatStageLabel } from "../lib/pipeline";
 import { stageTone } from "../lib/status";
 import UiBadge from "../components/UiBadge.vue";
 import UiButton from "../components/UiButton.vue";
-import UiInfoRow from "../components/UiInfoRow.vue";
 import UiMetricCard from "../components/UiMetricCard.vue";
 import UiPanel from "../components/UiPanel.vue";
 
@@ -42,11 +41,5 @@ const aiAlignmentRate = computed(() => metrics.value?.ai_alignment_rate ?? 0);
       </div>
     </UiPanel>
 
-    <UiPanel v-if="store.health" title="本地数据状态">
-      <div class="flex flex-col gap-1.5">
-        <UiInfoRow label="数据库路径" :value="store.health.dbPath" />
-        <UiInfoRow label="数据库存在" :value="store.health.dbExists ? '是' : '否'" />
-      </div>
-    </UiPanel>
   </section>
 </template>

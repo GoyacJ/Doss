@@ -1,12 +1,17 @@
 import type { Ref } from "vue";
 import type { CandidateRecord, CrawlMode, JobRecord } from "@doss/shared";
-import { extractCandidateImportItems, extractJobImportItems } from "../../lib/crawl-import";
+import {
+  extractCandidateImportItems,
+  extractJobImportItems,
+  type CandidateImportItem,
+} from "../../lib/crawl-import";
 import type { SidecarQueueResult } from "../../services/backend";
 import type {
   AutoProcessTarget,
   CandidateImportBatchResult,
   CandidateImportConflict,
   CandidateImportSource,
+  TaskPersonSyncResult,
 } from "./types";
 
 function normalizeText(value: string | null | undefined): string {
@@ -135,13 +140,12 @@ export function createCandidateImportModule(deps: CandidateImportModuleDeps) {
     return inserted;
   }
 
-  async function importCandidatesFromSidecarResult(
-    result: SidecarQueueResult,
+  async function importCandidatesFromItems(
+    importItems: CandidateImportItem[],
     source: CandidateImportSource,
     mode: CrawlMode,
     localJobId: number,
   ): Promise<CandidateImportBatchResult> {
-    const importItems = extractCandidateImportItems(result);
     const mergeTag = `source:${source}`;
     const fetchedRows = importItems.length;
     if (importItems.length === 0) {
@@ -275,8 +279,73 @@ export function createCandidateImportModule(deps: CandidateImportModuleDeps) {
     };
   }
 
+  async function importCandidatesFromSidecarResult(
+    result: SidecarQueueResult,
+    source: CandidateImportSource,
+    mode: CrawlMode,
+    localJobId: number,
+  ): Promise<CandidateImportBatchResult> {
+    return importCandidatesFromItems(
+      extractCandidateImportItems(result),
+      source,
+      mode,
+      localJobId,
+    );
+  }
+
+  async function importSingleCandidateItem(payload: {
+    item: CandidateImportItem;
+    source: CandidateImportSource;
+    mode: CrawlMode;
+    localJobId: number;
+  }): Promise<TaskPersonSyncResult> {
+    const result = await importCandidatesFromItems(
+      [payload.item],
+      payload.source,
+      payload.mode,
+      payload.localJobId,
+    );
+
+    if (result.conflicts.length > 0) {
+      return {
+        status: "FAILED",
+        reason: result.conflicts[0]?.reasons.join(",") || "candidate_sync_conflict",
+      };
+    }
+
+    if (result.importedCandidates[0]) {
+      return {
+        status: "SYNCED",
+        candidateId: result.importedCandidates[0].id,
+      };
+    }
+
+    if (result.mergedCandidates[0]) {
+      return {
+        status: "SYNCED",
+        candidateId: result.mergedCandidates[0].id,
+      };
+    }
+
+    if (result.skippedRows > 0) {
+      const existed = payload.item.external_id
+        ? deps.candidates.value.find((item) => item.external_id === payload.item.external_id)
+        : undefined;
+      return {
+        status: "SYNCED",
+        candidateId: existed?.id,
+      };
+    }
+
+    return {
+      status: "FAILED",
+      reason: "candidate_sync_noop",
+    };
+  }
+
   return {
     importJobsFromSidecarResult,
     importCandidatesFromSidecarResult,
+    importSingleCandidateItem,
   };
 }

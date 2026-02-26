@@ -1,5 +1,20 @@
 use super::super::*;
 
+fn read_candidate_by_id(
+    conn: &Connection,
+    candidate_id: i64,
+    cipher: &FieldCipher,
+) -> Result<Candidate, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, external_id, source, name, current_company, score, age, gender, years_of_experience, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates WHERE id = ?1",
+        )
+        .map_err(|error| error.to_string())?;
+
+    stmt.query_row([candidate_id], |row| candidate_from_row(row, cipher))
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub(crate) fn create_candidate(
     state: State<'_, AppState>,
@@ -25,19 +40,30 @@ pub(crate) fn create_candidate(
         .map_err(|error| error.to_string())?;
 
     let tags_json = serde_json::to_string(&input.tags).map_err(|error| error.to_string())?;
+    let score = input.score.map(|value| value.clamp(0.0, 100.0));
+    let age = input.age.filter(|value| *value >= 0);
+    let gender = input
+        .gender
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
     conn.execute(
         r#"
         INSERT INTO candidates(
-            external_id, source, name, current_company, years_of_experience, stage,
+            external_id, source, name, current_company, score, age, gender, years_of_experience, stage,
             phone_enc, phone_hash, email_enc, email_hash, tags_json, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, 'NEW', ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'NEW', ?9, ?10, ?11, ?12, ?13, ?14, ?15)
         "#,
         params![
             input.external_id,
             input.source.unwrap_or(SourceType::Manual).as_db(),
             input.name,
             input.current_company,
+            score,
+            age,
+            gender,
             input.years_of_experience,
             phone_encrypted,
             phone_hash,
@@ -67,15 +93,7 @@ pub(crate) fn create_candidate(
 
     sync_candidate_search(&conn, candidate_id).map_err(|error| error.to_string())?;
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, external_id, source, name, current_company, years_of_experience, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates WHERE id = ?1",
-        )
-        .map_err(|error| error.to_string())?;
-
-    let candidate = stmt
-        .query_row([candidate_id], |row| candidate_from_row(row, &state.cipher))
-        .map_err(|error| error.to_string())?;
+    let candidate = read_candidate_by_id(&conn, candidate_id, &state.cipher)?;
 
     write_audit(
         &conn,
@@ -83,6 +101,215 @@ pub(crate) fn create_candidate(
         "candidate",
         Some(candidate.id.to_string()),
         serde_json::json!({"source": candidate.source, "tags": candidate.tags}),
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(candidate)
+}
+
+#[tauri::command]
+pub(crate) fn update_candidate(
+    state: State<'_, AppState>,
+    input: UpdateCandidateInput,
+) -> Result<Candidate, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let name = input.name.trim();
+    if name.is_empty() {
+        return Err("candidate_name_required".to_string());
+    }
+
+    let current_company = input
+        .current_company
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let normalized_phone = input
+        .phone
+        .as_deref()
+        .map(normalize_phone)
+        .filter(|value| !value.is_empty());
+    let phone_hash = normalized_phone.as_deref().map(hash_value);
+    let phone_enc = normalized_phone
+        .as_deref()
+        .map(|value| state.cipher.encrypt(value))
+        .transpose()
+        .map_err(|error| error.to_string())?;
+
+    let normalized_email = input
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let email_hash = normalized_email.as_deref().map(hash_value);
+    let email_enc = normalized_email
+        .as_deref()
+        .map(|value| state.cipher.encrypt(value))
+        .transpose()
+        .map_err(|error| error.to_string())?;
+
+    let tags = merge_candidate_tags(&[], &input.tags);
+    let tags_json = serde_json::to_string(&tags).map_err(|error| error.to_string())?;
+    let score = input.score.map(|value| value.clamp(0.0, 100.0));
+    let age = input.age.filter(|value| *value >= 0);
+    let gender = input
+        .gender
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let now = now_iso();
+    let affected = conn
+        .execute(
+            r#"
+            UPDATE candidates
+            SET
+                name = ?1,
+                current_company = ?2,
+                years_of_experience = ?3,
+                score = COALESCE(?4, score),
+                age = COALESCE(?5, age),
+                gender = COALESCE(?6, gender),
+                tags_json = ?7,
+                phone_enc = CASE WHEN ?8 IS NOT NULL THEN ?8 ELSE phone_enc END,
+                phone_hash = CASE WHEN ?9 IS NOT NULL THEN ?9 ELSE phone_hash END,
+                email_enc = CASE WHEN ?10 IS NOT NULL THEN ?10 ELSE email_enc END,
+                email_hash = CASE WHEN ?11 IS NOT NULL THEN ?11 ELSE email_hash END,
+                updated_at = ?12
+            WHERE id = ?13
+            "#,
+            params![
+                name,
+                current_company,
+                input.years_of_experience.max(0.0),
+                score,
+                age,
+                gender,
+                tags_json,
+                phone_enc,
+                phone_hash,
+                email_enc,
+                email_hash,
+                now,
+                input.candidate_id,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    if affected == 0 {
+        return Err(format!("Candidate {} not found", input.candidate_id));
+    }
+
+    sync_candidate_search(&conn, input.candidate_id).map_err(|error| error.to_string())?;
+    let candidate = read_candidate_by_id(&conn, input.candidate_id, &state.cipher)?;
+
+    write_audit(
+        &conn,
+        "candidate.update",
+        "candidate",
+        Some(candidate.id.to_string()),
+        serde_json::json!({
+            "updatedTagCount": candidate.tags.len(),
+            "updatedPhone": normalized_phone.is_some(),
+            "updatedEmail": normalized_email.is_some()
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(candidate)
+}
+
+#[tauri::command]
+pub(crate) fn delete_candidate(
+    state: State<'_, AppState>,
+    candidate_id: i64,
+) -> Result<bool, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    conn.execute(
+        "DELETE FROM candidate_search WHERE candidate_id = ?1",
+        [candidate_id],
+    )
+    .map_err(|error| error.to_string())?;
+
+    let affected = conn
+        .execute("DELETE FROM candidates WHERE id = ?1", [candidate_id])
+        .map_err(|error| error.to_string())?;
+    if affected == 0 {
+        return Err(format!("Candidate {} not found", candidate_id));
+    }
+
+    write_audit(
+        &conn,
+        "candidate.delete",
+        "candidate",
+        Some(candidate_id.to_string()),
+        serde_json::json!({ "deleted": true }),
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(true)
+}
+
+#[tauri::command]
+pub(crate) fn set_candidate_qualification(
+    state: State<'_, AppState>,
+    input: SetCandidateQualificationInput,
+) -> Result<Candidate, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let current_stage_text: String = conn
+        .query_row(
+            "SELECT stage FROM candidates WHERE id = ?1",
+            [input.candidate_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Candidate {} not found", input.candidate_id))?;
+
+    let target_stage = resolve_qualification_stage(&current_stage_text, input.qualified);
+    if let Some(next_stage) = target_stage {
+        let now = now_iso();
+        conn.execute(
+            "UPDATE candidates SET stage = ?1, updated_at = ?2 WHERE id = ?3",
+            params![next_stage, now, input.candidate_id],
+        )
+        .map_err(|error| error.to_string())?;
+
+        conn.execute(
+            "UPDATE applications SET stage = ?1, updated_at = ?2 WHERE candidate_id = ?3",
+            params![next_stage, now, input.candidate_id],
+        )
+        .map_err(|error| error.to_string())?;
+
+        let note = input.note.clone().or_else(|| {
+            if input.qualified {
+                Some("已启用候选资格".to_string())
+            } else {
+                Some("已取消候选资格".to_string())
+            }
+        });
+
+        conn.execute(
+            r#"
+            INSERT INTO pipeline_events(candidate_id, job_id, from_stage, to_stage, note, created_at)
+            VALUES (?1, NULL, ?2, ?3, ?4, ?5)
+            "#,
+            params![input.candidate_id, current_stage_text, next_stage, note, now],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    let candidate = read_candidate_by_id(&conn, input.candidate_id, &state.cipher)?;
+    write_audit(
+        &conn,
+        "candidate.qualification.update",
+        "candidate",
+        Some(candidate.id.to_string()),
+        serde_json::json!({
+            "qualified": input.qualified,
+            "stageChanged": target_stage.is_some()
+        }),
     )
     .map_err(|error| error.to_string())?;
 
@@ -210,14 +437,7 @@ pub(crate) fn merge_candidate_import(
 
     sync_candidate_search(&conn, input.candidate_id).map_err(|error| error.to_string())?;
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, external_id, source, name, current_company, years_of_experience, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates WHERE id = ?1",
-        )
-        .map_err(|error| error.to_string())?;
-    let candidate = stmt
-        .query_row([input.candidate_id], |row| candidate_from_row(row, &state.cipher))
-        .map_err(|error| error.to_string())?;
+    let candidate = read_candidate_by_id(&conn, input.candidate_id, &state.cipher)?;
 
     write_audit(
         &conn,
@@ -245,7 +465,7 @@ pub(crate) fn list_candidates(
     if let Some(filter_stage) = stage {
         let mut stmt = conn
             .prepare(
-                "SELECT id, external_id, source, name, current_company, years_of_experience, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates WHERE stage = ?1 ORDER BY updated_at DESC",
+                "SELECT id, external_id, source, name, current_company, score, age, gender, years_of_experience, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates WHERE stage = ?1 ORDER BY updated_at DESC",
             )
             .map_err(|error| error.to_string())?;
         let rows = stmt
@@ -256,7 +476,7 @@ pub(crate) fn list_candidates(
     } else {
         let mut stmt = conn
             .prepare(
-                "SELECT id, external_id, source, name, current_company, years_of_experience, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates ORDER BY updated_at DESC",
+                "SELECT id, external_id, source, name, current_company, score, age, gender, years_of_experience, stage, tags_json, phone_enc, email_enc, created_at, updated_at FROM candidates ORDER BY updated_at DESC",
             )
             .map_err(|error| error.to_string())?;
         let rows = stmt

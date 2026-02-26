@@ -506,23 +506,23 @@ onMounted(async () => {
         <UiTable v-if="profiles.length > 0">
           <thead>
             <tr>
-              <UiTh>名称</UiTh>
-              <UiTh>供应商</UiTh>
-              <UiTh>模型</UiTh>
-              <UiTh>Base URL</UiTh>
-              <UiTh>密钥</UiTh>
-              <UiTh align="right">操作</UiTh>
+              <UiTh align="center">名称</UiTh>
+              <UiTh align="center">供应商</UiTh>
+              <UiTh align="center">模型</UiTh>
+              <UiTh align="center">Base URL</UiTh>
+              <UiTh align="center">密钥</UiTh>
+              <UiTh align="center">操作</UiTh>
             </tr>
           </thead>
           <tbody>
             <tr v-for="profile in profiles" :key="profile.id">
-              <UiTd>{{ profile.name }}</UiTd>
-              <UiTd>{{ profile.provider }}</UiTd>
-              <UiTd>{{ profile.model }}</UiTd>
-              <UiTd class="max-w-80 break-all">{{ profile.base_url }}</UiTd>
-              <UiTd>{{ profile.has_api_key ? "已配置" : "未配置" }}</UiTd>
-              <UiTd align="right" no-wrap>
-                <div class="flex justify-end gap-2">
+              <UiTd align="center">{{ profile.name }}</UiTd>
+              <UiTd align="center">{{ profile.provider }}</UiTd>
+              <UiTd align="center">{{ profile.model }}</UiTd>
+              <UiTd align="center" class="break-all">{{ profile.base_url }}</UiTd>
+              <UiTd align="center">{{ profile.has_api_key ? "已配置" : "未配置" }}</UiTd>
+              <UiTd align="center" no-wrap>
+                <div class="flex justify-center gap-2">
                   <UiButton
                     variant="ghost"
                     :disabled="profile.is_active || settingDefaultProfileId === profile.id"

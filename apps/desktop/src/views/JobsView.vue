@@ -1,6 +1,11 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
+import type { JobRecord } from "@doss/shared";
+import type { ScreeningDimension, ScreeningTemplateRecord } from "../services/backend";
+import { jobStatusLabel, jobStatusTone } from "../lib/status";
+import { resolveOverrideTemplateOptions } from "../lib/screening-template-options";
 import { useRecruitingStore } from "../stores/recruiting";
+import UiBadge from "../components/UiBadge.vue";
 import UiButton from "../components/UiButton.vue";
 import UiField from "../components/UiField.vue";
 import UiPanel from "../components/UiPanel.vue";
@@ -12,210 +17,424 @@ import { useToastStore } from "../stores/toast";
 const store = useRecruitingStore();
 const toast = useToastStore();
 
-const form = reactive({
+const jobModalOpen = ref(false);
+const jobModalMode = ref<"create" | "edit">("create");
+const editingJobId = ref<number | null>(null);
+const savingJob = ref(false);
+const stoppingJobId = ref<number | null>(null);
+const deletingJobId = ref<number | null>(null);
+const deleteConfirmJob = ref<JobRecord | null>(null);
+
+const templateListModalOpen = ref(false);
+const templateEditorOpen = ref(false);
+const templateEditorMode = ref<"create" | "edit">("create");
+const savingTemplate = ref(false);
+const deletingTemplateId = ref<number | null>(null);
+const deleteConfirmTemplate = ref<ScreeningTemplateRecord | null>(null);
+
+const jobForm = reactive({
   title: "",
   company: "",
   city: "",
   salary_k: "",
   description: "",
+  template_id: 0,
 });
 
-const jobTemplateJobId = ref(0);
-const jobTemplateName = ref("岗位微调模板");
-const jobTemplateDimensions = ref([
-  { key: "goal_orientation", label: "目标导向", weight: 30 },
-  { key: "team_collaboration", label: "团队协作", weight: 15 },
-  { key: "self_drive", label: "自驱力", weight: 15 },
-  { key: "reflection_iteration", label: "反思迭代", weight: 10 },
-  { key: "openness", label: "开放性", weight: 8 },
-  { key: "resilience", label: "抗压韧性", weight: 7 },
-  { key: "learning_ability", label: "学习能力", weight: 10 },
-  { key: "values_fit", label: "价值观契合", weight: 5 },
-]);
-const jobTemplateRiskRulesText = ref("{}");
+const templateForm = reactive<{
+  template_id: number;
+  name: string;
+  dimensions: ScreeningDimension[];
+  risk_rules_text: string;
+}>({
+  template_id: 0,
+  name: "",
+  dimensions: [],
+  risk_rules_text: "{}",
+});
 
-const jobTemplateWeightTotal = computed(() =>
-  jobTemplateDimensions.value.reduce((sum, item) => sum + Number(item.weight || 0), 0),
+const templateWeightTotal = computed(() =>
+  templateForm.dimensions.reduce((sum, item) => sum + Number(item.weight || 0), 0),
+);
+const overrideTemplateOptions = computed(() =>
+  resolveOverrideTemplateOptions(store.screeningTemplates),
 );
 
-async function submit() {
-  if (!form.title || !form.company) {
-    return;
+function resolveErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error) {
+    return error.message || fallback;
   }
-
-  await store.addJob({
-    title: form.title,
-    company: form.company,
-    city: form.city || undefined,
-    salary_k: form.salary_k || undefined,
-    description: form.description || undefined,
-  });
-
-  form.title = "";
-  form.company = "";
-  form.city = "";
-  form.salary_k = "";
-  form.description = "";
+  if (typeof error === "string" && error.trim()) {
+    return error;
+  }
+  return fallback;
 }
 
-async function loadJobTemplateOverride() {
-  if (!jobTemplateJobId.value) {
-    toast.warning("请先选择职位");
-    return;
-  }
-
-  const template = await store.loadScreeningTemplate(jobTemplateJobId.value);
-  jobTemplateName.value = template.name || `岗位 ${jobTemplateJobId.value} 微调模板`;
-  if (template.dimensions.length > 0) {
-    jobTemplateDimensions.value = template.dimensions.map((item) => ({
-      key: item.key,
-      label: item.label,
-      weight: item.weight,
-    }));
-  }
-  jobTemplateRiskRulesText.value = JSON.stringify(template.risk_rules ?? {}, null, 2);
+function createDefaultDimensions(): ScreeningDimension[] {
+  return [
+    { key: "goal_orientation", label: "目标导向", weight: 30 },
+    { key: "team_collaboration", label: "团队协作", weight: 15 },
+    { key: "self_drive", label: "自驱力", weight: 15 },
+    { key: "reflection_iteration", label: "反思迭代", weight: 10 },
+    { key: "openness", label: "开放性", weight: 8 },
+    { key: "resilience", label: "抗压韧性", weight: 7 },
+    { key: "learning_ability", label: "学习能力", weight: 10 },
+    { key: "values_fit", label: "价值观契合", weight: 5 },
+  ];
 }
 
-async function saveJobTemplateOverride() {
-  if (!jobTemplateJobId.value) {
-    toast.warning("请先选择职位");
+function resetJobForm() {
+  editingJobId.value = null;
+  jobForm.title = "";
+  jobForm.company = "";
+  jobForm.city = "";
+  jobForm.salary_k = "";
+  jobForm.description = "";
+  jobForm.template_id = 0;
+}
+
+function resetTemplateForm() {
+  templateForm.template_id = 0;
+  templateForm.name = "";
+  templateForm.dimensions = createDefaultDimensions();
+  templateForm.risk_rules_text = "{}";
+}
+
+function toOptionalText(value: string): string | undefined {
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function normalizeJobTemplateId(templateId: number | null | undefined): number {
+  if (!templateId || templateId <= 0) {
+    return 0;
+  }
+
+  return overrideTemplateOptions.value.some((item) => item.id === templateId)
+    ? templateId
+    : 0;
+}
+
+function openCreateJobModal() {
+  jobModalMode.value = "create";
+  resetJobForm();
+  jobModalOpen.value = true;
+}
+
+function openEditJobModal(job: JobRecord) {
+  jobModalMode.value = "edit";
+  editingJobId.value = job.id;
+  jobForm.title = job.title;
+  jobForm.company = job.company;
+  jobForm.city = job.city || "";
+  jobForm.salary_k = job.salary_k || "";
+  jobForm.description = job.description || "";
+  const templateId = job.screening_template_id ?? 0;
+  jobForm.template_id = store.screeningTemplates.length > 0
+    ? normalizeJobTemplateId(templateId)
+    : templateId;
+  jobModalOpen.value = true;
+}
+
+function closeJobModal(force = false) {
+  if (savingJob.value && !force) {
     return;
   }
-  if (jobTemplateWeightTotal.value !== 100) {
-    toast.warning(`权重总和必须为100，当前为 ${jobTemplateWeightTotal.value}`);
+  jobModalOpen.value = false;
+}
+
+async function saveJob() {
+  const title = jobForm.title.trim();
+  const company = jobForm.company.trim();
+  if (!title || !company) {
+    toast.warning("请填写职位名称和公司");
     return;
   }
 
-  const hasInvalidDimension = jobTemplateDimensions.value.some(
-    (item) => !item.key.trim() || !item.label.trim(),
-  );
-  if (hasInvalidDimension) {
-    toast.warning("请填写完整的维度 key 与名称");
-    return;
-  }
-
-  let riskRules: Record<string, unknown> = {};
-  const riskRulesText = jobTemplateRiskRulesText.value.trim();
-  if (riskRulesText) {
-    try {
-      const parsed = JSON.parse(riskRulesText);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        toast.warning("风险规则必须是 JSON 对象");
+  savingJob.value = true;
+  try {
+    let savedJob: JobRecord;
+    if (jobModalMode.value === "create") {
+      savedJob = await store.addJob({
+        title,
+        company,
+        city: toOptionalText(jobForm.city),
+        salary_k: toOptionalText(jobForm.salary_k),
+        description: toOptionalText(jobForm.description),
+      });
+    } else {
+      const jobId = editingJobId.value;
+      if (!jobId) {
+        toast.danger("职位ID缺失");
         return;
       }
-      riskRules = parsed as Record<string, unknown>;
-    } catch {
-      toast.warning("风险规则 JSON 格式不正确");
-      return;
+      savedJob = await store.updateJob({
+        job_id: jobId,
+        title,
+        company,
+        city: toOptionalText(jobForm.city),
+        salary_k: toOptionalText(jobForm.salary_k),
+        description: toOptionalText(jobForm.description),
+      });
     }
-  }
 
-  await store.saveScreeningTemplate({
-    job_id: jobTemplateJobId.value,
-    name: jobTemplateName.value.trim() || `岗位 ${jobTemplateJobId.value} 微调模板`,
-    dimensions: jobTemplateDimensions.value.map((item) => ({
-      key: item.key.trim(),
-      label: item.label.trim(),
-      weight: Number(item.weight),
-    })),
-    risk_rules: riskRules,
-  });
-  toast.success("职位微调模板已保存");
+    await store.setJobScreeningTemplate({
+      job_id: savedJob.id,
+      template_id: jobForm.template_id > 0 ? jobForm.template_id : null,
+    });
+
+    toast.success(jobModalMode.value === "create" ? "职位已创建" : "职位已更新");
+    closeJobModal(true);
+    resetJobForm();
+  } catch (error) {
+    toast.danger(resolveErrorMessage(error, "保存职位失败"));
+  } finally {
+    savingJob.value = false;
+  }
 }
 
-function addJobTemplateDimension() {
-  const next = jobTemplateDimensions.value.length + 1;
-  jobTemplateDimensions.value.push({
+async function stopJob(job: JobRecord) {
+  if (job.status === "STOPPED") {
+    return;
+  }
+
+  stoppingJobId.value = job.id;
+  try {
+    await store.stopJob(job.id);
+    toast.success("职位已停止");
+  } catch (error) {
+    toast.danger(resolveErrorMessage(error, "停止职位失败"));
+  } finally {
+    stoppingJobId.value = null;
+  }
+}
+
+function askRemoveJob(job: JobRecord) {
+  deleteConfirmJob.value = job;
+}
+
+function cancelRemoveJob() {
+  if (deletingJobId.value) {
+    return;
+  }
+  deleteConfirmJob.value = null;
+}
+
+async function removeJob() {
+  const job = deleteConfirmJob.value;
+  if (!job) {
+    return;
+  }
+
+  deletingJobId.value = job.id;
+  try {
+    await store.deleteJob(job.id);
+    deleteConfirmJob.value = null;
+    toast.success("职位已删除");
+  } catch (error) {
+    toast.danger(resolveErrorMessage(error, "删除职位失败"));
+  } finally {
+    deletingJobId.value = null;
+  }
+}
+
+function closeTemplateListModal(force = false) {
+  if (savingTemplate.value && !force) {
+    return;
+  }
+  templateEditorOpen.value = false;
+  templateListModalOpen.value = false;
+}
+
+function openTemplateListModal() {
+  templateEditorOpen.value = false;
+  templateListModalOpen.value = true;
+}
+
+function closeTemplateEditor(force = false) {
+  if (savingTemplate.value && !force) {
+    return;
+  }
+  templateEditorOpen.value = false;
+}
+
+function openCreateTemplateEditor() {
+  templateEditorMode.value = "create";
+  resetTemplateForm();
+  templateEditorOpen.value = true;
+}
+
+function openEditTemplateEditor(template: ScreeningTemplateRecord) {
+  templateEditorMode.value = "edit";
+  templateForm.template_id = template.id;
+  templateForm.name = template.name || "";
+  templateForm.dimensions = template.dimensions.map((item) => ({
+    key: item.key,
+    label: item.label,
+    weight: item.weight,
+  }));
+  templateForm.risk_rules_text = JSON.stringify(template.risk_rules ?? {}, null, 2);
+  templateEditorOpen.value = true;
+}
+
+function handleTemplateDrawerBackdropClick() {
+  if (templateEditorOpen.value) {
+    closeTemplateEditor();
+    return;
+  }
+  closeTemplateListModal();
+}
+
+function addTemplateDimension() {
+  const next = templateForm.dimensions.length + 1;
+  templateForm.dimensions.push({
     key: `custom_dimension_${next}`,
     label: `自定义维度${next}`,
     weight: 5,
   });
 }
 
-function removeJobTemplateDimension(index: number) {
-  if (jobTemplateDimensions.value.length <= 1) {
+function removeTemplateDimension(index: number) {
+  if (templateForm.dimensions.length <= 1) {
     toast.warning("至少保留一个维度");
     return;
   }
-  jobTemplateDimensions.value.splice(index, 1);
+  templateForm.dimensions.splice(index, 1);
 }
+
+function parseTemplateRiskRules(): Record<string, unknown> | null {
+  const text = templateForm.risk_rules_text.trim();
+  if (!text) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      toast.warning("风险规则必须是 JSON 对象");
+      return null;
+    }
+    return parsed as Record<string, unknown>;
+  } catch {
+    toast.warning("风险规则 JSON 格式不正确");
+    return null;
+  }
+}
+
+async function saveTemplate() {
+  if (templateWeightTotal.value !== 100) {
+    toast.warning(`权重总和必须为100，当前为 ${templateWeightTotal.value}`);
+    return;
+  }
+
+  const normalizedDimensions = templateForm.dimensions.map((item) => ({
+    key: item.key.trim(),
+    label: item.label.trim(),
+    weight: Number(item.weight),
+  }));
+  if (normalizedDimensions.some((item) => !item.key || !item.label)) {
+    toast.warning("请填写完整的维度 key 与名称");
+    return;
+  }
+
+  const riskRules = parseTemplateRiskRules();
+  if (!riskRules) {
+    return;
+  }
+
+  savingTemplate.value = true;
+  try {
+    if (templateEditorMode.value === "create") {
+      await store.createScreeningTemplate({
+        name: templateForm.name.trim() || "新评分模板",
+        dimensions: normalizedDimensions,
+        risk_rules: riskRules,
+      });
+      toast.success("评分模板已创建");
+    } else {
+      if (!templateForm.template_id) {
+        toast.danger("模板ID缺失");
+        return;
+      }
+      await store.updateScreeningTemplate({
+        template_id: templateForm.template_id,
+        name: templateForm.name.trim() || undefined,
+        dimensions: normalizedDimensions,
+        risk_rules: riskRules,
+      });
+      toast.success("评分模板已更新");
+    }
+
+    await store.loadScreeningTemplates();
+    closeTemplateEditor(true);
+  } catch (error) {
+    toast.danger(resolveErrorMessage(error, "保存评分模板失败"));
+  } finally {
+    savingTemplate.value = false;
+  }
+}
+
+function askRemoveTemplate(template: ScreeningTemplateRecord) {
+  deleteConfirmTemplate.value = template;
+}
+
+function cancelRemoveTemplate() {
+  if (deletingTemplateId.value) {
+    return;
+  }
+  deleteConfirmTemplate.value = null;
+}
+
+async function removeTemplate() {
+  const template = deleteConfirmTemplate.value;
+  if (!template) {
+    return;
+  }
+
+  deletingTemplateId.value = template.id;
+  try {
+    await store.deleteScreeningTemplate(template.id);
+    if (jobForm.template_id === template.id) {
+      jobForm.template_id = 0;
+    }
+    deleteConfirmTemplate.value = null;
+    toast.success("评分模板已删除");
+  } catch (error) {
+    toast.danger(resolveErrorMessage(error, "删除评分模板失败"));
+  } finally {
+    deletingTemplateId.value = null;
+  }
+}
+
+watch(
+  () => store.screeningTemplates,
+  () => {
+    if (!jobModalOpen.value || store.screeningTemplates.length === 0) {
+      return;
+    }
+    jobForm.template_id = normalizeJobTemplateId(jobForm.template_id);
+  },
+  { deep: true },
+);
+
+onMounted(async () => {
+  try {
+    await store.loadScreeningTemplates();
+  } catch (error) {
+    toast.danger(resolveErrorMessage(error, "加载评分模板失败"));
+  }
+});
 </script>
 
 <template>
   <section class="flex flex-col gap-4">
     <header class="flex items-center justify-between gap-3">
       <h2 class="text-2xl font-700">职位池</h2>
+      <div class="flex items-center gap-2">
+        <UiButton @click="openCreateJobModal">创建职位</UiButton>
+        <UiButton variant="secondary" @click="openTemplateListModal">评分模板</UiButton>
+      </div>
     </header>
-
-    <UiPanel title="创建职位">
-      <div class="grid grid-cols-2 gap-2.5 mb-2.5 lt-lg:grid-cols-1">
-        <UiField label="职位名称">
-          <input v-model="form.title" placeholder="例如：高级前端工程师" />
-        </UiField>
-        <UiField label="公司">
-          <input v-model="form.company" placeholder="公司名称" />
-        </UiField>
-        <UiField label="城市">
-          <input v-model="form.city" placeholder="工作城市" />
-        </UiField>
-        <UiField label="薪资区间(k)">
-          <input v-model="form.salary_k" placeholder="例如：30-45" />
-        </UiField>
-      </div>
-      <UiField label="岗位描述 / 技能要求">
-        <textarea v-model="form.description" placeholder="岗位职责、技术栈、加分项" class="mb-2.5" />
-      </UiField>
-      <UiButton @click="submit">保存职位</UiButton>
-    </UiPanel>
-
-    <UiPanel title="评分模板微调（按职位）">
-      <div class="grid grid-cols-2 gap-2.5 mb-2.5 lt-lg:grid-cols-1">
-        <UiField label="选择职位">
-          <select v-model.number="jobTemplateJobId">
-            <option :value="0">选择职位</option>
-            <option v-for="job in store.jobs" :key="job.id" :value="job.id">
-              #{{ job.id }} {{ job.title }} / {{ job.company }}
-            </option>
-          </select>
-        </UiField>
-        <UiField label="模板名称">
-          <input v-model="jobTemplateName" placeholder="岗位微调模板" />
-        </UiField>
-      </div>
-      <div class="flex items-center gap-2 mb-2.5">
-        <UiButton variant="secondary" @click="addJobTemplateDimension">新增维度</UiButton>
-      </div>
-      <div class="grid gap-2.5 mb-2.5">
-        <div
-          v-for="(item, index) in jobTemplateDimensions"
-          :key="`${item.key}-${index}`"
-          class="border border-line rounded-xl p-2.5 grid grid-cols-[1fr_1fr_140px_auto] gap-2 lt-lg:grid-cols-1"
-        >
-          <UiField label="维度 Key">
-            <input v-model="item.key" placeholder="例如：goal_orientation" />
-          </UiField>
-          <UiField label="维度名称">
-            <input v-model="item.label" placeholder="例如：目标导向" />
-          </UiField>
-          <UiField label="权重">
-            <input v-model.number="item.weight" type="number" min="1" max="100" step="1" />
-          </UiField>
-          <div class="flex items-end">
-            <UiButton variant="ghost" @click="removeJobTemplateDimension(index)">删除</UiButton>
-          </div>
-        </div>
-      </div>
-      <UiField label="风险规则（JSON）" help="用于补充岗位级风险判定规则，可为空对象">
-        <textarea v-model="jobTemplateRiskRulesText" rows="6" placeholder='{"highRiskKeywords":["频繁跳槽"]}' />
-      </UiField>
-      <p class="mt-1 mb-2 text-sm" :class="jobTemplateWeightTotal === 100 ? 'text-brand' : 'text-danger'">
-        权重合计: {{ jobTemplateWeightTotal }} / 100
-      </p>
-      <div class="flex items-center gap-2.5 flex-wrap">
-        <UiButton variant="secondary" @click="loadJobTemplateOverride">加载模板</UiButton>
-        <UiButton @click="saveJobTemplateOverride">保存微调</UiButton>
-      </div>
-    </UiPanel>
 
     <UiPanel title="已创建职位">
       <UiTable>
@@ -225,7 +444,10 @@ function removeJobTemplateDimension(index: number) {
             <UiTh>公司</UiTh>
             <UiTh>城市</UiTh>
             <UiTh>薪资</UiTh>
+            <UiTh>状态</UiTh>
+            <UiTh>评分模板</UiTh>
             <UiTh>更新时间</UiTh>
+            <UiTh align="right">操作</UiTh>
           </tr>
         </thead>
         <tbody>
@@ -234,10 +456,249 @@ function removeJobTemplateDimension(index: number) {
             <UiTd>{{ job.company }}</UiTd>
             <UiTd>{{ job.city || "-" }}</UiTd>
             <UiTd>{{ job.salary_k || "-" }}</UiTd>
+            <UiTd>
+              <UiBadge :tone="jobStatusTone(job.status)">{{ jobStatusLabel(job.status) }}</UiBadge>
+            </UiTd>
+            <UiTd>{{ job.screening_template_name || "默认筛选模板" }}</UiTd>
             <UiTd no-wrap>{{ job.updated_at }}</UiTd>
+            <UiTd align="right" no-wrap>
+              <div class="flex justify-end gap-2">
+                <UiButton variant="ghost" @click="openEditJobModal(job)">编辑</UiButton>
+                <UiButton
+                  variant="ghost"
+                  :disabled="job.status === 'STOPPED' || stoppingJobId === job.id"
+                  @click="stopJob(job)"
+                >
+                  {{ stoppingJobId === job.id ? "处理中..." : (job.status === "STOPPED" ? "已停止" : "停止") }}
+                </UiButton>
+                <UiButton
+                  variant="ghost"
+                  :disabled="deletingJobId === job.id"
+                  @click="askRemoveJob(job)"
+                >
+                  {{ deletingJobId === job.id ? "删除中..." : "删除" }}
+                </UiButton>
+              </div>
+            </UiTd>
           </tr>
         </tbody>
       </UiTable>
     </UiPanel>
+
+    <div
+      v-if="jobModalOpen"
+      class="fixed inset-0 z-[80] flex items-center justify-center bg-black/35 p-4"
+      @click.self="closeJobModal()"
+    >
+      <div class="w-full max-w-3xl">
+        <UiPanel :title="jobModalMode === 'create' ? '创建职位' : '编辑职位'">
+          <div class="grid grid-cols-2 gap-2.5 lt-lg:grid-cols-1">
+            <UiField label="职位名称">
+              <input v-model="jobForm.title" placeholder="例如：高级前端工程师" />
+            </UiField>
+            <UiField label="公司">
+              <input v-model="jobForm.company" placeholder="公司名称" />
+            </UiField>
+            <UiField label="城市">
+              <input v-model="jobForm.city" placeholder="工作城市" />
+            </UiField>
+            <UiField label="薪资区间(k)">
+              <input v-model="jobForm.salary_k" placeholder="例如：30-45" />
+            </UiField>
+          </div>
+          <UiField class="mt-2.5" label="评分模板">
+            <select v-model.number="jobForm.template_id">
+              <option :value="0">默认筛选模板</option>
+              <option v-for="template in overrideTemplateOptions" :key="template.id" :value="template.id">
+                {{ template.name }}
+              </option>
+            </select>
+          </UiField>
+          <UiField class="mt-2.5" label="岗位描述 / 技能要求">
+            <textarea v-model="jobForm.description" placeholder="岗位职责、技术栈、加分项" />
+          </UiField>
+
+          <div class="mt-4 flex flex-wrap justify-end gap-2">
+            <UiButton variant="ghost" :disabled="savingJob" @click="closeJobModal()">取消</UiButton>
+            <UiButton :disabled="savingJob" @click="saveJob">
+              {{ savingJob ? "保存中..." : (jobModalMode === "create" ? "创建职位" : "保存修改") }}
+            </UiButton>
+          </div>
+        </UiPanel>
+      </div>
+    </div>
+
+    <div
+      v-if="templateListModalOpen"
+      class="fixed inset-0 z-[82] flex justify-end bg-black/35"
+      @click.self="handleTemplateDrawerBackdropClick()"
+    >
+      <div class="h-full w-full max-w-3xl p-4 pl-0 lt-lg:max-w-full lt-lg:p-0">
+        <UiPanel class="h-full flex flex-col">
+          <template #header>
+            <div class="mb-2 flex items-center justify-between gap-3">
+              <div class="flex items-center gap-2">
+                <UiButton
+                  v-if="templateEditorOpen"
+                  variant="ghost"
+                  :disabled="savingTemplate"
+                  @click="closeTemplateEditor()"
+                >
+                  返回列表
+                </UiButton>
+                <h3 class="text-lg font-700">
+                  {{ templateEditorOpen ? (templateEditorMode === "create" ? "创建评分模板" : "编辑评分模板") : "评分模板" }}
+                </h3>
+              </div>
+              <div class="flex items-center gap-2">
+                <UiButton
+                  v-if="!templateEditorOpen"
+                  variant="secondary"
+                  @click="openCreateTemplateEditor"
+                >
+                  创建模板
+                </UiButton>
+                <UiButton variant="ghost" :disabled="savingTemplate" @click="closeTemplateListModal()">关闭</UiButton>
+              </div>
+            </div>
+          </template>
+
+          <div v-if="!templateEditorOpen" class="min-h-0 flex-1 overflow-auto">
+            <UiTable>
+              <thead>
+                <tr>
+                  <UiTh>模板名称</UiTh>
+                  <UiTh>维度数</UiTh>
+                  <UiTh>更新时间</UiTh>
+                  <UiTh align="right">操作</UiTh>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="template in store.screeningTemplates" :key="template.id">
+                  <UiTd>{{ template.name }}</UiTd>
+                  <UiTd>{{ template.dimensions.length }}</UiTd>
+                  <UiTd no-wrap>{{ template.updated_at }}</UiTd>
+                  <UiTd align="right" no-wrap>
+                    <div class="flex justify-end gap-2">
+                      <UiButton variant="ghost" @click="openEditTemplateEditor(template)">编辑</UiButton>
+                      <UiButton
+                        variant="ghost"
+                        :disabled="deletingTemplateId === template.id"
+                        @click="askRemoveTemplate(template)"
+                      >
+                        {{ deletingTemplateId === template.id ? "删除中..." : "删除" }}
+                      </UiButton>
+                    </div>
+                  </UiTd>
+                </tr>
+              </tbody>
+            </UiTable>
+          </div>
+
+          <div v-else class="min-h-0 flex-1 overflow-y-auto pr-1">
+            <UiField label="模板名称">
+              <input v-model="templateForm.name" placeholder="例如：前端工程师模板" />
+            </UiField>
+
+            <div class="mt-3 mb-2 flex items-center gap-2">
+              <UiButton variant="secondary" @click="addTemplateDimension">新增维度</UiButton>
+            </div>
+
+            <div class="grid gap-2.5">
+              <div
+                v-for="(item, index) in templateForm.dimensions"
+                :key="`${item.key}-${index}`"
+                class="border border-line rounded-xl p-2.5 grid grid-cols-[1fr_1fr_140px_auto] gap-2 lt-lg:grid-cols-1"
+              >
+                <UiField label="维度 Key">
+                  <input v-model="item.key" placeholder="例如：goal_orientation" />
+                </UiField>
+                <UiField label="维度名称">
+                  <input v-model="item.label" placeholder="例如：目标导向" />
+                </UiField>
+                <UiField label="权重">
+                  <input v-model.number="item.weight" type="number" min="1" max="100" step="1" />
+                </UiField>
+                <div class="flex items-end">
+                  <UiButton variant="ghost" @click="removeTemplateDimension(index)">删除</UiButton>
+                </div>
+              </div>
+            </div>
+
+            <UiField class="mt-3" label="风险规则（JSON）" help="用于补充筛选风险规则，可为空对象">
+              <textarea v-model="templateForm.risk_rules_text" rows="6" placeholder='{"highRiskKeywords":["频繁跳槽"]}' />
+            </UiField>
+            <p class="mt-3 mb-2 text-sm" :class="templateWeightTotal === 100 ? 'text-brand' : 'text-danger'">
+              权重合计: {{ templateWeightTotal }} / 100
+            </p>
+          </div>
+
+          <div v-if="templateEditorOpen" class="mt-4 flex flex-wrap justify-end gap-2">
+            <UiButton variant="ghost" :disabled="savingTemplate" @click="closeTemplateEditor()">取消</UiButton>
+            <UiButton :disabled="savingTemplate" @click="saveTemplate">
+              {{ savingTemplate ? "保存中..." : "保存模板" }}
+            </UiButton>
+          </div>
+        </UiPanel>
+      </div>
+    </div>
+
+    <div
+      v-if="deleteConfirmJob"
+      class="fixed inset-0 z-[85] flex items-center justify-center bg-black/35 p-4"
+      @click.self="cancelRemoveJob()"
+    >
+      <div class="w-full max-w-md">
+        <UiPanel title="删除职位">
+          <p class="m-0">
+            确认删除职位「{{ deleteConfirmJob.title }}」吗？此操作不可撤销。
+          </p>
+          <div class="mt-4 flex flex-wrap justify-end gap-2">
+            <UiButton
+              variant="ghost"
+              :disabled="deletingJobId === deleteConfirmJob.id"
+              @click="cancelRemoveJob()"
+            >
+              取消
+            </UiButton>
+            <UiButton
+              :disabled="deletingJobId === deleteConfirmJob.id"
+              @click="removeJob()"
+            >
+              {{ deletingJobId === deleteConfirmJob.id ? "删除中..." : "确认删除" }}
+            </UiButton>
+          </div>
+        </UiPanel>
+      </div>
+    </div>
+
+    <div
+      v-if="deleteConfirmTemplate"
+      class="fixed inset-0 z-[86] flex items-center justify-center bg-black/35 p-4"
+      @click.self="cancelRemoveTemplate()"
+    >
+      <div class="w-full max-w-md">
+        <UiPanel title="删除评分模板">
+          <p class="m-0">
+            确认删除评分模板「{{ deleteConfirmTemplate.name }}」吗？此操作不可撤销。
+          </p>
+          <div class="mt-4 flex flex-wrap justify-end gap-2">
+            <UiButton
+              variant="ghost"
+              :disabled="deletingTemplateId === deleteConfirmTemplate.id"
+              @click="cancelRemoveTemplate()"
+            >
+              取消
+            </UiButton>
+            <UiButton
+              :disabled="deletingTemplateId === deleteConfirmTemplate.id"
+              @click="removeTemplate()"
+            >
+              {{ deletingTemplateId === deleteConfirmTemplate.id ? "删除中..." : "确认删除" }}
+            </UiButton>
+          </div>
+        </UiPanel>
+      </div>
+    </div>
   </section>
 </template>

@@ -7,6 +7,10 @@ const backend = vi.hoisted(() => ({
   createCandidate: vi.fn(),
   createCrawlTask: vi.fn(),
   createJob: vi.fn(),
+  createScreeningTemplate: vi.fn(),
+  deleteCrawlTask: vi.fn(),
+  deleteJob: vi.fn(),
+  deleteScreeningTemplate: vi.fn(),
   finalizeHiringDecision: vi.fn(),
   generateInterviewKit: vi.fn(),
   getAiProviderSettings: vi.fn(),
@@ -18,8 +22,10 @@ const backend = vi.hoisted(() => ({
   listInterviewEvaluations: vi.fn(),
   listCandidates: vi.fn(),
   listCrawlTasks: vi.fn(),
+  listCrawlTaskPeople: vi.fn(),
   listJobs: vi.fn(),
   listPipelineEvents: vi.fn(),
+  listScreeningTemplates: vi.fn(),
   listScreeningResults: vi.fn(),
   loadDashboardMetrics: vi.fn(),
   mergeCandidateImport: vi.fn(),
@@ -31,14 +37,23 @@ const backend = vi.hoisted(() => ({
   searchCandidates: vi.fn(),
   saveInterviewKit: vi.fn(),
   submitInterviewFeedback: vi.fn(),
+  setJobScreeningTemplate: vi.fn(),
+  stopJob: vi.fn(),
   testAiProviderSettings: vi.fn(),
   triggerSidecarCrawlCandidates: vi.fn(),
   triggerSidecarCrawlJobs: vi.fn(),
   triggerSidecarCrawlResume: vi.fn(),
+  updateCandidate: vi.fn(),
   updateCrawlTask: vi.fn(),
+  updateCrawlTaskPeopleSync: vi.fn(),
+  updateJob: vi.fn(),
+  updateScreeningTemplate: vi.fn(),
   upsertAiProviderSettings: vi.fn(),
+  setCandidateQualification: vi.fn(),
   upsertScreeningTemplate: vi.fn(),
   upsertTaskRuntimeSettings: vi.fn(),
+  upsertCrawlTaskPeople: vi.fn(),
+  deleteCandidate: vi.fn(),
   upsertResume: vi.fn(),
 }));
 
@@ -64,6 +79,10 @@ describe("recruiting store auto workflow", () => {
 
     backend.listCandidates.mockResolvedValue([]);
     backend.listCrawlTasks.mockResolvedValue([]);
+    backend.listCrawlTaskPeople.mockResolvedValue([]);
+    backend.upsertCrawlTaskPeople.mockResolvedValue([]);
+    backend.updateCrawlTaskPeopleSync.mockResolvedValue([]);
+    backend.deleteCrawlTask.mockResolvedValue(true);
     backend.loadDashboardMetrics.mockResolvedValue({
       total_jobs: 1,
       total_candidates: 0,
@@ -106,6 +125,24 @@ describe("recruiting store auto workflow", () => {
       created_at: "2026-02-26T00:00:00Z",
       updated_at: "2026-02-26T00:00:00Z",
     });
+    backend.listScreeningTemplates.mockResolvedValue([
+      {
+        id: 1,
+        scope: "global",
+        name: "默认模板",
+        job_id: null,
+        dimensions: [
+          {
+            key: "goal_orientation",
+            label: "目标导向",
+            weight: 100,
+          },
+        ],
+        risk_rules: {},
+        created_at: "2026-02-26T00:00:00Z",
+        updated_at: "2026-02-26T00:00:00Z",
+      },
+    ]);
     backend.ensureSidecar.mockResolvedValue({
       ok: true,
       port: 3791,
@@ -331,6 +368,95 @@ describe("recruiting store auto workflow", () => {
       created_at: "2026-02-26T00:00:00Z",
       updated_at: "2026-02-26T00:00:00Z",
     });
+    backend.updateJob.mockResolvedValue({
+      id: 101,
+      source: "boss",
+      title: "高级前端工程师",
+      company: "示例科技",
+      city: "杭州",
+      salary_k: "35-50",
+      description: "Vue3 + TS + Playwright",
+      status: "ACTIVE",
+      created_at: "2026-02-26T00:00:00Z",
+      updated_at: "2026-02-26T00:00:00Z",
+    });
+    backend.stopJob.mockResolvedValue({
+      id: 101,
+      source: "boss",
+      title: "高级前端工程师",
+      company: "示例科技",
+      city: "杭州",
+      salary_k: "35-50",
+      description: "Vue3 + TS + Playwright",
+      status: "STOPPED",
+      created_at: "2026-02-26T00:00:00Z",
+      updated_at: "2026-02-26T00:00:00Z",
+    });
+    backend.deleteJob.mockResolvedValue(true);
+    backend.setJobScreeningTemplate.mockResolvedValue({
+      id: 101,
+      source: "boss",
+      title: "高级前端工程师",
+      company: "示例科技",
+      city: "杭州",
+      salary_k: "35-50",
+      description: "Vue3 + TS + Playwright",
+      status: "ACTIVE",
+      screening_template_id: 1,
+      screening_template_name: "默认模板",
+      created_at: "2026-02-26T00:00:00Z",
+      updated_at: "2026-02-26T00:00:00Z",
+    });
+    backend.createScreeningTemplate.mockResolvedValue({
+      id: 9,
+      scope: "global",
+      name: "前端模板",
+      job_id: null,
+      dimensions: [
+        {
+          key: "goal_orientation",
+          label: "目标导向",
+          weight: 100,
+        },
+      ],
+      risk_rules: {},
+      created_at: "2026-02-26T00:00:00Z",
+      updated_at: "2026-02-26T00:00:00Z",
+    });
+    backend.updateScreeningTemplate.mockResolvedValue({
+      id: 9,
+      scope: "global",
+      name: "前端模板v2",
+      job_id: null,
+      dimensions: [
+        {
+          key: "goal_orientation",
+          label: "目标导向",
+          weight: 100,
+        },
+      ],
+      risk_rules: {},
+      created_at: "2026-02-26T00:00:00Z",
+      updated_at: "2026-02-26T00:00:00Z",
+    });
+    backend.deleteScreeningTemplate.mockResolvedValue([
+      {
+        id: 1,
+        scope: "global",
+        name: "默认模板",
+        job_id: null,
+        dimensions: [
+          {
+            key: "goal_orientation",
+            label: "目标导向",
+            weight: 100,
+          },
+        ],
+        risk_rules: {},
+        created_at: "2026-02-26T00:00:00Z",
+        updated_at: "2026-02-26T00:00:00Z",
+      },
+    ]);
   });
 
   it("auto-fetches resumes and triggers analysis after candidate import", async () => {
@@ -592,6 +718,251 @@ describe("recruiting store auto workflow", () => {
     expect(store.taskSettings?.auto_batch_concurrency).toBe(4);
   });
 
+  it("creates crawl_candidates task as pending with task-level payload", async () => {
+    backend.createCrawlTask.mockImplementationOnce(async (input: {
+      source: "all" | "boss" | "zhilian" | "wuba" | "lagou";
+      mode: "compliant" | "advanced";
+      task_type: string;
+      payload: Record<string, unknown>;
+    }) => ({
+      id: 201,
+      source: input.source,
+      mode: input.mode,
+      task_type: input.task_type,
+      status: "PENDING",
+      retry_count: 0,
+      payload: input.payload,
+      created_at: "2026-02-26T00:00:00Z",
+      updated_at: "2026-02-26T00:00:00Z",
+    }));
+
+    const store = useRecruitingStore();
+    await store.bootstrap();
+
+    await store.createCandidatesTask({
+      source: "all",
+      mode: "compliant",
+      localJobId: 101,
+      batchSize: 50,
+      crawlIntervalSeconds: 300,
+      retryCount: 1,
+      retryBackoffMs: 450,
+      autoSyncToCandidates: true,
+    });
+
+    expect(backend.createCrawlTask).toHaveBeenCalledWith(expect.objectContaining({
+      source: "all",
+      mode: "compliant",
+      task_type: "crawl_candidates",
+      payload: expect.objectContaining({
+        localJobId: 101,
+        localJobTitle: "前端工程师",
+        batchSize: 50,
+        crawlIntervalSeconds: 300,
+        retryCount: 1,
+        retryBackoffMs: 450,
+        autoSyncToCandidates: true,
+      }),
+    }));
+    expect(store.tasks[0]?.status).toBe("PENDING");
+  });
+
+  it("toggles pending task to running and executes one cycle immediately", async () => {
+    const store = useRecruitingStore();
+    await store.bootstrap();
+
+    store.tasks = [
+      {
+        id: 301,
+        source: "all",
+        mode: "compliant",
+        task_type: "crawl_candidates",
+        status: "PENDING",
+        retry_count: 0,
+        payload: {
+          localJobId: 101,
+          localJobTitle: "前端工程师",
+          localJobCity: "杭州",
+          batchSize: 1,
+          crawlIntervalSeconds: 300,
+          retryCount: 0,
+          retryBackoffMs: 200,
+          autoSyncToCandidates: false,
+        },
+        created_at: "2026-02-26T00:00:00Z",
+        updated_at: "2026-02-26T00:00:00Z",
+      },
+    ];
+
+    backend.listCrawlTasks
+      .mockResolvedValueOnce([
+        {
+          ...store.tasks[0],
+          status: "RUNNING",
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          ...store.tasks[0],
+          status: "PAUSED",
+        },
+      ]);
+    backend.triggerSidecarCrawlJobs.mockResolvedValue({
+      id: "sidecar-job-task",
+      source: "boss",
+      mode: "compliant",
+      status: "SUCCEEDED",
+      attempts: 1,
+      output: [{
+        externalId: "job-1",
+        title: "前端工程师",
+        company: "示例科技",
+        city: "杭州",
+      }],
+    });
+    backend.triggerSidecarCrawlCandidates.mockResolvedValue({
+      id: "sidecar-candidate-task",
+      source: "boss",
+      mode: "compliant",
+      status: "SUCCEEDED",
+      attempts: 1,
+      output: [{
+        externalId: "boss-candidate-301",
+        name: "赵六",
+        currentCompany: "示例科技",
+        years: 4,
+      }],
+    });
+    backend.upsertCrawlTaskPeople.mockResolvedValue([
+      {
+        id: 1,
+        task_id: 301,
+        source: "boss",
+        external_id: "boss-candidate-301",
+        name: "赵六",
+        current_company: "示例科技",
+        years_of_experience: 4,
+        sync_status: "UNSYNCED",
+        sync_error_code: null,
+        sync_error_message: null,
+        candidate_id: null,
+        created_at: "2026-02-26T00:00:00Z",
+        updated_at: "2026-02-26T00:00:00Z",
+      },
+    ]);
+
+    await store.toggleTaskRunState(301);
+
+    expect(backend.updateCrawlTask).toHaveBeenCalledWith(expect.objectContaining({
+      task_id: 301,
+      status: "RUNNING",
+    }));
+    expect(backend.updateCrawlTask).toHaveBeenCalledWith(expect.objectContaining({
+      task_id: 301,
+      status: "RUNNING",
+      snapshot: expect.objectContaining({
+        fetchedPeople: 1,
+      }),
+    }));
+    expect(backend.upsertCrawlTaskPeople).toHaveBeenCalledWith(expect.objectContaining({
+      task_id: 301,
+    }));
+  });
+
+  it("marks task failed when cycle still fails after retries", async () => {
+    const store = useRecruitingStore();
+    await store.bootstrap();
+
+    store.tasks = [
+      {
+        id: 302,
+        source: "boss",
+        mode: "compliant",
+        task_type: "crawl_candidates",
+        status: "PENDING",
+        retry_count: 0,
+        payload: {
+          localJobId: 101,
+          localJobTitle: "前端工程师",
+          localJobCity: "杭州",
+          batchSize: 5,
+          crawlIntervalSeconds: 300,
+          retryCount: 0,
+          retryBackoffMs: 200,
+          autoSyncToCandidates: false,
+        },
+        created_at: "2026-02-26T00:00:00Z",
+        updated_at: "2026-02-26T00:00:00Z",
+      },
+    ];
+
+    backend.listCrawlTasks
+      .mockResolvedValueOnce([
+        {
+          ...store.tasks[0],
+          status: "RUNNING",
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          ...store.tasks[0],
+          status: "FAILED",
+        },
+      ]);
+    backend.triggerSidecarCrawlJobs.mockResolvedValue({
+      id: "sidecar-job-task",
+      source: "boss",
+      mode: "compliant",
+      status: "FAILED",
+      attempts: 1,
+      error: "job crawl failed",
+    });
+
+    await store.toggleTaskRunState(302);
+
+    expect(backend.updateCrawlTask).toHaveBeenCalledWith(expect.objectContaining({
+      task_id: 302,
+      status: "FAILED",
+    }));
+  });
+
+  it("deletes running task by pausing first", async () => {
+    const store = useRecruitingStore();
+    await store.bootstrap();
+
+    store.tasks = [
+      {
+        id: 401,
+        source: "boss",
+        mode: "compliant",
+        task_type: "crawl_candidates",
+        status: "RUNNING",
+        retry_count: 0,
+        payload: {
+          localJobId: 101,
+          localJobTitle: "前端工程师",
+          localJobCity: "杭州",
+          batchSize: 10,
+          crawlIntervalSeconds: 300,
+          retryCount: 1,
+          retryBackoffMs: 450,
+          autoSyncToCandidates: true,
+        },
+        created_at: "2026-02-26T00:00:00Z",
+        updated_at: "2026-02-26T00:00:00Z",
+      },
+    ];
+
+    await store.deleteTask(401);
+
+    expect(backend.updateCrawlTask).toHaveBeenCalledWith(expect.objectContaining({
+      task_id: 401,
+      status: "PAUSED",
+    }));
+    expect(backend.deleteCrawlTask).toHaveBeenCalledWith(401);
+    expect(store.tasks.some((task) => task.id === 401)).toBe(false);
+  });
+
   it("stores HOLD evaluation when interview evidence is insufficient", async () => {
     const store = useRecruitingStore();
     await store.bootstrap();
@@ -642,5 +1013,82 @@ describe("recruiting store auto workflow", () => {
         final_decision: "HIRE",
       }),
     );
+  });
+
+  it("updates, stops and deletes jobs while syncing local state", async () => {
+    const store = useRecruitingStore();
+    await store.bootstrap();
+
+    await store.updateJob({
+      job_id: 101,
+      title: "高级前端工程师",
+      company: "示例科技",
+      city: "杭州",
+      salary_k: "35-50",
+      description: "Vue3 + TS + Playwright",
+    });
+    expect(store.jobs[0]?.title).toBe("高级前端工程师");
+
+    await store.stopJob(101);
+    expect(store.jobs[0]?.status).toBe("STOPPED");
+
+    await store.deleteJob(101);
+    expect(store.jobs.find((item) => item.id === 101)).toBeUndefined();
+    expect(backend.deleteJob).toHaveBeenCalledWith(101);
+  });
+
+  it("supports screening template crud and job template binding", async () => {
+    const store = useRecruitingStore();
+    await store.bootstrap();
+
+    const templates = await store.loadScreeningTemplates();
+    expect(templates).toHaveLength(1);
+
+    await store.createScreeningTemplate({
+      name: "前端模板",
+      dimensions: [
+        {
+          key: "goal_orientation",
+          label: "目标导向",
+          weight: 100,
+        },
+      ],
+      risk_rules: {},
+    });
+    await store.updateScreeningTemplate({
+      template_id: 9,
+      name: "前端模板v2",
+      dimensions: [
+        {
+          key: "goal_orientation",
+          label: "目标导向",
+          weight: 100,
+        },
+      ],
+      risk_rules: {},
+    });
+    await store.deleteScreeningTemplate(9);
+    await store.setJobScreeningTemplate({
+      job_id: 101,
+      template_id: 1,
+    });
+
+    expect(backend.listScreeningTemplates).toHaveBeenCalled();
+    expect(backend.createScreeningTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "前端模板",
+      }),
+    );
+    expect(backend.updateScreeningTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        template_id: 9,
+      }),
+    );
+    expect(backend.deleteScreeningTemplate).toHaveBeenCalledWith(9);
+    expect(backend.setJobScreeningTemplate).toHaveBeenCalledWith({
+      job_id: 101,
+      template_id: 1,
+    });
+    expect(store.jobs[0]?.screening_template_id).toBe(1);
   });
 });

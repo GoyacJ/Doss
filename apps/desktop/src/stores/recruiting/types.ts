@@ -4,6 +4,8 @@ import type { CandidateImportItem } from "../../lib/crawl-import";
 export type UiAnalysisRecord = AnalysisResult & { id: number; createdAt: string };
 
 export type CandidateImportSource = "boss" | "zhilian" | "wuba" | "lagou";
+export type CrawlTaskSource = CandidateImportSource | "all";
+export const CRAWL_PLATFORM_SOURCES: CandidateImportSource[] = ["boss", "zhilian", "wuba", "lagou"];
 
 export type ConflictResolutionAction = "merge" | "create" | "skip";
 
@@ -50,3 +52,20 @@ export type SidecarTaskError = Error & {
   sidecarErrorCode?: string;
   sidecarSnapshot?: Record<string, unknown>;
 };
+
+export interface CrawlCandidatesTaskPayload {
+  localJobId: number;
+  localJobTitle: string;
+  localJobCity?: string;
+  batchSize: number;
+  crawlIntervalSeconds: number;
+  retryCount: number;
+  retryBackoffMs: number;
+  autoSyncToCandidates: boolean;
+}
+
+export interface TaskPersonSyncResult {
+  status: "SYNCED" | "FAILED";
+  candidateId?: number;
+  reason?: string;
+}

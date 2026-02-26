@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   interviewRecommendationLabel,
   interviewRecommendationTone,
+  jobStatusLabel,
+  jobStatusTone,
   sidecarHealthBadge,
   stageTone,
   taskStatusLabel,
@@ -59,5 +61,15 @@ describe("status helpers", () => {
     expect(interviewRecommendationTone("HIRE")).toBe("success");
     expect(interviewRecommendationTone("HOLD")).toBe("warning");
     expect(interviewRecommendationTone("NO_HIRE")).toBe("danger");
+  });
+
+  it("maps job status to label and tone", () => {
+    expect(jobStatusLabel("ACTIVE")).toBe("招聘中");
+    expect(jobStatusLabel("STOPPED")).toBe("已停止");
+    expect(jobStatusLabel()).toBe("招聘中");
+
+    expect(jobStatusTone("ACTIVE")).toBe("success");
+    expect(jobStatusTone("STOPPED")).toBe("warning");
+    expect(jobStatusTone()).toBe("success");
   });
 });

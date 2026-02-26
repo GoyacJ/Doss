@@ -29,10 +29,14 @@ use domains::ai_settings::{
     upsert_ai_provider_settings, upsert_task_runtime_settings,
 };
 use domains::candidate::{
-    create_candidate, list_analysis, list_candidates, list_pipeline_events, merge_candidate_import,
-    move_candidate_stage, parse_resume_file, run_candidate_analysis, upsert_resume,
+    create_candidate, delete_candidate, list_analysis, list_candidates, list_pipeline_events,
+    merge_candidate_import, move_candidate_stage, parse_resume_file, run_candidate_analysis,
+    set_candidate_qualification, update_candidate, upsert_resume,
 };
-use domains::crawl_task::{create_crawl_task, list_crawl_tasks, update_crawl_task};
+use domains::crawl_task::{
+    create_crawl_task, delete_crawl_task, list_crawl_task_people, list_crawl_tasks,
+    update_crawl_task, update_crawl_task_people_sync, upsert_crawl_task_people,
+};
 use domains::search::search_candidates;
 use domains::sidecar_runtime::{ensure_sidecar, ensure_sidecar_running};
 
@@ -231,6 +235,7 @@ enum SourceType {
     Zhilian,
     Wuba,
     Lagou,
+    All,
     Manual,
 }
 
@@ -241,6 +246,7 @@ impl SourceType {
             SourceType::Zhilian => "zhilian",
             SourceType::Wuba => "wuba",
             SourceType::Lagou => "lagou",
+            SourceType::All => "all",
             SourceType::Manual => "manual",
         }
     }
@@ -591,6 +597,9 @@ struct Job {
     city: Option<String>,
     salary_k: Option<String>,
     description: Option<String>,
+    status: String,
+    screening_template_id: Option<i64>,
+    screening_template_name: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -606,6 +615,16 @@ struct NewJobInput {
     description: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct UpdateJobInput {
+    job_id: i64,
+    title: String,
+    company: String,
+    city: Option<String>,
+    salary_k: Option<String>,
+    description: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct Candidate {
     id: i64,
@@ -613,6 +632,9 @@ struct Candidate {
     source: String,
     name: String,
     current_company: Option<String>,
+    score: Option<f64>,
+    age: Option<i32>,
+    gender: Option<String>,
     years_of_experience: f64,
     stage: PipelineStage,
     tags: Vec<String>,
@@ -628,11 +650,28 @@ struct NewCandidateInput {
     source: Option<SourceType>,
     name: String,
     current_company: Option<String>,
+    score: Option<f64>,
+    age: Option<i32>,
+    gender: Option<String>,
     years_of_experience: f64,
     phone: Option<String>,
     email: Option<String>,
     tags: Vec<String>,
     job_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UpdateCandidateInput {
+    candidate_id: i64,
+    name: String,
+    current_company: Option<String>,
+    score: Option<f64>,
+    age: Option<i32>,
+    gender: Option<String>,
+    years_of_experience: f64,
+    phone: Option<String>,
+    email: Option<String>,
+    tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -763,6 +802,27 @@ struct UpsertScreeningTemplateInput {
     name: Option<String>,
     dimensions: Option<Vec<ScreeningDimension>>,
     risk_rules: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CreateScreeningTemplateInput {
+    name: Option<String>,
+    dimensions: Option<Vec<ScreeningDimension>>,
+    risk_rules: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UpdateScreeningTemplateInput {
+    template_id: i64,
+    name: Option<String>,
+    dimensions: Option<Vec<ScreeningDimension>>,
+    risk_rules: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SetJobScreeningTemplateInput {
+    job_id: i64,
+    template_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -933,6 +993,57 @@ struct UpdateCrawlTaskInput {
     snapshot: Option<Value>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct CrawlTaskPerson {
+    id: i64,
+    task_id: i64,
+    source: String,
+    external_id: Option<String>,
+    name: String,
+    current_company: Option<String>,
+    years_of_experience: f64,
+    sync_status: String,
+    sync_error_code: Option<String>,
+    sync_error_message: Option<String>,
+    candidate_id: Option<i64>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UpsertCrawlTaskPersonInput {
+    source: SourceType,
+    external_id: Option<String>,
+    name: String,
+    current_company: Option<String>,
+    years_of_experience: f64,
+    sync_status: Option<String>,
+    sync_error_code: Option<String>,
+    sync_error_message: Option<String>,
+    candidate_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UpsertCrawlTaskPeopleInput {
+    task_id: i64,
+    people: Vec<UpsertCrawlTaskPersonInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CrawlTaskPersonSyncUpdate {
+    person_id: i64,
+    sync_status: String,
+    sync_error_code: Option<String>,
+    sync_error_message: Option<String>,
+    candidate_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UpdateCrawlTaskPeopleSyncInput {
+    task_id: i64,
+    updates: Vec<CrawlTaskPersonSyncUpdate>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TaskRuntimeSettings {
     auto_batch_concurrency: i32,
@@ -963,6 +1074,13 @@ struct MoveStageInput {
     candidate_id: i64,
     job_id: Option<i64>,
     to_stage: PipelineStage,
+    note: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SetCandidateQualificationInput {
+    candidate_id: i64,
+    qualified: bool,
     note: Option<String>,
 }
 
@@ -1059,6 +1177,20 @@ fn is_valid_transition(from: &str, to: &str) -> bool {
     }
 }
 
+fn resolve_qualification_stage(current_stage: &str, qualified: bool) -> Option<&'static str> {
+    if qualified {
+        if current_stage == "REJECTED" {
+            Some("NEW")
+        } else {
+            None
+        }
+    } else if current_stage == "REJECTED" {
+        None
+    } else {
+        Some("REJECTED")
+    }
+}
+
 fn open_connection(db_path: &Path) -> AppResult<Connection> {
     let conn = Connection::open(db_path)?;
     conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
@@ -1078,6 +1210,7 @@ fn migrate_db(db_path: &Path) -> AppResult<()> {
             city TEXT,
             salary_k TEXT,
             description TEXT,
+            status TEXT NOT NULL DEFAULT 'ACTIVE',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -1088,6 +1221,9 @@ fn migrate_db(db_path: &Path) -> AppResult<()> {
             source TEXT NOT NULL,
             name TEXT NOT NULL,
             current_company TEXT,
+            score REAL,
+            age INTEGER,
+            gender TEXT,
             years_of_experience REAL NOT NULL DEFAULT 0,
             stage TEXT NOT NULL DEFAULT 'NEW',
             phone_enc TEXT,
@@ -1282,6 +1418,26 @@ fn migrate_db(db_path: &Path) -> AppResult<()> {
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS crawl_task_people (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            dedupe_key TEXT NOT NULL,
+            external_id TEXT,
+            name TEXT NOT NULL,
+            current_company TEXT,
+            years_of_experience REAL NOT NULL DEFAULT 0,
+            sync_status TEXT NOT NULL DEFAULT 'UNSYNCED',
+            sync_error_code TEXT,
+            sync_error_message TEXT,
+            candidate_id INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES crawl_tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE SET NULL,
+            UNIQUE(task_id, dedupe_key)
+        );
+
         CREATE TABLE IF NOT EXISTS audit_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             action TEXT NOT NULL,
@@ -1302,6 +1458,8 @@ fn migrate_db(db_path: &Path) -> AppResult<()> {
         CREATE INDEX IF NOT EXISTS idx_candidates_stage ON candidates(stage);
         CREATE INDEX IF NOT EXISTS idx_applications_job_stage ON applications(job_id, stage);
         CREATE INDEX IF NOT EXISTS idx_crawl_tasks_status ON crawl_tasks(status);
+        CREATE INDEX IF NOT EXISTS idx_crawl_task_people_task ON crawl_task_people(task_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_crawl_task_people_sync ON crawl_task_people(task_id, sync_status);
         CREATE INDEX IF NOT EXISTS idx_screening_results_candidate ON screening_results(candidate_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_interview_kits_candidate ON interview_kits(candidate_id, updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_interview_feedback_candidate ON interview_feedback(candidate_id, created_at DESC);
@@ -1316,6 +1474,14 @@ fn migrate_db(db_path: &Path) -> AppResult<()> {
         );
         "#,
     )?;
+
+    let _ = conn.execute(
+        "ALTER TABLE jobs ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE'",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE candidates ADD COLUMN age INTEGER", []);
+    let _ = conn.execute("ALTER TABLE candidates ADD COLUMN gender TEXT", []);
+    let _ = conn.execute("ALTER TABLE candidates ADD COLUMN score REAL", []);
 
     Ok(())
 }
@@ -2440,6 +2606,9 @@ fn candidate_from_row(
         source: row.get("source")?,
         name: row.get("name")?,
         current_company: row.get("current_company")?,
+        score: row.get("score")?,
+        age: row.get("age")?,
+        gender: row.get("gender")?,
         years_of_experience: row.get("years_of_experience")?,
         stage,
         tags,
@@ -2455,20 +2624,44 @@ fn create_job(state: State<'_, AppState>, input: NewJobInput) -> Result<Job, Str
     let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
     let now = now_iso();
     let source = input.source.unwrap_or(SourceType::Manual).as_db().to_string();
+    let title = input.title.trim().to_string();
+    let company = input.company.trim().to_string();
+    if title.is_empty() || company.is_empty() {
+        return Err("job_title_or_company_required".to_string());
+    }
+
+    let city = input
+        .city
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let salary_k = input
+        .salary_k
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let description = input
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
     conn.execute(
         r#"
-        INSERT INTO jobs(external_id, source, title, company, city, salary_k, description, created_at, updated_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        INSERT INTO jobs(external_id, source, title, company, city, salary_k, description, status, created_at, updated_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'ACTIVE', ?8, ?9)
         "#,
         params![
             input.external_id,
             source,
-            input.title,
-            input.company,
-            input.city,
-            input.salary_k,
-            input.description,
+            title,
+            company,
+            city,
+            salary_k,
+            description,
             now,
             now,
         ],
@@ -2476,26 +2669,7 @@ fn create_job(state: State<'_, AppState>, input: NewJobInput) -> Result<Job, Str
     .map_err(|error| error.to_string())?;
 
     let id = conn.last_insert_rowid();
-    let job = conn
-        .query_row(
-            "SELECT id, external_id, source, title, company, city, salary_k, description, created_at, updated_at FROM jobs WHERE id = ?1",
-            [id],
-            |row| {
-                Ok(Job {
-                    id: row.get(0)?,
-                    external_id: row.get(1)?,
-                    source: row.get(2)?,
-                    title: row.get(3)?,
-                    company: row.get(4)?,
-                    city: row.get(5)?,
-                    salary_k: row.get(6)?,
-                    description: row.get(7)?,
-                    created_at: row.get(8)?,
-                    updated_at: row.get(9)?,
-                })
-            },
-        )
-        .map_err(|error| error.to_string())?;
+    let job = read_job_by_id(&conn, id)?;
 
     write_audit(
         &conn,
@@ -2509,12 +2683,208 @@ fn create_job(state: State<'_, AppState>, input: NewJobInput) -> Result<Job, Str
     Ok(job)
 }
 
+fn read_job_by_id(conn: &Connection, job_id: i64) -> Result<Job, String> {
+    conn.query_row(
+        r#"
+        SELECT
+            j.id,
+            j.external_id,
+            j.source,
+            j.title,
+            j.company,
+            j.city,
+            j.salary_k,
+            j.description,
+            COALESCE(j.status, 'ACTIVE'),
+            jo.template_id,
+            st.name,
+            j.created_at,
+            j.updated_at
+        FROM jobs j
+        LEFT JOIN job_screening_overrides jo ON jo.job_id = j.id
+        LEFT JOIN screening_templates st ON st.id = jo.template_id
+        WHERE j.id = ?1
+        "#,
+        [job_id],
+        |row| {
+            Ok(Job {
+                id: row.get(0)?,
+                external_id: row.get(1)?,
+                source: row.get(2)?,
+                title: row.get(3)?,
+                company: row.get(4)?,
+                city: row.get(5)?,
+                salary_k: row.get(6)?,
+                description: row.get(7)?,
+                status: row.get(8)?,
+                screening_template_id: row.get(9)?,
+                screening_template_name: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+            })
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn update_job(state: State<'_, AppState>, input: UpdateJobInput) -> Result<Job, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let title = input.title.trim().to_string();
+    let company = input.company.trim().to_string();
+    if title.is_empty() || company.is_empty() {
+        return Err("job_title_or_company_required".to_string());
+    }
+
+    let city = input
+        .city
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let salary_k = input
+        .salary_k
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let description = input
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let now = now_iso();
+
+    let affected = conn
+        .execute(
+            r#"
+            UPDATE jobs
+            SET title = ?1,
+                company = ?2,
+                city = ?3,
+                salary_k = ?4,
+                description = ?5,
+                updated_at = ?6
+            WHERE id = ?7
+            "#,
+            params![title, company, city, salary_k, description, now, input.job_id],
+        )
+        .map_err(|error| error.to_string())?;
+
+    if affected == 0 {
+        return Err(format!("Job {} not found", input.job_id));
+    }
+
+    let job = read_job_by_id(&conn, input.job_id)?;
+    write_audit(
+        &conn,
+        "job.update",
+        "job",
+        Some(job.id.to_string()),
+        serde_json::json!({
+            "title": job.title,
+            "company": job.company,
+            "status": job.status,
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(job)
+}
+
+#[tauri::command]
+fn stop_job(state: State<'_, AppState>, job_id: i64) -> Result<Job, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let now = now_iso();
+    let affected = conn
+        .execute(
+            "UPDATE jobs SET status = 'STOPPED', updated_at = ?1 WHERE id = ?2",
+            params![now, job_id],
+        )
+        .map_err(|error| error.to_string())?;
+
+    if affected == 0 {
+        return Err(format!("Job {} not found", job_id));
+    }
+
+    let job = read_job_by_id(&conn, job_id)?;
+    write_audit(
+        &conn,
+        "job.stop",
+        "job",
+        Some(job.id.to_string()),
+        serde_json::json!({
+            "status": job.status,
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(job)
+}
+
+#[tauri::command]
+fn delete_job(state: State<'_, AppState>, job_id: i64) -> Result<bool, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let active_task_count = count_active_crawl_tasks_for_job(&conn, job_id)?;
+    if active_task_count > 0 {
+        return Err(format!(
+            "该职位存在 {active_task_count} 个执行中的任务，请先停止任务后再删除"
+        ));
+    }
+
+    let affected = conn
+        .execute("DELETE FROM jobs WHERE id = ?1", [job_id])
+        .map_err(|error| error.to_string())?;
+
+    if affected > 0 {
+        write_audit(
+            &conn,
+            "job.delete",
+            "job",
+            Some(job_id.to_string()),
+            serde_json::json!({}),
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    Ok(affected > 0)
+}
+
+fn count_active_crawl_tasks_for_job(conn: &Connection, job_id: i64) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM crawl_tasks WHERE status IN ('PENDING', 'RUNNING', 'PAUSED') AND CAST(json_extract(payload_json, '$.localJobId') AS INTEGER) = ?1",
+        [job_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn list_jobs(state: State<'_, AppState>) -> Result<Vec<Job>, String> {
     let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, external_id, source, title, company, city, salary_k, description, created_at, updated_at FROM jobs ORDER BY updated_at DESC",
+            r#"
+            SELECT
+                j.id,
+                j.external_id,
+                j.source,
+                j.title,
+                j.company,
+                j.city,
+                j.salary_k,
+                j.description,
+                COALESCE(j.status, 'ACTIVE'),
+                jo.template_id,
+                st.name,
+                j.created_at,
+                j.updated_at
+            FROM jobs j
+            LEFT JOIN job_screening_overrides jo ON jo.job_id = j.id
+            LEFT JOIN screening_templates st ON st.id = jo.template_id
+            ORDER BY j.updated_at DESC
+            "#,
         )
         .map_err(|error| error.to_string())?;
 
@@ -2529,8 +2899,11 @@ fn list_jobs(state: State<'_, AppState>) -> Result<Vec<Job>, String> {
                 city: row.get(5)?,
                 salary_k: row.get(6)?,
                 description: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
+                status: row.get(8)?,
+                screening_template_id: row.get(9)?,
+                screening_template_name: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
             })
         })
         .map_err(|error| error.to_string())?
@@ -2864,6 +3237,146 @@ fn upsert_screening_template_internal(
     }
 
     read_screening_template_by_id(conn, template_id)
+}
+
+fn create_global_screening_template_internal(
+    conn: &Connection,
+    name: String,
+    dimensions: Vec<ScreeningDimension>,
+    risk_rules: Value,
+) -> Result<ScreeningTemplateRecord, String> {
+    let now = now_iso();
+    let config_json = serde_json::json!({
+        "dimensions": dimensions,
+        "riskRules": risk_rules,
+    })
+    .to_string();
+
+    conn.execute(
+        r#"
+        INSERT INTO screening_templates(scope, job_id, name, config_json, created_at, updated_at)
+        VALUES ('global', NULL, ?1, ?2, ?3, ?4)
+        "#,
+        params![name, config_json, now, now],
+    )
+    .map_err(|error| error.to_string())?;
+    let template_id = conn.last_insert_rowid();
+
+    conn.execute(
+        "DELETE FROM screening_dimensions WHERE template_id = ?1",
+        [template_id],
+    )
+    .map_err(|error| error.to_string())?;
+
+    let final_template = read_screening_template_by_id(conn, template_id)?;
+    for (index, dimension) in final_template.dimensions.iter().enumerate() {
+        conn.execute(
+            r#"
+            INSERT INTO screening_dimensions(
+                template_id, dimension_key, dimension_label, weight, sort_order, created_at, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                template_id,
+                dimension.key,
+                dimension.label,
+                dimension.weight,
+                index as i32,
+                now,
+                now,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    read_screening_template_by_id(conn, template_id)
+}
+
+fn update_global_screening_template_internal(
+    conn: &Connection,
+    template_id: i64,
+    name: String,
+    dimensions: Vec<ScreeningDimension>,
+    risk_rules: Value,
+) -> Result<ScreeningTemplateRecord, String> {
+    let existing = read_screening_template_by_id(conn, template_id)?;
+    if existing.scope != "global" {
+        return Err("screening_template_scope_invalid".to_string());
+    }
+
+    let now = now_iso();
+    let config_json = serde_json::json!({
+        "dimensions": dimensions,
+        "riskRules": risk_rules,
+    })
+    .to_string();
+    conn.execute(
+        r#"
+        UPDATE screening_templates
+        SET name = ?1, config_json = ?2, updated_at = ?3
+        WHERE id = ?4
+        "#,
+        params![name, config_json, now, template_id],
+    )
+    .map_err(|error| error.to_string())?;
+
+    conn.execute(
+        "DELETE FROM screening_dimensions WHERE template_id = ?1",
+        [template_id],
+    )
+    .map_err(|error| error.to_string())?;
+
+    let final_template = read_screening_template_by_id(conn, template_id)?;
+    for (index, dimension) in final_template.dimensions.iter().enumerate() {
+        conn.execute(
+            r#"
+            INSERT INTO screening_dimensions(
+                template_id, dimension_key, dimension_label, weight, sort_order, created_at, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                template_id,
+                dimension.key,
+                dimension.label,
+                dimension.weight,
+                index as i32,
+                now,
+                now,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    read_screening_template_by_id(conn, template_id)
+}
+
+fn list_global_screening_templates(
+    conn: &Connection,
+) -> Result<Vec<ScreeningTemplateRecord>, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT id
+            FROM screening_templates
+            WHERE scope = 'global'
+            ORDER BY updated_at DESC
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let ids = stmt
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    let mut templates = Vec::new();
+    for id in ids {
+        templates.push(read_screening_template_by_id(conn, id)?);
+    }
+    Ok(templates)
 }
 
 fn resolve_screening_template(
@@ -3669,6 +4182,237 @@ fn upsert_screening_template(
     .map_err(|error| error.to_string())?;
 
     Ok(template)
+}
+
+#[tauri::command]
+fn list_screening_templates(state: State<'_, AppState>) -> Result<Vec<ScreeningTemplateRecord>, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let mut templates = list_global_screening_templates(&conn)?;
+    if templates.is_empty() {
+        let default_template = upsert_screening_template_internal(
+            &conn,
+            "global",
+            None,
+            "默认筛选模板".to_string(),
+            normalize_screening_dimensions(None)?,
+            serde_json::json!({}),
+        )?;
+        templates = vec![default_template];
+    }
+    Ok(templates)
+}
+
+#[tauri::command]
+fn create_screening_template(
+    state: State<'_, AppState>,
+    input: CreateScreeningTemplateInput,
+) -> Result<ScreeningTemplateRecord, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let dimensions = normalize_screening_dimensions(input.dimensions)?;
+    let risk_rules = input.risk_rules.unwrap_or_else(|| serde_json::json!({}));
+    let name = input
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "新评分模板".to_string());
+
+    let template = create_global_screening_template_internal(
+        &conn,
+        name,
+        dimensions,
+        risk_rules,
+    )?;
+
+    write_audit(
+        &conn,
+        "screening.template.create",
+        "screening_template",
+        Some(template.id.to_string()),
+        serde_json::json!({
+            "scope": template.scope,
+            "name": template.name,
+            "dimensions": template.dimensions,
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(template)
+}
+
+#[tauri::command]
+fn update_screening_template(
+    state: State<'_, AppState>,
+    input: UpdateScreeningTemplateInput,
+) -> Result<ScreeningTemplateRecord, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let existing = read_screening_template_by_id(&conn, input.template_id)?;
+    if existing.scope != "global" {
+        return Err("screening_template_scope_invalid".to_string());
+    }
+
+    let dimensions = normalize_screening_dimensions(input.dimensions.or(Some(existing.dimensions.clone())))?;
+    let risk_rules = input.risk_rules.unwrap_or(existing.risk_rules.clone());
+    let name = input
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or(existing.name);
+
+    let template = update_global_screening_template_internal(
+        &conn,
+        input.template_id,
+        name,
+        dimensions,
+        risk_rules,
+    )?;
+
+    write_audit(
+        &conn,
+        "screening.template.update",
+        "screening_template",
+        Some(template.id.to_string()),
+        serde_json::json!({
+            "scope": template.scope,
+            "name": template.name,
+            "dimensions": template.dimensions,
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(template)
+}
+
+#[tauri::command]
+fn delete_screening_template(
+    state: State<'_, AppState>,
+    template_id: i64,
+) -> Result<Vec<ScreeningTemplateRecord>, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let existing = read_screening_template_by_id(&conn, template_id)?;
+    if existing.scope != "global" {
+        return Err("screening_template_scope_invalid".to_string());
+    }
+    let job_usage_count = count_jobs_using_screening_template(&conn, template_id)?;
+    if job_usage_count > 0 {
+        return Err(format!(
+            "该评分模板已被 {job_usage_count} 个职位使用，请先为相关职位切换模板后再删除"
+        ));
+    }
+
+    conn.execute("DELETE FROM screening_templates WHERE id = ?1", [template_id])
+        .map_err(|error| error.to_string())?;
+
+    write_audit(
+        &conn,
+        "screening.template.delete",
+        "screening_template",
+        Some(template_id.to_string()),
+        serde_json::json!({
+            "scope": existing.scope,
+            "name": existing.name,
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+
+    let mut templates = list_global_screening_templates(&conn)?;
+    if templates.is_empty() {
+        let default_template = upsert_screening_template_internal(
+            &conn,
+            "global",
+            None,
+            "默认筛选模板".to_string(),
+            normalize_screening_dimensions(None)?,
+            serde_json::json!({}),
+        )?;
+        templates = vec![default_template];
+    }
+
+    Ok(templates)
+}
+
+fn count_jobs_using_screening_template(conn: &Connection, template_id: i64) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM job_screening_overrides WHERE template_id = ?1",
+        [template_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_job_screening_template(
+    state: State<'_, AppState>,
+    input: SetJobScreeningTemplateInput,
+) -> Result<Job, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let job_exists = conn
+        .query_row(
+            "SELECT id FROM jobs WHERE id = ?1",
+            [input.job_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if job_exists.is_none() {
+        return Err(format!("Job {} not found", input.job_id));
+    }
+
+    let now = now_iso();
+    if let Some(template_id) = input.template_id {
+        let scope = conn
+            .query_row(
+                "SELECT scope FROM screening_templates WHERE id = ?1",
+                [template_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("screening_template_not_found:{template_id}"))?;
+        if scope != "global" {
+            return Err("screening_template_scope_invalid".to_string());
+        }
+
+        conn.execute(
+            r#"
+            INSERT INTO job_screening_overrides(job_id, template_id, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(job_id)
+            DO UPDATE SET template_id = excluded.template_id, updated_at = excluded.updated_at
+            "#,
+            params![input.job_id, template_id, now, now],
+        )
+        .map_err(|error| error.to_string())?;
+    } else {
+        conn.execute(
+            "DELETE FROM job_screening_overrides WHERE job_id = ?1",
+            [input.job_id],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    conn.execute(
+        "UPDATE jobs SET updated_at = ?1 WHERE id = ?2",
+        params![now, input.job_id],
+    )
+    .map_err(|error| error.to_string())?;
+
+    let job = read_job_by_id(&conn, input.job_id)?;
+    write_audit(
+        &conn,
+        "job.template.set",
+        "job",
+        Some(job.id.to_string()),
+        serde_json::json!({
+            "templateId": input.template_id,
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(job)
 }
 
 fn derive_screening_recommendation(t0_score: f64, overall_score: i32, risk_level: &str) -> String {
@@ -4975,8 +5719,14 @@ pub fn run() {
             app_health,
             ensure_sidecar,
             create_job,
+            update_job,
+            stop_job,
+            delete_job,
             list_jobs,
             create_candidate,
+            update_candidate,
+            delete_candidate,
+            set_candidate_qualification,
             merge_candidate_import,
             list_candidates,
             move_candidate_stage,
@@ -4985,6 +5735,11 @@ pub fn run() {
             parse_resume_file,
             get_screening_template,
             upsert_screening_template,
+            list_screening_templates,
+            create_screening_template,
+            update_screening_template,
+            delete_screening_template,
+            set_job_screening_template,
             run_resume_screening,
             list_screening_results,
             generate_interview_kit,
@@ -5010,6 +5765,10 @@ pub fn run() {
             create_crawl_task,
             update_crawl_task,
             list_crawl_tasks,
+            delete_crawl_task,
+            upsert_crawl_task_people,
+            list_crawl_task_people,
+            update_crawl_task_people_sync,
             search_candidates,
             dashboard_metrics,
         ])
@@ -5027,6 +5786,26 @@ mod tests {
     fn pipeline_transition_rules_are_enforced() {
         assert!(is_valid_transition("NEW", "SCREENING"));
         assert!(!is_valid_transition("NEW", "OFFERED"));
+    }
+
+    #[test]
+    fn candidate_qualification_stage_resolution_is_deterministic() {
+        assert_eq!(
+            resolve_qualification_stage("SCREENING", false),
+            Some("REJECTED")
+        );
+        assert_eq!(
+            resolve_qualification_stage("REJECTED", false),
+            None
+        );
+        assert_eq!(
+            resolve_qualification_stage("REJECTED", true),
+            Some("NEW")
+        );
+        assert_eq!(
+            resolve_qualification_stage("INTERVIEW", true),
+            None
+        );
     }
 
     #[test]
@@ -5275,5 +6054,83 @@ mod tests {
             AiProvider::from_db("openapi-compatible"),
             AiProvider::OpenApi
         );
+    }
+
+    #[test]
+    fn count_jobs_using_screening_template_returns_usage_count() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute(
+            "CREATE TABLE job_screening_overrides (
+                job_id INTEGER PRIMARY KEY,
+                template_id INTEGER NOT NULL
+            )",
+            [],
+        )
+        .expect("create overrides table");
+        conn.execute(
+            "INSERT INTO job_screening_overrides(job_id, template_id) VALUES (?1, ?2)",
+            params![101, 9],
+        )
+        .expect("insert override");
+        conn.execute(
+            "INSERT INTO job_screening_overrides(job_id, template_id) VALUES (?1, ?2)",
+            params![102, 9],
+        )
+        .expect("insert override");
+        conn.execute(
+            "INSERT INTO job_screening_overrides(job_id, template_id) VALUES (?1, ?2)",
+            params![103, 3],
+        )
+        .expect("insert override");
+
+        let count = count_jobs_using_screening_template(&conn, 9).expect("count usage");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn count_active_tasks_for_job_counts_pending_running_and_paused() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute(
+            "CREATE TABLE crawl_tasks (
+                id INTEGER PRIMARY KEY,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )",
+            [],
+        )
+        .expect("create crawl_tasks table");
+        conn.execute(
+            "INSERT INTO crawl_tasks(id, status, payload_json) VALUES (?1, ?2, ?3)",
+            params![1, "RUNNING", r#"{"localJobId": 101}"#],
+        )
+        .expect("insert running task");
+        conn.execute(
+            "INSERT INTO crawl_tasks(id, status, payload_json) VALUES (?1, ?2, ?3)",
+            params![2, "PENDING", r#"{"localJobId": 101}"#],
+        )
+        .expect("insert pending task");
+        conn.execute(
+            "INSERT INTO crawl_tasks(id, status, payload_json) VALUES (?1, ?2, ?3)",
+            params![3, "RUNNING", r#"{"localJobId": 102}"#],
+        )
+        .expect("insert another job task");
+        conn.execute(
+            "INSERT INTO crawl_tasks(id, status, payload_json) VALUES (?1, ?2, ?3)",
+            params![4, "RUNNING", r#"{}"#],
+        )
+        .expect("insert no-job task");
+        conn.execute(
+            "INSERT INTO crawl_tasks(id, status, payload_json) VALUES (?1, ?2, ?3)",
+            params![5, "PAUSED", r#"{"localJobId": 101}"#],
+        )
+        .expect("insert paused task");
+        conn.execute(
+            "INSERT INTO crawl_tasks(id, status, payload_json) VALUES (?1, ?2, ?3)",
+            params![6, "CANCELED", r#"{"localJobId": 101}"#],
+        )
+        .expect("insert canceled task");
+
+        let count = count_active_crawl_tasks_for_job(&conn, 101).expect("count active tasks");
+        assert_eq!(count, 3);
     }
 }

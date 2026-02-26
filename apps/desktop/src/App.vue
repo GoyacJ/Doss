@@ -49,8 +49,12 @@ watch(
 </script>
 
 <template>
-  <div class="min-h-screen grid grid-cols-[260px_1fr] lt-lg:grid-cols-1">
-    <aside class="p-5 border-r border-line backdrop-blur bg-sidebar lt-lg:border-r-0 lt-lg:border-b">
+  <div
+    class="h-screen overflow-hidden grid grid-cols-[260px_1fr] lt-lg:min-h-screen lt-lg:h-auto lt-lg:overflow-visible lt-lg:grid-cols-1"
+  >
+    <aside
+      class="h-screen overflow-y-auto p-5 border-r border-line backdrop-blur bg-sidebar lt-lg:h-auto lt-lg:overflow-visible lt-lg:border-r-0 lt-lg:border-b"
+    >
       <h1 class="m-0 text-[1.45rem] tracking-[0.03em] font-700">Doss Recruiter</h1>
       <p class="my-1.5 mb-4 text-muted text-[0.92rem]">AI 辅助招聘工作台</p>
 
@@ -73,7 +77,7 @@ watch(
 
     </aside>
 
-    <main class="p-5 overflow-auto">
+    <main class="h-screen overflow-y-auto p-5 lt-lg:h-auto lt-lg:overflow-visible">
       <RouterView />
     </main>
     <GlobalToastViewport />

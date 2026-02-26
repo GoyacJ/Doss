@@ -2,8 +2,11 @@ import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 import type {
   CandidateRecord,
+  CrawlPlatformSource,
   CrawlMode,
+  CrawlTaskPersonRecord,
   CrawlTaskRecord,
+  CrawlTaskSource,
   DashboardMetrics,
   JobRecord,
   PipelineStage,
@@ -11,13 +14,22 @@ import type {
 import {
   checkSidecarHealth,
   ensureSidecar,
+  deleteCrawlTask as deleteCrawlTaskApi,
   createCandidate,
+  updateCandidate as updateCandidateApi,
+  deleteCandidate as deleteCandidateApi,
+  setCandidateQualification as setCandidateQualificationApi,
+  createScreeningTemplate as createScreeningTemplateApi,
   createCrawlTask,
   createJob,
+  deleteJob as deleteJobApi,
+  deleteScreeningTemplate as deleteScreeningTemplateApi,
   getHealth,
   listCandidates,
   listCrawlTasks,
+  listCrawlTaskPeople as listCrawlTaskPeopleApi,
   listJobs,
+  listScreeningTemplates,
   loadDashboardMetrics,
   mergeCandidateImport,
   moveCandidateStage,
@@ -28,8 +40,14 @@ import {
   triggerSidecarCrawlCandidates,
   triggerSidecarCrawlJobs,
   triggerSidecarCrawlResume,
+  setJobScreeningTemplate as setJobScreeningTemplateApi,
+  stopJob as stopJobApi,
   upsertTaskRuntimeSettings,
+  updateJob as updateJobApi,
+  updateScreeningTemplate as updateScreeningTemplateApi,
   updateCrawlTask,
+  updateCrawlTaskPeopleSync as updateCrawlTaskPeopleSyncApi,
+  upsertCrawlTaskPeople as upsertCrawlTaskPeopleApi,
   type AppHealth,
   type AiProviderId,
   type AiProviderSettings,
@@ -42,8 +60,14 @@ import {
   type InterviewFeedbackRecord,
   type HiringDecisionRecord,
   type InterviewKitRecord,
+  type CreateScreeningTemplatePayload,
   type SearchHit,
+  type SetCandidateQualificationPayload,
+  type SetJobScreeningTemplatePayload,
   type TaskRuntimeSettings,
+  type UpdateCandidatePayload,
+  type UpdateJobPayload,
+  type UpdateScreeningTemplatePayload,
   finalizeHiringDecision as finalizeHiringDecisionApi,
   generateInterviewKit as generateInterviewKitApi,
   getAiProviderSettings,
@@ -62,16 +86,20 @@ import {
   upsertScreeningTemplate,
   upsertAiProviderSettings,
 } from "../services/backend";
+import { extractCandidateImportItems, extractJobImportItems } from "../lib/crawl-import";
 import {
   createAnalysisContextModule,
   mapBackendAnalysisRecord,
 } from "./recruiting/analysis-context";
 import { createCandidateImportModule } from "./recruiting/candidate-import";
 import { createTaskOrchestrator } from "./recruiting/task-orchestrator";
+import { CRAWL_PLATFORM_SOURCES } from "./recruiting/types";
 import type {
   CandidateImportConflict,
+  CrawlCandidatesTaskPayload,
   CandidateImportQualityReport,
   CandidateImportSource,
+  CrawlTaskSource as LocalCrawlTaskSource,
   ConflictResolutionAction,
   UiAnalysisRecord,
 } from "./recruiting/types";
@@ -81,6 +109,68 @@ export type {
   CandidateImportQualityReport,
 } from "./recruiting/types";
 
+const DEFAULT_CANDIDATE_TASK_PAYLOAD: CrawlCandidatesTaskPayload = {
+  localJobId: 0,
+  localJobTitle: "",
+  localJobCity: "",
+  batchSize: 50,
+  crawlIntervalSeconds: 300,
+  retryCount: 1,
+  retryBackoffMs: 450,
+  autoSyncToCandidates: true,
+};
+
+function wait(delayMs: number): Promise<void> {
+  if (delayMs <= 0) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+function asNumber(value: unknown, fallback: number): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return fallback;
+}
+
+function asString(value: unknown, fallback = ""): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  return fallback;
+}
+
+function asBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return fallback;
+}
+
+function parseCandidatesTaskPayload(task: CrawlTaskRecord): CrawlCandidatesTaskPayload {
+  const payload = task.payload ?? {};
+  return {
+    localJobId: Math.max(0, Math.trunc(asNumber(payload.localJobId, DEFAULT_CANDIDATE_TASK_PAYLOAD.localJobId))),
+    localJobTitle: asString(payload.localJobTitle, DEFAULT_CANDIDATE_TASK_PAYLOAD.localJobTitle).trim(),
+    localJobCity: asString(payload.localJobCity, DEFAULT_CANDIDATE_TASK_PAYLOAD.localJobCity).trim(),
+    batchSize: Math.max(1, Math.trunc(asNumber(payload.batchSize, DEFAULT_CANDIDATE_TASK_PAYLOAD.batchSize))),
+    crawlIntervalSeconds: Math.max(1, Math.trunc(asNumber(
+      payload.crawlIntervalSeconds,
+      DEFAULT_CANDIDATE_TASK_PAYLOAD.crawlIntervalSeconds,
+    ))),
+    retryCount: Math.max(0, Math.trunc(asNumber(payload.retryCount, DEFAULT_CANDIDATE_TASK_PAYLOAD.retryCount))),
+    retryBackoffMs: Math.max(100, Math.trunc(asNumber(payload.retryBackoffMs, DEFAULT_CANDIDATE_TASK_PAYLOAD.retryBackoffMs))),
+    autoSyncToCandidates: asBoolean(payload.autoSyncToCandidates, DEFAULT_CANDIDATE_TASK_PAYLOAD.autoSyncToCandidates),
+  };
+}
+
 export const useRecruitingStore = defineStore("recruiting", () => {
   const loading = ref(false);
   const lastError = ref<string | null>(null);
@@ -88,6 +178,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
   const jobs = ref<JobRecord[]>([]);
   const candidates = ref<CandidateRecord[]>([]);
   const tasks = ref<CrawlTaskRecord[]>([]);
+  const taskPeople = ref<Record<number, CrawlTaskPersonRecord[]>>({});
   const metrics = ref<DashboardMetrics | null>(null);
   const health = ref<AppHealth | null>(null);
   const sidecarHealthy = ref<boolean | null>(null);
@@ -109,9 +200,12 @@ export const useRecruitingStore = defineStore("recruiting", () => {
   const candidateImportConflicts = ref<CandidateImportConflict[]>([]);
   const lastCandidateImportReport = ref<CandidateImportQualityReport | null>(null);
   const activeScreeningTemplate = ref<ScreeningTemplateRecord | null>(null);
+  const screeningTemplates = ref<ScreeningTemplateRecord[]>([]);
 
   const hasBootstrapped = ref(false);
   const stageSummary = computed(() => metrics.value?.stage_stats ?? []);
+  const taskLoopTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  const taskLoopLocks = new Set<number>();
 
   function setError(error: unknown) {
     if (error instanceof Error) {
@@ -139,6 +233,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
       jobs.value = jobsData;
       candidates.value = candidatesData;
       tasks.value = tasksData;
+      syncTaskLoopState();
       metrics.value = metricsData;
       health.value = healthData;
 
@@ -179,8 +274,335 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     metrics.value = await loadDashboardMetrics();
   }
 
+  function clearTaskLoopTimer(taskId: number) {
+    const timer = taskLoopTimers.get(taskId);
+    if (timer) {
+      clearTimeout(timer);
+      taskLoopTimers.delete(taskId);
+    }
+  }
+
+  function scheduleTaskLoop(taskId: number, delayMs: number) {
+    clearTaskLoopTimer(taskId);
+    const timer = setTimeout(() => {
+      runCrawlTaskOnce(taskId).catch((error) => {
+        setError(error);
+      });
+    }, Math.max(0, delayMs));
+    taskLoopTimers.set(taskId, timer);
+  }
+
+  function findTaskById(taskId: number): CrawlTaskRecord | undefined {
+    return tasks.value.find((item) => item.id === taskId);
+  }
+
+  function resolveTaskPlatforms(source: CrawlTaskSource): CrawlPlatformSource[] {
+    if (source === "all") {
+      return [...CRAWL_PLATFORM_SOURCES];
+    }
+    return [source];
+  }
+
+  async function ensureTaskPeopleLoaded(taskId: number) {
+    if (taskPeople.value[taskId]) {
+      return taskPeople.value[taskId];
+    }
+    const people = await listCrawlTaskPeopleApi(taskId);
+    taskPeople.value[taskId] = people;
+    return people;
+  }
+
+  async function syncTaskPeople(taskId: number) {
+    const task = findTaskById(taskId);
+    if (!task) {
+      return [];
+    }
+    const taskPayload = parseCandidatesTaskPayload(task);
+    const allPeople = await ensureTaskPeopleLoaded(taskId);
+    const pendingPeople = allPeople.filter((person) => person.sync_status === "UNSYNCED");
+    if (pendingPeople.length === 0) {
+      return allPeople;
+    }
+
+    const updatePayload: Array<{
+      person_id: number;
+      sync_status: "UNSYNCED" | "SYNCED" | "FAILED";
+      sync_error_code?: string;
+      sync_error_message?: string;
+      candidate_id?: number;
+    }> = [];
+
+    for (const person of pendingPeople) {
+      try {
+        const result = await candidateImportModule.importSingleCandidateItem({
+          item: {
+            external_id: person.external_id ?? undefined,
+            name: person.name,
+            current_company: person.current_company ?? undefined,
+            years_of_experience: person.years_of_experience,
+            tags: [],
+            phone: undefined,
+            email: undefined,
+          },
+          source: person.source as CandidateImportSource,
+          mode: task.mode,
+          localJobId: taskPayload.localJobId,
+        });
+
+        updatePayload.push({
+          person_id: person.id,
+          sync_status: result.status,
+          sync_error_code: result.status === "FAILED" ? "candidate_sync_failed" : undefined,
+          sync_error_message: result.reason,
+          candidate_id: result.candidateId,
+        });
+      } catch (error) {
+        updatePayload.push({
+          person_id: person.id,
+          sync_status: "FAILED",
+          sync_error_code: "candidate_sync_failed",
+          sync_error_message: error instanceof Error ? error.message : "candidate_sync_failed",
+        });
+      }
+    }
+
+    const updated = await updateCrawlTaskPeopleSyncApi({
+      task_id: taskId,
+      updates: updatePayload,
+    });
+    taskPeople.value[taskId] = updated;
+    await refreshMetrics();
+    return updated;
+  }
+
+  async function runCrawlTaskCycle(task: CrawlTaskRecord): Promise<{
+    fetchedPeople: number;
+    syncedPeople: number;
+    failedPeople: number;
+    platformSummaries: Array<{
+      source: CrawlPlatformSource;
+      jobId?: string;
+      fetched: number;
+      skipped: boolean;
+      reason?: string;
+    }>;
+  }> {
+    if (task.task_type !== "crawl_candidates") {
+      throw new Error("unsupported_task_type");
+    }
+
+    const payload = parseCandidatesTaskPayload(task);
+    if (!payload.localJobTitle.trim()) {
+      throw new Error("task_local_job_title_required");
+    }
+
+    const platformSummaries: Array<{
+      source: CrawlPlatformSource;
+      jobId?: string;
+      fetched: number;
+      skipped: boolean;
+      reason?: string;
+    }> = [];
+    const mergedPeople: Array<{
+      source: CrawlPlatformSource;
+      external_id?: string;
+      name: string;
+      current_company?: string;
+      years_of_experience: number;
+    }> = [];
+
+    for (const source of resolveTaskPlatforms(task.source as CrawlTaskSource)) {
+      const jobsResult = await triggerSidecarCrawlJobs({
+        source,
+        mode: task.mode,
+        keyword: payload.localJobTitle,
+        city: payload.localJobCity || undefined,
+      });
+      if (jobsResult.status === "FAILED") {
+        throw new Error(jobsResult.error || `crawl_jobs_failed_${source}`);
+      }
+
+      const jobs = extractJobImportItems(jobsResult);
+      const selectedJob = jobs[0];
+      if (!selectedJob?.external_id) {
+        platformSummaries.push({
+          source,
+          fetched: 0,
+          skipped: true,
+          reason: "job_not_found",
+        });
+        continue;
+      }
+
+      const candidateResult = await triggerSidecarCrawlCandidates({
+        source,
+        mode: task.mode,
+        jobId: selectedJob.external_id,
+      });
+      if (candidateResult.status === "FAILED") {
+        throw new Error(candidateResult.error || `crawl_candidates_failed_${source}`);
+      }
+
+      const currentCandidates = extractCandidateImportItems(candidateResult);
+      platformSummaries.push({
+        source,
+        jobId: selectedJob.external_id,
+        fetched: currentCandidates.length,
+        skipped: false,
+      });
+
+      for (const item of currentCandidates) {
+        if (mergedPeople.length >= payload.batchSize) {
+          break;
+        }
+        mergedPeople.push({
+          source,
+          external_id: item.external_id,
+          name: item.name,
+          current_company: item.current_company,
+          years_of_experience: item.years_of_experience,
+        });
+      }
+
+      if (mergedPeople.length >= payload.batchSize) {
+        break;
+      }
+    }
+
+    const upserted = await upsertCrawlTaskPeopleApi({
+      task_id: task.id,
+      people: mergedPeople.map((person) => ({
+        source: person.source,
+        external_id: person.external_id,
+        name: person.name,
+        current_company: person.current_company,
+        years_of_experience: person.years_of_experience,
+        sync_status: "UNSYNCED",
+      })),
+    });
+    taskPeople.value[task.id] = upserted;
+
+    let syncedPeople = 0;
+    let failedPeople = 0;
+    if (payload.autoSyncToCandidates) {
+      const afterSync = await syncTaskPeople(task.id);
+      syncedPeople = afterSync.filter((item) => item.sync_status === "SYNCED").length;
+      failedPeople = afterSync.filter((item) => item.sync_status === "FAILED").length;
+    }
+
+    return {
+      fetchedPeople: mergedPeople.length,
+      syncedPeople,
+      failedPeople,
+      platformSummaries,
+    };
+  }
+
+  async function runCrawlTaskOnce(taskId: number) {
+    if (taskLoopLocks.has(taskId)) {
+      return;
+    }
+    const task = findTaskById(taskId);
+    if (!task || task.status !== "RUNNING") {
+      clearTaskLoopTimer(taskId);
+      return;
+    }
+
+    taskLoopLocks.add(taskId);
+    try {
+      const payload = parseCandidatesTaskPayload(task);
+      let attempts = 0;
+      let lastError: unknown = null;
+      while (attempts <= payload.retryCount) {
+        try {
+          const result = await runCrawlTaskCycle(task);
+          await updateCrawlTask({
+            task_id: taskId,
+            status: "RUNNING",
+            error_code: undefined,
+            snapshot: {
+              ...(task.snapshot ?? {}),
+              lastRunAt: new Date().toISOString(),
+              fetchedPeople: result.fetchedPeople,
+              syncedPeople: result.syncedPeople,
+              failedPeople: result.failedPeople,
+              platformSummaries: result.platformSummaries,
+              intervalSeconds: payload.crawlIntervalSeconds,
+            },
+          });
+          await refreshTasks();
+          const latest = findTaskById(taskId);
+          if (latest?.status === "RUNNING") {
+            scheduleTaskLoop(taskId, payload.crawlIntervalSeconds * 1000);
+          }
+          return;
+        } catch (error) {
+          lastError = error;
+          if (attempts >= payload.retryCount) {
+            break;
+          }
+          await wait(payload.retryBackoffMs * (attempts + 1));
+        }
+        attempts += 1;
+      }
+
+      await updateCrawlTask({
+        task_id: taskId,
+        status: "FAILED",
+        error_code: lastError instanceof Error ? lastError.message : "crawl_task_cycle_failed",
+        snapshot: {
+          ...(task.snapshot ?? {}),
+          lastFailedAt: new Date().toISOString(),
+        },
+      });
+      clearTaskLoopTimer(taskId);
+      await refreshTasks();
+    } finally {
+      taskLoopLocks.delete(taskId);
+    }
+  }
+
+  function syncTaskLoopState() {
+    const runningIds = new Set(
+      tasks.value
+        .filter((task) => task.status === "RUNNING" && task.task_type === "crawl_candidates")
+        .map((task) => task.id),
+    );
+
+    for (const [taskId] of taskLoopTimers) {
+      if (!runningIds.has(taskId)) {
+        clearTaskLoopTimer(taskId);
+      }
+    }
+
+    for (const taskId of runningIds) {
+      if (!taskLoopTimers.has(taskId)) {
+        scheduleTaskLoop(taskId, 0);
+      }
+    }
+  }
+
   async function refreshTasks() {
     tasks.value = await listCrawlTasks();
+    syncTaskLoopState();
+  }
+
+  function upsertJobInList(job: JobRecord) {
+    const index = jobs.value.findIndex((item) => item.id === job.id);
+    if (index >= 0) {
+      jobs.value.splice(index, 1, job);
+      return;
+    }
+    jobs.value.unshift(job);
+  }
+
+  function upsertCandidateInList(candidate: CandidateRecord) {
+    const index = candidates.value.findIndex((item) => item.id === candidate.id);
+    if (index >= 0) {
+      candidates.value.splice(index, 1, candidate);
+      return;
+    }
+    candidates.value.unshift(candidate);
   }
 
   async function addJob(payload: {
@@ -194,14 +616,38 @@ export const useRecruitingStore = defineStore("recruiting", () => {
       source: "manual",
       ...payload,
     });
-    jobs.value.unshift(job);
+    upsertJobInList(job);
     await refreshMetrics();
     return job;
+  }
+
+  async function updateJob(payload: UpdateJobPayload) {
+    const job = await updateJobApi(payload);
+    upsertJobInList(job);
+    await refreshMetrics();
+    return job;
+  }
+
+  async function stopJob(jobId: number) {
+    const job = await stopJobApi(jobId);
+    upsertJobInList(job);
+    await refreshMetrics();
+    return job;
+  }
+
+  async function deleteJob(jobId: number) {
+    await deleteJobApi(jobId);
+    jobs.value = jobs.value.filter((item) => item.id !== jobId);
+    await refreshMetrics();
+    return true;
   }
 
   async function addCandidate(payload: {
     name: string;
     current_company?: string;
+    score?: number;
+    age?: number;
+    gender?: "male" | "female" | "other";
     years_of_experience: number;
     phone?: string;
     email?: string;
@@ -212,7 +658,37 @@ export const useRecruitingStore = defineStore("recruiting", () => {
       source: "manual",
       ...payload,
     });
-    candidates.value.unshift(candidate);
+    upsertCandidateInList(candidate);
+    await refreshMetrics();
+    return candidate;
+  }
+
+  async function updateCandidate(payload: UpdateCandidatePayload) {
+    const candidate = await updateCandidateApi(payload);
+    upsertCandidateInList(candidate);
+    await refreshMetrics();
+    return candidate;
+  }
+
+  async function deleteCandidate(candidateId: number) {
+    await deleteCandidateApi(candidateId);
+    candidates.value = candidates.value.filter((item) => item.id !== candidateId);
+    delete analyses.value[candidateId];
+    delete screeningResults.value[candidateId];
+    delete interviewKits.value[candidateId];
+    delete interviewFeedback.value[candidateId];
+    delete interviewEvaluations.value[candidateId];
+    delete hiringDecisions.value[candidateId];
+    delete pipelineEvents.value[candidateId];
+    searchResults.value = searchResults.value.filter((item) => item.candidate_id !== candidateId);
+    await refreshMetrics();
+    return true;
+  }
+
+  async function setCandidateQualification(payload: SetCandidateQualificationPayload) {
+    const candidate = await setCandidateQualificationApi(payload);
+    upsertCandidateInList(candidate);
+    pipelineEvents.value[payload.candidate_id] = await listPipelineEvents(payload.candidate_id);
     await refreshMetrics();
     return candidate;
   }
@@ -236,6 +712,42 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     payload: Record<string, unknown>;
   }) {
     const task = await createCrawlTask(payload);
+    tasks.value.unshift(task);
+    await refreshMetrics();
+    return task;
+  }
+
+  async function createCandidatesTask(payload: {
+    source: LocalCrawlTaskSource;
+    mode: CrawlMode;
+    localJobId: number;
+    batchSize: number;
+    crawlIntervalSeconds: number;
+    retryCount: number;
+    retryBackoffMs: number;
+    autoSyncToCandidates: boolean;
+  }) {
+    const localJob = jobs.value.find((job) => job.id === payload.localJobId);
+    if (!localJob || localJob.status === "STOPPED") {
+      throw new Error("local_active_job_required");
+    }
+
+    const task = await createCrawlTask({
+      source: payload.source,
+      mode: payload.mode,
+      task_type: "crawl_candidates",
+      payload: {
+        localJobId: localJob.id,
+        localJobTitle: localJob.title,
+        localJobCity: localJob.city ?? "",
+        batchSize: payload.batchSize,
+        crawlIntervalSeconds: payload.crawlIntervalSeconds,
+        retryCount: payload.retryCount,
+        retryBackoffMs: payload.retryBackoffMs,
+        autoSyncToCandidates: payload.autoSyncToCandidates,
+      },
+    });
+
     tasks.value.unshift(task);
     await refreshMetrics();
     return task;
@@ -328,6 +840,65 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     return activeScreeningTemplate.value;
   }
 
+  async function loadScreeningTemplates() {
+    screeningTemplates.value = await listScreeningTemplates();
+    return screeningTemplates.value;
+  }
+
+  async function createScreeningTemplate(input: CreateScreeningTemplatePayload) {
+    const created = await createScreeningTemplateApi(input);
+    screeningTemplates.value = [created, ...screeningTemplates.value.filter((item) => item.id !== created.id)];
+    return created;
+  }
+
+  async function updateScreeningTemplate(input: UpdateScreeningTemplatePayload) {
+    const updated = await updateScreeningTemplateApi(input);
+    const index = screeningTemplates.value.findIndex((item) => item.id === updated.id);
+    if (index >= 0) {
+      screeningTemplates.value.splice(index, 1, updated);
+    } else {
+      screeningTemplates.value.unshift(updated);
+    }
+    if (activeScreeningTemplate.value?.id === updated.id) {
+      activeScreeningTemplate.value = updated;
+    }
+    jobs.value = jobs.value.map((job) =>
+      job.screening_template_id === updated.id
+        ? {
+            ...job,
+            screening_template_name: updated.name,
+          }
+        : job,
+    );
+    return updated;
+  }
+
+  async function deleteScreeningTemplate(templateId: number) {
+    screeningTemplates.value = await deleteScreeningTemplateApi(templateId);
+    if (
+      activeScreeningTemplate.value
+      && !screeningTemplates.value.some((item) => item.id === activeScreeningTemplate.value?.id)
+    ) {
+      activeScreeningTemplate.value = null;
+    }
+    jobs.value = jobs.value.map((job) =>
+      job.screening_template_id === templateId
+        ? {
+            ...job,
+            screening_template_id: null,
+            screening_template_name: null,
+          }
+        : job,
+    );
+    return screeningTemplates.value;
+  }
+
+  async function setJobScreeningTemplate(input: SetJobScreeningTemplatePayload) {
+    const job = await setJobScreeningTemplateApi(input);
+    upsertJobInList(job);
+    return job;
+  }
+
   async function saveAiSettings(payload: {
     provider: AiProviderId;
     model?: string;
@@ -385,7 +956,59 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     return taskSettings.value;
   }
 
+  async function loadTaskPeople(taskId: number) {
+    const people = await listCrawlTaskPeopleApi(taskId);
+    taskPeople.value[taskId] = people;
+    return people;
+  }
+
+  async function toggleTaskRunState(taskId: number) {
+    const task = findTaskById(taskId);
+    if (!task) {
+      throw new Error("crawl_task_not_found");
+    }
+
+    if (task.status === "RUNNING") {
+      await updateCrawlTask({
+        task_id: taskId,
+        status: "PENDING",
+      });
+      clearTaskLoopTimer(taskId);
+      await refreshTasks();
+      return;
+    }
+
+    await updateCrawlTask({
+      task_id: taskId,
+      status: "RUNNING",
+    });
+    await refreshTasks();
+    await runCrawlTaskOnce(taskId);
+  }
+
+  async function deleteTask(taskId: number) {
+    const task = findTaskById(taskId);
+    if (!task) {
+      throw new Error("crawl_task_not_found");
+    }
+
+    if (task.status === "RUNNING") {
+      await updateCrawlTask({
+        task_id: taskId,
+        status: "PAUSED",
+      });
+    }
+    clearTaskLoopTimer(taskId);
+    taskLoopLocks.delete(taskId);
+
+    await deleteCrawlTaskApi(taskId);
+    tasks.value = tasks.value.filter((item) => item.id !== taskId);
+    delete taskPeople.value[taskId];
+    await refreshMetrics();
+  }
+
   async function pauseTask(taskId: number) {
+    clearTaskLoopTimer(taskId);
     await updateCrawlTask({
       task_id: taskId,
       status: "PAUSED",
@@ -402,6 +1025,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
   }
 
   async function cancelTask(taskId: number) {
+    clearTaskLoopTimer(taskId);
     await updateCrawlTask({
       task_id: taskId,
       status: "CANCELED",
@@ -415,6 +1039,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     jobs,
     candidates,
     tasks,
+    taskPeople,
     metrics,
     health,
     sidecarHealthy,
@@ -428,6 +1053,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     searchResults,
     aiSettings,
     activeScreeningTemplate,
+    screeningTemplates,
     taskSettings,
     candidateImportConflicts,
     lastCandidateImportReport,
@@ -437,12 +1063,19 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     refreshMetrics,
     refreshTasks,
     addJob,
+    updateJob,
+    stopJob,
+    deleteJob,
     addCandidate,
+    updateCandidate,
+    deleteCandidate,
+    setCandidateQualification,
     moveStage,
     saveResume: analysisContext.saveResume,
     analyzeCandidate: analysisContext.analyzeCandidate,
     loadCandidateContext: analysisContext.loadCandidateContext,
     addCrawlTask,
+    createCandidatesTask,
     runSidecarJobCrawl: taskOrchestrator.runSidecarJobCrawl,
     runSidecarCandidateCrawl: taskOrchestrator.runSidecarCandidateCrawl,
     runSidecarResumeCrawl: taskOrchestrator.runSidecarResumeCrawl,
@@ -454,6 +1087,11 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     importResumeFileAndAnalyze: analysisContext.importResumeFileAndAnalyze,
     loadScreeningTemplate,
     saveScreeningTemplate,
+    loadScreeningTemplates,
+    createScreeningTemplate,
+    updateScreeningTemplate,
+    deleteScreeningTemplate,
+    setJobScreeningTemplate,
     runScreening: analysisContext.runScreening,
     generateInterviewKit: analysisContext.generateInterviewKit,
     saveInterviewKit: analysisContext.saveInterviewKit,
@@ -465,6 +1103,10 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     testAiSettings,
     loadTaskSettings,
     saveTaskSettings,
+    loadTaskPeople,
+    syncTaskPeople,
+    toggleTaskRunState,
+    deleteTask,
     pauseTask,
     resumeTask,
     cancelTask,

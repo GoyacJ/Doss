@@ -1,8 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  CandidateGender,
   CandidateRecord,
+  CrawlPlatformSource,
   CrawlMode,
+  CrawlTaskPersonRecord,
   CrawlTaskRecord,
+  CrawlTaskSource,
   DashboardMetrics,
   HiringDecision,
   HiringFinalDecision,
@@ -24,16 +28,41 @@ export interface NewJobPayload {
   description?: string;
 }
 
+export interface UpdateJobPayload {
+  job_id: number;
+  title: string;
+  company: string;
+  city?: string;
+  salary_k?: string;
+  description?: string;
+}
+
 export interface NewCandidatePayload {
   source?: SourceType;
   external_id?: string;
   name: string;
   current_company?: string;
+  score?: number;
+  age?: number;
+  gender?: CandidateGender;
   years_of_experience: number;
   phone?: string;
   email?: string;
   tags: string[];
   job_id?: number;
+}
+
+export interface UpdateCandidatePayload {
+  candidate_id: number;
+  name: string;
+  current_company?: string;
+  score?: number;
+  age?: number;
+  gender?: CandidateGender;
+  years_of_experience: number;
+  phone?: string;
+  email?: string;
+  tags: string[];
 }
 
 export interface MergeCandidateImportPayload {
@@ -50,6 +79,12 @@ export interface MoveStagePayload {
   candidate_id: number;
   job_id?: number;
   to_stage: PipelineStage;
+  note?: string;
+}
+
+export interface SetCandidateQualificationPayload {
+  candidate_id: number;
+  qualified: boolean;
   note?: string;
 }
 
@@ -73,10 +108,40 @@ export interface ParsedResumeFile {
 }
 
 export interface CrawlTaskPayload {
-  source: SourceType;
+  source: CrawlTaskSource;
   mode: CrawlMode;
   task_type: string;
   payload: Record<string, unknown>;
+}
+
+export interface UpsertCrawlTaskPersonPayload {
+  source: CrawlPlatformSource;
+  external_id?: string;
+  name: string;
+  current_company?: string;
+  years_of_experience: number;
+  sync_status?: "UNSYNCED" | "SYNCED" | "FAILED";
+  sync_error_code?: string;
+  sync_error_message?: string;
+  candidate_id?: number;
+}
+
+export interface UpsertCrawlTaskPeoplePayload {
+  task_id: number;
+  people: UpsertCrawlTaskPersonPayload[];
+}
+
+export interface CrawlTaskPersonSyncUpdatePayload {
+  person_id: number;
+  sync_status: "UNSYNCED" | "SYNCED" | "FAILED";
+  sync_error_code?: string;
+  sync_error_message?: string;
+  candidate_id?: number;
+}
+
+export interface UpdateCrawlTaskPeopleSyncPayload {
+  task_id: number;
+  updates: CrawlTaskPersonSyncUpdatePayload[];
 }
 
 export interface UpdateTaskPayload {
@@ -276,6 +341,24 @@ export interface UpsertScreeningTemplatePayload {
   risk_rules?: Record<string, unknown>;
 }
 
+export interface CreateScreeningTemplatePayload {
+  name?: string;
+  dimensions?: ScreeningDimension[];
+  risk_rules?: Record<string, unknown>;
+}
+
+export interface UpdateScreeningTemplatePayload {
+  template_id: number;
+  name?: string;
+  dimensions?: ScreeningDimension[];
+  risk_rules?: Record<string, unknown>;
+}
+
+export interface SetJobScreeningTemplatePayload {
+  job_id: number;
+  template_id?: number | null;
+}
+
 export interface ScreeningResultRecord {
   id: number;
   candidate_id: number;
@@ -376,12 +459,36 @@ export async function createJob(input: NewJobPayload): Promise<JobRecord> {
   return invoke<JobRecord>("create_job", { input });
 }
 
+export async function updateJob(input: UpdateJobPayload): Promise<JobRecord> {
+  return invoke<JobRecord>("update_job", { input });
+}
+
+export async function stopJob(job_id: number): Promise<JobRecord> {
+  return invoke<JobRecord>("stop_job", { job_id });
+}
+
+export async function deleteJob(job_id: number): Promise<boolean> {
+  return invoke<boolean>("delete_job", { jobId: job_id });
+}
+
 export async function listCandidates(stage?: PipelineStage): Promise<CandidateRecord[]> {
   return invoke<CandidateRecord[]>("list_candidates", { stage });
 }
 
 export async function createCandidate(input: NewCandidatePayload): Promise<CandidateRecord> {
   return invoke<CandidateRecord>("create_candidate", { input });
+}
+
+export async function updateCandidate(input: UpdateCandidatePayload): Promise<CandidateRecord> {
+  return invoke<CandidateRecord>("update_candidate", { input });
+}
+
+export async function deleteCandidate(candidate_id: number): Promise<boolean> {
+  return invoke<boolean>("delete_candidate", { candidate_id });
+}
+
+export async function setCandidateQualification(input: SetCandidateQualificationPayload): Promise<CandidateRecord> {
+  return invoke<CandidateRecord>("set_candidate_qualification", { input });
 }
 
 export async function mergeCandidateImport(input: MergeCandidateImportPayload): Promise<CandidateRecord> {
@@ -394,7 +501,7 @@ export async function moveCandidateStage(input: MoveStagePayload): Promise<Pipel
 
 export async function listPipelineEvents(candidateId: number): Promise<PipelineEvent[]> {
   return invoke<PipelineEvent[]>("list_pipeline_events", {
-    candidate_id: candidateId,
+    candidateId,
   });
 }
 
@@ -428,6 +535,30 @@ export async function upsertScreeningTemplate(
   return invoke<ScreeningTemplateRecord>("upsert_screening_template", { input });
 }
 
+export async function listScreeningTemplates(): Promise<ScreeningTemplateRecord[]> {
+  return invoke<ScreeningTemplateRecord[]>("list_screening_templates");
+}
+
+export async function createScreeningTemplate(
+  input: CreateScreeningTemplatePayload,
+): Promise<ScreeningTemplateRecord> {
+  return invoke<ScreeningTemplateRecord>("create_screening_template", { input });
+}
+
+export async function updateScreeningTemplate(
+  input: UpdateScreeningTemplatePayload,
+): Promise<ScreeningTemplateRecord> {
+  return invoke<ScreeningTemplateRecord>("update_screening_template", { input });
+}
+
+export async function deleteScreeningTemplate(template_id: number): Promise<ScreeningTemplateRecord[]> {
+  return invoke<ScreeningTemplateRecord[]>("delete_screening_template", { templateId: template_id });
+}
+
+export async function setJobScreeningTemplate(input: SetJobScreeningTemplatePayload): Promise<JobRecord> {
+  return invoke<JobRecord>("set_job_screening_template", { input });
+}
+
 export async function runResumeScreening(input: {
   candidate_id: number;
   job_id?: number;
@@ -436,11 +567,11 @@ export async function runResumeScreening(input: {
 }
 
 export async function listScreeningResults(candidate_id: number): Promise<ScreeningResultRecord[]> {
-  return invoke<ScreeningResultRecord[]>("list_screening_results", { candidate_id });
+  return invoke<ScreeningResultRecord[]>("list_screening_results", { candidateId: candidate_id });
 }
 
 export async function listHiringDecisions(candidate_id: number): Promise<HiringDecisionRecord[]> {
-  return invoke<HiringDecisionRecord[]>("list_hiring_decisions", { candidate_id });
+  return invoke<HiringDecisionRecord[]>("list_hiring_decisions", { candidateId: candidate_id });
 }
 
 export async function generateInterviewKit(
@@ -468,7 +599,7 @@ export async function runInterviewEvaluation(
 }
 
 export async function listInterviewEvaluations(candidate_id: number): Promise<InterviewEvaluationRecord[]> {
-  return invoke<InterviewEvaluationRecord[]>("list_interview_evaluations", { candidate_id });
+  return invoke<InterviewEvaluationRecord[]>("list_interview_evaluations", { candidateId: candidate_id });
 }
 
 export async function finalizeHiringDecision(
@@ -521,7 +652,7 @@ export async function testAiProviderSettings(
 
 export async function listAnalysis(candidateId: number): Promise<BackendAnalysisRecord[]> {
   return invoke<BackendAnalysisRecord[]>("list_analysis", {
-    candidate_id: candidateId,
+    candidateId,
   });
 }
 
@@ -535,6 +666,26 @@ export async function updateCrawlTask(input: UpdateTaskPayload): Promise<CrawlTa
 
 export async function listCrawlTasks(): Promise<CrawlTaskRecord[]> {
   return invoke<CrawlTaskRecord[]>("list_crawl_tasks");
+}
+
+export async function deleteCrawlTask(task_id: number): Promise<boolean> {
+  return invoke<boolean>("delete_crawl_task", { taskId: task_id });
+}
+
+export async function upsertCrawlTaskPeople(
+  input: UpsertCrawlTaskPeoplePayload,
+): Promise<CrawlTaskPersonRecord[]> {
+  return invoke<CrawlTaskPersonRecord[]>("upsert_crawl_task_people", { input });
+}
+
+export async function listCrawlTaskPeople(task_id: number): Promise<CrawlTaskPersonRecord[]> {
+  return invoke<CrawlTaskPersonRecord[]>("list_crawl_task_people", { taskId: task_id });
+}
+
+export async function updateCrawlTaskPeopleSync(
+  input: UpdateCrawlTaskPeopleSyncPayload,
+): Promise<CrawlTaskPersonRecord[]> {
+  return invoke<CrawlTaskPersonRecord[]>("update_crawl_task_people_sync", { input });
 }
 
 export async function getTaskRuntimeSettings(): Promise<TaskRuntimeSettings> {
@@ -628,7 +779,7 @@ export async function checkSidecarHealth(): Promise<{ ok: boolean; service?: str
 }
 
 export async function triggerSidecarCrawlJobs(payload: {
-  source: Exclude<SourceType, "manual">;
+  source: CrawlPlatformSource;
   mode: CrawlMode;
   keyword: string;
   city?: string;
@@ -656,7 +807,7 @@ export async function triggerSidecarCrawlJobs(payload: {
 }
 
 export async function triggerSidecarCrawlCandidates(payload: {
-  source: Exclude<SourceType, "manual">;
+  source: CrawlPlatformSource;
   mode: CrawlMode;
   jobId: string;
 }): Promise<SidecarQueueResult> {
@@ -682,7 +833,7 @@ export async function triggerSidecarCrawlCandidates(payload: {
 }
 
 export async function triggerSidecarCrawlResume(payload: {
-  source: Exclude<SourceType, "manual">;
+  source: CrawlPlatformSource;
   mode: CrawlMode;
   candidateId: string;
 }): Promise<SidecarQueueResult> {

@@ -2,6 +2,7 @@ import type {
   CrawlTaskStatus,
   HiringFinalDecision,
   InterviewRecommendation,
+  JobStatus,
   PipelineStage,
 } from "@doss/shared";
 
@@ -56,6 +57,20 @@ export function taskStatusTone(status: CrawlTaskStatus): StatusTone {
     return "info";
   }
   return "neutral";
+}
+
+export function jobStatusLabel(status?: JobStatus): string {
+  if (status === "STOPPED") {
+    return "已停止";
+  }
+  return "招聘中";
+}
+
+export function jobStatusTone(status?: JobStatus): StatusTone {
+  if (status === "STOPPED") {
+    return "warning";
+  }
+  return "success";
 }
 
 export function sidecarHealthBadge(healthy: boolean | null): {
