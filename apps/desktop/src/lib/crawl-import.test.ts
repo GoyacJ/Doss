@@ -64,6 +64,8 @@ describe("extractCandidateImportItems", () => {
           externalId: "boss-candidate-1",
           name: "张三",
           currentCompany: "示例科技",
+          age: 28,
+          address: "上海",
           years: 5,
           tag: "safe",
         },
@@ -71,6 +73,7 @@ describe("extractCandidateImportItems", () => {
           externalId: "boss-candidate-2",
           name: "李四",
           currentCompany: "创新软件",
+          location: "杭州",
           years: 7,
           tag: "safe",
         },
@@ -83,11 +86,14 @@ describe("extractCandidateImportItems", () => {
       external_id: "boss-candidate-1",
       name: "张三",
       current_company: "示例科技",
+      age: 28,
+      address: "上海",
       years_of_experience: 5,
       tags: ["safe"],
       phone: undefined,
       email: undefined,
     });
+    expect(candidates[1]?.address).toBe("杭州");
   });
 
   it("returns empty when status is not succeeded", () => {

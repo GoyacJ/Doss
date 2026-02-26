@@ -11,6 +11,8 @@ export interface CandidateImportItem {
   external_id?: string;
   name: string;
   current_company?: string;
+  age?: number;
+  address?: string;
   years_of_experience: number;
   tags: string[];
   phone?: string;
@@ -123,10 +125,14 @@ export function extractCandidateImportItems(
     }
 
     const tag = asString(row.tag);
+    const age = asNumber(row.age);
+    const normalizedAge = typeof age === "number" && age >= 0 ? Math.trunc(age) : undefined;
     rows.push({
       external_id: asString(row.externalId),
       name,
       current_company: asString(row.currentCompany),
+      age: normalizedAge,
+      address: asString(row.address) ?? asString(row.location),
       years_of_experience: years,
       tags: tag ? [tag] : [],
       phone: asString(row.phone),

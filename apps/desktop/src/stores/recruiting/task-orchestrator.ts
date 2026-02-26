@@ -138,6 +138,7 @@ export interface TaskOrchestratorDeps {
     candidate_id: number;
     current_company?: string;
     years_of_experience?: number;
+    address?: string;
     tags?: string[];
     phone?: string;
     email?: string;
@@ -149,6 +150,8 @@ export interface TaskOrchestratorDeps {
     name: string;
     current_company?: string;
     years_of_experience: number;
+    age?: number;
+    address?: string;
     phone?: string;
     email?: string;
     tags: string[];
@@ -493,6 +496,7 @@ export function createTaskOrchestrator(deps: TaskOrchestratorDeps) {
         candidate_id: conflict.existingCandidate.id,
         current_company: conflict.imported.current_company,
         years_of_experience: conflict.imported.years_of_experience,
+        address: conflict.imported.address,
         tags: [...conflict.imported.tags, `source:${conflict.source}`],
         phone: conflict.imported.phone,
         email: conflict.imported.email,
@@ -514,6 +518,8 @@ export function createTaskOrchestrator(deps: TaskOrchestratorDeps) {
         name: conflict.imported.name,
         current_company: conflict.imported.current_company,
         years_of_experience: conflict.imported.years_of_experience,
+        age: conflict.imported.age,
+        address: conflict.imported.address,
         tags: [...conflict.imported.tags, `source:${conflict.source}`],
         phone: conflict.imported.phone,
         email: conflict.imported.email,

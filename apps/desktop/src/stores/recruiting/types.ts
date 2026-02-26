@@ -58,7 +58,9 @@ export interface CrawlCandidatesTaskPayload {
   localJobTitle: string;
   localJobCity?: string;
   batchSize: number;
-  crawlIntervalSeconds: number;
+  scheduleType: "ONCE" | "DAILY" | "MONTHLY";
+  scheduleTime?: string;
+  scheduleDay?: number;
   retryCount: number;
   retryBackoffMs: number;
   autoSyncToCandidates: boolean;

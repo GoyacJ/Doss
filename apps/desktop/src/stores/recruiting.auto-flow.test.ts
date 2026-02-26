@@ -605,6 +605,61 @@ describe("recruiting store auto workflow", () => {
     expect(store.lastCandidateImportReport?.mergedRows).toBe(1);
   });
 
+  it("does not merge when same-name candidates have different age and both ages are present", async () => {
+    backend.listCandidates.mockResolvedValue([
+      {
+        id: 52,
+        source: "boss",
+        external_id: "boss-existing-52",
+        name: "赵敏",
+        current_company: "示例科技",
+        age: 30,
+        address: "上海",
+        years_of_experience: 7,
+        stage: "NEW",
+        tags: ["safe"],
+        created_at: "2026-02-26T00:00:00Z",
+        updated_at: "2026-02-26T00:00:00Z",
+      },
+    ]);
+    backend.triggerSidecarCrawlCandidates.mockResolvedValue({
+      id: "sidecar-candidate-task",
+      source: "lagou",
+      mode: "compliant",
+      status: "SUCCEEDED",
+      attempts: 1,
+      output: [
+        {
+          externalId: "lagou-candidate-52",
+          name: "赵敏",
+          currentCompany: "示例科技",
+          age: 29,
+          address: "上海",
+          years: 6,
+          tag: "safe",
+        },
+      ],
+    });
+
+    const store = useRecruitingStore();
+    await store.bootstrap();
+
+    const result = await store.runSidecarCandidateCrawl({
+      source: "lagou",
+      mode: "compliant",
+      localJobId: 101,
+    });
+
+    expect(result.importedCandidates).toBe(1);
+    expect(result.mergedCandidates).toBe(0);
+    expect(backend.createCandidate).toHaveBeenCalledWith(expect.objectContaining({
+      name: "赵敏",
+      age: 29,
+      address: "上海",
+    }));
+    expect(backend.mergeCandidateImport).not.toHaveBeenCalled();
+  });
+
   it("keeps conflicts for manual confirmation and supports resolving", async () => {
     backend.listCandidates.mockResolvedValue([
       {
@@ -614,6 +669,18 @@ describe("recruiting store auto workflow", () => {
         name: "王五",
         current_company: "示例科技",
         years_of_experience: 2,
+        stage: "NEW",
+        tags: ["safe"],
+        created_at: "2026-02-26T00:00:00Z",
+        updated_at: "2026-02-26T00:00:00Z",
+      },
+      {
+        id: 34,
+        source: "lagou",
+        external_id: "lagou-existing-34",
+        name: "王五",
+        current_company: "另一家公司",
+        years_of_experience: 5,
         stage: "NEW",
         tags: ["safe"],
         created_at: "2026-02-26T00:00:00Z",
@@ -777,7 +844,9 @@ describe("recruiting store auto workflow", () => {
       mode: "compliant",
       localJobId: 101,
       batchSize: 50,
-      crawlIntervalSeconds: 300,
+      scheduleType: "DAILY",
+      scheduleTime: "09:30",
+      scheduleDay: 15,
       retryCount: 1,
       retryBackoffMs: 450,
       autoSyncToCandidates: true,
@@ -787,11 +856,17 @@ describe("recruiting store auto workflow", () => {
       source: "all",
       mode: "compliant",
       task_type: "crawl_candidates",
+      schedule_type: "DAILY",
+      schedule_time: "09:30",
+      schedule_day: 15,
+      next_run_at: expect.any(String),
       payload: expect.objectContaining({
         localJobId: 101,
         localJobTitle: "前端工程师",
         batchSize: 50,
-        crawlIntervalSeconds: 300,
+        scheduleType: "DAILY",
+        scheduleTime: "09:30",
+        scheduleDay: 15,
         retryCount: 1,
         retryBackoffMs: 450,
         autoSyncToCandidates: true,

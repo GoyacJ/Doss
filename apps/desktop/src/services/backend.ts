@@ -1,18 +1,23 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  CandidateListQuery,
   CandidateGender,
   CandidateRecord,
+  CrawlTaskScheduleType,
   CrawlPlatformSource,
   CrawlMode,
   CrawlTaskPersonRecord,
   CrawlTaskRecord,
   CrawlTaskSource,
+  DecisionListQuery,
   DashboardMetrics,
   HiringDecision,
   HiringFinalDecision,
+  InterviewListQuery,
   InterviewQuestion,
   InterviewRecommendation,
   JobRecord,
+  PageResult,
   PipelineStage,
   ResumeRecord,
   SourceType,
@@ -46,6 +51,7 @@ export interface NewCandidatePayload {
   age?: number;
   gender?: CandidateGender;
   years_of_experience: number;
+  address?: string;
   phone?: string;
   email?: string;
   tags: string[];
@@ -61,6 +67,7 @@ export interface UpdateCandidatePayload {
   age?: number;
   gender?: CandidateGender;
   years_of_experience: number;
+  address?: string;
   phone?: string;
   email?: string;
   tags: string[];
@@ -70,6 +77,7 @@ export interface MergeCandidateImportPayload {
   candidate_id: number;
   current_company?: string;
   years_of_experience?: number;
+  address?: string;
   tags?: string[];
   phone?: string;
   email?: string;
@@ -113,6 +121,10 @@ export interface CrawlTaskPayload {
   mode: CrawlMode;
   task_type: string;
   payload: Record<string, unknown>;
+  schedule_type?: CrawlTaskScheduleType;
+  schedule_time?: string;
+  schedule_day?: number;
+  next_run_at?: string;
 }
 
 export interface UpsertCrawlTaskPersonPayload {
@@ -151,6 +163,73 @@ export interface UpdateTaskPayload {
   retry_count?: number;
   error_code?: string;
   snapshot?: Record<string, unknown>;
+  schedule_type?: CrawlTaskScheduleType;
+  schedule_time?: string;
+  schedule_day?: number;
+  next_run_at?: string;
+}
+
+export interface UpsertPendingCandidatePayload {
+  source?: SourceType;
+  external_id?: string;
+  name: string;
+  current_company?: string;
+  job_id?: number;
+  age?: number;
+  gender?: CandidateGender;
+  years_of_experience?: number;
+  tags?: string[];
+  phone?: string;
+  email?: string;
+  address?: string;
+  extra_notes?: string;
+  resume_raw_text?: string;
+  resume_parsed?: Record<string, unknown>;
+  dedupe_key?: string;
+}
+
+export interface UpsertPendingCandidatesPayload {
+  items: UpsertPendingCandidatePayload[];
+}
+
+export interface PendingCandidateRecord {
+  id: number;
+  source: string;
+  external_id?: string | null;
+  name: string;
+  current_company?: string | null;
+  job_id?: number | null;
+  job_title?: string | null;
+  age?: number | null;
+  gender?: CandidateGender | null;
+  years_of_experience: number;
+  tags: string[];
+  phone_masked?: string | null;
+  email_masked?: string | null;
+  address?: string | null;
+  extra_notes?: string | null;
+  resume_raw_text?: string | null;
+  resume_parsed: Record<string, unknown>;
+  dedupe_key: string;
+  sync_status: "UNSYNCED" | "SYNCED" | "FAILED";
+  sync_error_code?: string | null;
+  sync_error_message?: string | null;
+  candidate_id?: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PendingCandidateListQuery {
+  page?: number;
+  page_size?: number;
+  sync_status?: "UNSYNCED" | "SYNCED" | "FAILED";
+  name_like?: string;
+  job_id?: number;
+}
+
+export interface SyncPendingCandidatePayload {
+  pending_candidate_id: number;
+  run_screening?: boolean;
 }
 
 export type AiProviderId =
@@ -375,6 +454,7 @@ export interface ScreeningResultRecord {
   risk_level: ScreeningRiskLevel;
   evidence: string[];
   verification_points: string[];
+  structured_result: Record<string, unknown>;
   created_at: string;
 }
 
@@ -401,6 +481,17 @@ export interface RunInterviewEvaluationPayload {
   candidate_id: number;
   job_id?: number;
   feedback_id?: number;
+}
+
+export interface SaveInterviewRecordingPayload {
+  file_name: string;
+  content_base64: string;
+}
+
+export interface SaveInterviewRecordingOutput {
+  recording_path: string;
+  size: number;
+  created_at: string;
 }
 
 export interface InterviewKitRecord {
@@ -474,6 +565,24 @@ export async function deleteJob(job_id: number): Promise<boolean> {
 
 export async function listCandidates(stage?: PipelineStage): Promise<CandidateRecord[]> {
   return invoke<CandidateRecord[]>("list_candidates", { stage });
+}
+
+export async function listCandidatesPage(
+  input?: CandidateListQuery,
+): Promise<PageResult<CandidateRecord>> {
+  return invoke<PageResult<CandidateRecord>>("list_candidates_page", { input });
+}
+
+export async function listInterviewCandidatesPage(
+  input?: InterviewListQuery,
+): Promise<PageResult<CandidateRecord>> {
+  return invoke<PageResult<CandidateRecord>>("list_interview_candidates_page", { input });
+}
+
+export async function listDecisionCandidatesPage(
+  input?: DecisionListQuery,
+): Promise<PageResult<CandidateRecord>> {
+  return invoke<PageResult<CandidateRecord>>("list_decision_candidates_page", { input });
 }
 
 export async function createCandidate(input: NewCandidatePayload): Promise<CandidateRecord> {
@@ -593,6 +702,12 @@ export async function submitInterviewFeedback(
   return invoke<InterviewFeedbackRecord>("submit_interview_feedback", { input });
 }
 
+export async function saveInterviewRecording(
+  input: SaveInterviewRecordingPayload,
+): Promise<SaveInterviewRecordingOutput> {
+  return invoke<SaveInterviewRecordingOutput>("save_interview_recording", { input });
+}
+
 export async function runInterviewEvaluation(
   input: RunInterviewEvaluationPayload,
 ): Promise<InterviewEvaluationRecord> {
@@ -687,6 +802,24 @@ export async function updateCrawlTaskPeopleSync(
   input: UpdateCrawlTaskPeopleSyncPayload,
 ): Promise<CrawlTaskPersonRecord[]> {
   return invoke<CrawlTaskPersonRecord[]>("update_crawl_task_people_sync", { input });
+}
+
+export async function upsertPendingCandidates(
+  input: UpsertPendingCandidatesPayload,
+): Promise<PendingCandidateRecord[]> {
+  return invoke<PendingCandidateRecord[]>("upsert_pending_candidates", { input });
+}
+
+export async function listPendingCandidates(
+  input?: PendingCandidateListQuery,
+): Promise<PageResult<PendingCandidateRecord>> {
+  return invoke<PageResult<PendingCandidateRecord>>("list_pending_candidates", { input });
+}
+
+export async function syncPendingCandidateToCandidate(
+  input: SyncPendingCandidatePayload,
+): Promise<CandidateRecord> {
+  return invoke<CandidateRecord>("sync_pending_candidate_to_candidate", { input });
 }
 
 export async function getTaskRuntimeSettings(): Promise<TaskRuntimeSettings> {

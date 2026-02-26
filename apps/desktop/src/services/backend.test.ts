@@ -19,6 +19,10 @@ import {
   deleteJob,
   deleteScreeningTemplate,
   finalizeHiringDecision,
+  listCandidatesPage,
+  listDecisionCandidatesPage,
+  listInterviewCandidatesPage,
+  listPendingCandidates,
   listAnalysis,
   listHiringDecisions,
   listInterviewEvaluations,
@@ -31,9 +35,11 @@ import {
   runCandidateAnalysis,
   runInterviewEvaluation,
   runResumeScreening,
+  saveInterviewRecording,
   saveInterviewKit,
   setCandidateQualification,
   setDefaultAiProviderProfile,
+  syncPendingCandidateToCandidate,
   submitInterviewFeedback,
   testAiProviderProfile,
   triggerSidecarCrawlCandidates,
@@ -49,6 +55,7 @@ import {
   updateCrawlTaskPeopleSync,
   upsertResume,
   upsertCrawlTaskPeople,
+  upsertPendingCandidates,
   upsertTaskRuntimeSettings,
 } from "./backend";
 
@@ -214,6 +221,50 @@ describe("backend AI profile commands", () => {
     });
   });
 
+  it("passes paged list queries for candidates/interview/decision commands", async () => {
+    await listCandidatesPage({
+      page: 2,
+      page_size: 20,
+      name_like: "张",
+      sort_by: "score",
+      sort_order: "desc",
+    });
+    await listInterviewCandidatesPage({
+      page: 1,
+      page_size: 10,
+      job_id: 12,
+    });
+    await listDecisionCandidatesPage({
+      page: 3,
+      page_size: 10,
+      interview_passed: true,
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("list_candidates_page", {
+      input: {
+        page: 2,
+        page_size: 20,
+        name_like: "张",
+        sort_by: "score",
+        sort_order: "desc",
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith("list_interview_candidates_page", {
+      input: {
+        page: 1,
+        page_size: 10,
+        job_id: 12,
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith("list_decision_candidates_page", {
+      input: {
+        page: 3,
+        page_size: 10,
+        interview_passed: true,
+      },
+    });
+  });
+
   it("passes nested input payloads for candidate and crawl mutation commands", async () => {
     await createCandidate({
       source: "manual",
@@ -224,6 +275,7 @@ describe("backend AI profile commands", () => {
       age: 28,
       gender: "male",
       years_of_experience: 5,
+      address: "上海市浦东新区",
       phone: "13800000000",
       email: "zhangsan@example.com",
       tags: ["vue3"],
@@ -249,6 +301,8 @@ describe("backend AI profile commands", () => {
       payload: {
         keyword: "frontend",
       },
+      schedule_type: "DAILY",
+      schedule_time: "09:30",
     });
     await updateCrawlTask({
       task_id: 11,
@@ -258,6 +312,10 @@ describe("backend AI profile commands", () => {
       snapshot: {
         progress: 50,
       },
+      schedule_type: "MONTHLY",
+      schedule_time: "10:00",
+      schedule_day: 15,
+      next_run_at: "2026-03-15T02:00:00.000Z",
     });
     await upsertTaskRuntimeSettings({
       auto_batch_concurrency: 4,
@@ -275,6 +333,7 @@ describe("backend AI profile commands", () => {
         age: 28,
         gender: "male",
         years_of_experience: 5,
+        address: "上海市浦东新区",
         phone: "13800000000",
         email: "zhangsan@example.com",
         tags: ["vue3"],
@@ -306,6 +365,8 @@ describe("backend AI profile commands", () => {
         payload: {
           keyword: "frontend",
         },
+        schedule_type: "DAILY",
+        schedule_time: "09:30",
       },
     });
     expect(invokeMock).toHaveBeenCalledWith("update_crawl_task", {
@@ -317,6 +378,10 @@ describe("backend AI profile commands", () => {
         snapshot: {
           progress: 50,
         },
+        schedule_type: "MONTHLY",
+        schedule_time: "10:00",
+        schedule_day: 15,
+        next_run_at: "2026-03-15T02:00:00.000Z",
       },
     });
     expect(invokeMock).toHaveBeenCalledWith("upsert_task_runtime_settings", {
@@ -584,6 +649,10 @@ describe("backend AI profile commands", () => {
       candidate_id: 101,
       job_id: 12,
     });
+    await saveInterviewRecording({
+      file_name: "candidate-101.m4a",
+      content_base64: "aGVsbG8=",
+    });
 
     expect(invokeMock).toHaveBeenCalledWith("generate_interview_kit", {
       input: {
@@ -614,6 +683,70 @@ describe("backend AI profile commands", () => {
       input: {
         candidate_id: 101,
         job_id: 12,
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith("save_interview_recording", {
+      input: {
+        file_name: "candidate-101.m4a",
+        content_base64: "aGVsbG8=",
+      },
+    });
+  });
+
+  it("passes pending candidate commands with nested input payload", async () => {
+    await upsertPendingCandidates({
+      items: [
+        {
+          source: "boss",
+          external_id: "boss-pending-1",
+          name: "王五",
+          current_company: "示例科技",
+          years_of_experience: 6,
+          age: 29,
+          address: "上海",
+          tags: ["source:boss"],
+        },
+      ],
+    });
+    await listPendingCandidates({
+      page: 1,
+      page_size: 20,
+      sync_status: "UNSYNCED",
+      name_like: "王",
+    });
+    await syncPendingCandidateToCandidate({
+      pending_candidate_id: 18,
+      run_screening: true,
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("upsert_pending_candidates", {
+      input: {
+        items: [
+          {
+            source: "boss",
+            external_id: "boss-pending-1",
+            name: "王五",
+            current_company: "示例科技",
+            years_of_experience: 6,
+            age: 29,
+            address: "上海",
+            tags: ["source:boss"],
+          },
+        ],
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith("list_pending_candidates", {
+      input: {
+        page: 1,
+        page_size: 20,
+        sync_status: "UNSYNCED",
+        name_like: "王",
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith("sync_pending_candidate_to_candidate", {
+      input: {
+        pending_candidate_id: 18,
+        run_screening: true,
       },
     });
   });
