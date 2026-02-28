@@ -1,10 +1,10 @@
-import type { ScreeningTemplateRecord } from "../services/backend";
+import type { ScoringTemplateRecord } from "../services/backend";
 
 const RESIDENT_DEFAULT_TEMPLATE_NAME = "默认评分模板";
 
 export function resolveResidentDefaultTemplate(
-  templates: ScreeningTemplateRecord[],
-): ScreeningTemplateRecord | null {
+  templates: ScoringTemplateRecord[],
+): ScoringTemplateRecord | null {
   if (templates.length === 0) {
     return null;
   }
@@ -18,8 +18,8 @@ export function resolveResidentDefaultTemplate(
 }
 
 export function resolveOverrideTemplateOptions(
-  templates: ScreeningTemplateRecord[],
-): ScreeningTemplateRecord[] {
+  templates: ScoringTemplateRecord[],
+): ScoringTemplateRecord[] {
   const defaultTemplate = resolveResidentDefaultTemplate(templates);
   if (!defaultTemplate) {
     return [];

@@ -100,20 +100,13 @@ export interface SetCandidateQualificationPayload {
 export interface UpsertResumePayload {
   candidate_id: number;
   source?: SourceType;
-  raw_text: string;
-  parsed: Record<string, unknown>;
-}
-
-export interface ParseResumeFilePayload {
-  file_name: string;
-  content_base64: string;
-  enable_ocr?: boolean;
-}
-
-export interface ParsedResumeFile {
-  raw_text: string;
-  parsed: Record<string, unknown>;
-  metadata: Record<string, unknown>;
+  raw_text?: string;
+  parsed?: Record<string, unknown>;
+  original_file?: {
+    file_name: string;
+    content_base64: string;
+    content_type?: string;
+  };
 }
 
 export interface CrawlTaskPayload {
@@ -470,47 +463,6 @@ export interface ScoringResultRecord {
   created_at: string;
 }
 
-// Backward compatibility types for modules/tests still migrating from screening naming.
-export type ScreeningRecommendation = ScoringRecommendation;
-export type ScreeningRiskLevel = ScoringRiskLevel;
-export interface ScreeningDimension {
-  key: string;
-  label: string;
-  weight: number;
-}
-export interface ScreeningTemplateRecord {
-  id: number;
-  scope: "global" | "job";
-  name: string;
-  job_id?: number | null;
-  dimensions: ScreeningDimension[];
-  risk_rules: Record<string, unknown>;
-  created_at: string;
-  updated_at: string;
-}
-export interface UpsertScreeningTemplatePayload {
-  job_id?: number;
-  name?: string;
-  dimensions?: ScreeningDimension[];
-  risk_rules?: Record<string, unknown>;
-  config?: ScoringTemplateConfig;
-}
-export interface CreateScreeningTemplatePayload {
-  name?: string;
-  dimensions?: ScreeningDimension[];
-  risk_rules?: Record<string, unknown>;
-  config?: ScoringTemplateConfig;
-}
-export interface UpdateScreeningTemplatePayload {
-  template_id: number;
-  name?: string;
-  dimensions?: ScreeningDimension[];
-  risk_rules?: Record<string, unknown>;
-  config?: ScoringTemplateConfig;
-}
-export type SetJobScreeningTemplatePayload = SetJobScoringTemplatePayload;
-export type ScreeningResultRecord = ScoringResultRecord;
-
 export interface GenerateInterviewKitPayload {
   candidate_id: number;
   job_id?: number;
@@ -672,20 +624,18 @@ export async function upsertResume(input: UpsertResumePayload): Promise<ResumeRe
   return invoke<ResumeRecord>("upsert_resume", { input });
 }
 
-export async function parseResumeFile(input: ParseResumeFilePayload): Promise<ParsedResumeFile> {
-  return invoke<ParsedResumeFile>("parse_resume_file", { input });
+export async function getResume(candidate_id: number): Promise<ResumeRecord | null> {
+  return invoke<ResumeRecord | null>("get_resume", {
+    candidateId: candidate_id,
+    candidate_id,
+  });
 }
 
-export async function runCandidateAnalysis(input: {
-  candidate_id: number;
-  job_id?: number;
-  run_id?: string;
-}): Promise<ScoringResultRecord> {
-  try {
-    return await invoke<ScoringResultRecord>("run_candidate_analysis", { input });
-  } catch {
-    return invoke<ScoringResultRecord>("run_candidate_scoring", { input });
-  }
+export async function deleteResume(candidate_id: number): Promise<boolean> {
+  return invoke<boolean>("delete_resume", {
+    candidateId: candidate_id,
+    candidate_id,
+  });
 }
 
 export async function getScoringTemplate(job_id?: number): Promise<ScoringTemplateRecord> {
@@ -732,185 +682,6 @@ export async function runCandidateScoring(input: {
 
 export async function listScoringResults(candidate_id: number): Promise<ScoringResultRecord[]> {
   return invoke<ScoringResultRecord[]>("list_scoring_results", { candidateId: candidate_id });
-}
-
-function createDefaultScoringConfig(): ScoringTemplateConfig {
-  return {
-    weights: { t0: 50, t1: 30, t2: 10, t3: 10 },
-    t0: {
-      items: [
-        { key: "required_skills_match", label: "岗位技能匹配", description: "岗位描述/技能要求与候选人技能覆盖是否匹配。", weight: 50 },
-        { key: "years_experience_match", label: "经验年限匹配", description: "候选人年限是否满足岗位复杂度要求。", weight: 30 },
-        { key: "resume_completeness", label: "简历信息完整度", description: "简历证据是否足以支撑判断。", weight: 20 },
-      ],
-    },
-    t1: {
-      items: [
-        { key: "goal_orientation", label: "目标导向", description: "是否有明确目标并形成可交付结果。", weight: 30 },
-        { key: "team_collaboration", label: "团队协作", description: "跨角色协作、沟通与推进效率。", weight: 15 },
-        { key: "self_drive", label: "自驱力", description: "主动承担、持续推进和问题闭环能力。", weight: 15 },
-        { key: "reflection_iteration", label: "反思迭代", description: "复盘意识和迭代改进能力。", weight: 10 },
-        { key: "openness", label: "开放性", description: "对反馈与变化的接受度和执行力。", weight: 8 },
-        { key: "resilience", label: "抗压韧性", description: "复杂场景下的稳定性和恢复能力。", weight: 7 },
-        { key: "learning_ability", label: "学习能力", description: "知识吸收与迁移速度。", weight: 10 },
-        { key: "values_fit", label: "价值观契合", description: "与团队协作价值观一致性。", weight: 5 },
-      ],
-    },
-    t2: {
-      items: [
-        { key: "core_skill_bonus", label: "核心技能加分", description: "核心技能命中程度是否超出岗位最低要求。", weight: 40 },
-        { key: "project_impact_bonus", label: "项目影响力加分", description: "项目成果是否有可量化业务影响。", weight: 30 },
-        { key: "rare_stack_bonus", label: "稀缺技术栈加分", description: "是否具备岗位稀缺/高价值技术栈。", weight: 30 },
-      ],
-    },
-    t3: {
-      items: [
-        { key: "salary_risk", label: "薪资风险", description: "薪资预期与岗位预算差异风险（低风险高分）。", weight: 35 },
-        { key: "stability_risk", label: "稳定性风险", description: "履历稳定性与持续投入风险（低风险高分）。", weight: 35 },
-        { key: "info_completeness_risk", label: "信息缺失风险", description: "关键信息缺失带来的决策风险（低风险高分）。", weight: 30 },
-      ],
-    },
-  };
-}
-
-function toLegacyTemplateRecord(record: ScoringTemplateRecord): ScreeningTemplateRecord {
-  const unknownRecord = record as unknown as {
-    dimensions?: ScreeningDimension[];
-    risk_rules?: Record<string, unknown>;
-  };
-  const dimensions = record.config?.t1?.items?.length
-    ? record.config.t1.items.map((item) => ({
-        key: item.key,
-        label: item.label,
-        weight: item.weight,
-      }))
-    : (unknownRecord.dimensions ?? []);
-  return {
-    id: record.id,
-    scope: record.scope,
-    name: record.name,
-    job_id: record.job_id,
-    dimensions,
-    risk_rules: unknownRecord.risk_rules ?? {},
-    created_at: record.created_at,
-    updated_at: record.updated_at,
-  };
-}
-
-function toScoringTemplateInputFromLegacy(
-  input: {
-    name?: string;
-    job_id?: number;
-    dimensions?: ScreeningDimension[];
-    config?: ScoringTemplateConfig;
-  },
-): {
-  name?: string;
-  job_id?: number;
-  config?: ScoringTemplateConfig;
-} {
-  if (input.config) {
-    return { name: input.name, job_id: input.job_id, config: input.config };
-  }
-  const config = createDefaultScoringConfig();
-  if (Array.isArray(input.dimensions) && input.dimensions.length > 0) {
-    config.t1.items = input.dimensions.map((dimension) => ({
-      key: dimension.key,
-      label: dimension.label,
-      description: "",
-      weight: dimension.weight,
-    }));
-  }
-  return { name: input.name, job_id: input.job_id, config };
-}
-
-// Backward compatibility wrappers.
-export async function getScreeningTemplate(job_id?: number): Promise<ScreeningTemplateRecord> {
-  try {
-    return await invoke<ScreeningTemplateRecord>("get_screening_template", { job_id });
-  } catch {
-    return toLegacyTemplateRecord(await getScoringTemplate(job_id));
-  }
-}
-
-export async function upsertScreeningTemplate(
-  input: UpsertScreeningTemplatePayload,
-): Promise<ScreeningTemplateRecord> {
-  try {
-    return await invoke<ScreeningTemplateRecord>("upsert_screening_template", { input });
-  } catch {
-    const next = toScoringTemplateInputFromLegacy(input);
-    return toLegacyTemplateRecord(await upsertScoringTemplate(next));
-  }
-}
-
-export async function listScreeningTemplates(): Promise<ScreeningTemplateRecord[]> {
-  try {
-    return await invoke<ScreeningTemplateRecord[]>("list_screening_templates");
-  } catch {
-    return (await listScoringTemplates()).map(toLegacyTemplateRecord);
-  }
-}
-
-export async function createScreeningTemplate(
-  input: CreateScreeningTemplatePayload,
-): Promise<ScreeningTemplateRecord> {
-  try {
-    return await invoke<ScreeningTemplateRecord>("create_screening_template", { input });
-  } catch {
-    const next = toScoringTemplateInputFromLegacy(input);
-    return toLegacyTemplateRecord(await createScoringTemplate(next));
-  }
-}
-
-export async function updateScreeningTemplate(
-  input: UpdateScreeningTemplatePayload,
-): Promise<ScreeningTemplateRecord> {
-  try {
-    return await invoke<ScreeningTemplateRecord>("update_screening_template", { input });
-  } catch {
-    const next = {
-      template_id: input.template_id,
-      name: input.name,
-      config: toScoringTemplateInputFromLegacy(input).config,
-    };
-    return toLegacyTemplateRecord(await updateScoringTemplate(next));
-  }
-}
-
-export async function deleteScreeningTemplate(template_id: number): Promise<ScreeningTemplateRecord[]> {
-  try {
-    return await invoke<ScreeningTemplateRecord[]>("delete_screening_template", { templateId: template_id });
-  } catch {
-    return (await deleteScoringTemplate(template_id)).map(toLegacyTemplateRecord);
-  }
-}
-
-export async function setJobScreeningTemplate(input: SetJobScreeningTemplatePayload): Promise<JobRecord> {
-  try {
-    return await invoke<JobRecord>("set_job_screening_template", { input });
-  } catch {
-    return setJobScoringTemplate(input);
-  }
-}
-
-export async function runResumeScreening(input: {
-  candidate_id: number;
-  job_id?: number;
-}): Promise<ScoringResultRecord> {
-  try {
-    return await invoke<ScoringResultRecord>("run_resume_screening", { input });
-  } catch {
-    return runCandidateScoring(input);
-  }
-}
-
-export async function listScreeningResults(candidate_id: number): Promise<ScoringResultRecord[]> {
-  try {
-    return await invoke<ScoringResultRecord[]>("list_screening_results", { candidateId: candidate_id });
-  } catch {
-    return listScoringResults(candidate_id);
-  }
 }
 
 export async function listHiringDecisions(candidate_id: number): Promise<HiringDecisionRecord[]> {

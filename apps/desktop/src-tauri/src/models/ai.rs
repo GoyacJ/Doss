@@ -177,6 +177,7 @@ pub(crate) struct EvidenceItem {
     pub(crate) source_snippet: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct AiPromptContext {
     pub(crate) required_skills: Vec<String>,
@@ -190,6 +191,7 @@ pub(crate) struct AiPromptContext {
     pub(crate) resume_parsed: Value,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct AiAnalysisPayload {
     pub(crate) overall_score: i32,
@@ -216,6 +218,7 @@ pub(crate) struct AnalysisRecord {
     pub(crate) created_at: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RunAnalysisInput {
     pub(crate) candidate_id: i64,

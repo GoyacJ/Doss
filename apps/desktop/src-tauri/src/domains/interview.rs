@@ -7,10 +7,11 @@ use tauri::State;
 
 use crate::core::state::AppState;
 use crate::core::time::now_iso;
-use crate::domains::screening::{
+use crate::domains::resume_materializer::ensure_resume_materialized;
+use crate::domains::resume_parser::parse_skills_from_parsed_json;
+use crate::domains::recruiting_utils::{
     build_generated_interview_questions, build_interview_slot_key,
     evaluate_interview_feedback_payload, normalize_interview_questions, parse_job_required_skills,
-    parse_skills,
 };
 use crate::infra::audit::write_audit;
 use crate::infra::db::open_connection;
@@ -106,17 +107,10 @@ pub(crate) fn generate_interview_kit(
         }
     }
 
-    let resume_parsed = conn
-        .query_row(
-            "SELECT parsed_json FROM resumes WHERE candidate_id = ?1",
-            [input.candidate_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|error| error.to_string())?
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    let resume_parsed = ensure_resume_materialized(&conn, input.candidate_id)
+        .map(|item| item.parsed_value)
         .unwrap_or(Value::Null);
-    let extracted_skills = parse_skills(&resume_parsed);
+    let extracted_skills = parse_skills_from_parsed_json(&resume_parsed);
 
     let screening_hint = conn
         .query_row(

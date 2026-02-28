@@ -7,14 +7,14 @@ const backend = vi.hoisted(() => ({
   createCandidate: vi.fn(),
   createCrawlTask: vi.fn(),
   createJob: vi.fn(),
-  createScreeningTemplate: vi.fn(),
+  createScoringTemplate: vi.fn(),
   deleteCrawlTask: vi.fn(),
   deleteJob: vi.fn(),
-  deleteScreeningTemplate: vi.fn(),
+  deleteScoringTemplate: vi.fn(),
   finalizeHiringDecision: vi.fn(),
   generateInterviewKit: vi.fn(),
   getAiProviderSettings: vi.fn(),
-  getScreeningTemplate: vi.fn(),
+  getScoringTemplate: vi.fn(),
   getTaskRuntimeSettings: vi.fn(),
   getHealth: vi.fn(),
   listAnalysis: vi.fn(),
@@ -25,19 +25,17 @@ const backend = vi.hoisted(() => ({
   listCrawlTaskPeople: vi.fn(),
   listJobs: vi.fn(),
   listPipelineEvents: vi.fn(),
-  listScreeningTemplates: vi.fn(),
-  listScreeningResults: vi.fn(),
+  listScoringTemplates: vi.fn(),
+  listScoringResults: vi.fn(),
   loadDashboardMetrics: vi.fn(),
   mergeCandidateImport: vi.fn(),
   moveCandidateStage: vi.fn(),
-  runCandidateAnalysis: vi.fn(),
-  runResumeScreening: vi.fn(),
-  parseResumeFile: vi.fn(),
+  runCandidateScoring: vi.fn(),
   runInterviewEvaluation: vi.fn(),
   searchCandidates: vi.fn(),
   saveInterviewKit: vi.fn(),
   submitInterviewFeedback: vi.fn(),
-  setJobScreeningTemplate: vi.fn(),
+  setJobScoringTemplate: vi.fn(),
   stopJob: vi.fn(),
   testAiProviderSettings: vi.fn(),
   triggerSidecarCrawlCandidates: vi.fn(),
@@ -47,15 +45,16 @@ const backend = vi.hoisted(() => ({
   updateCrawlTask: vi.fn(),
   updateCrawlTaskPeopleSync: vi.fn(),
   updateJob: vi.fn(),
-  updateScreeningTemplate: vi.fn(),
+  updateScoringTemplate: vi.fn(),
   upsertAiProviderSettings: vi.fn(),
   setCandidateQualification: vi.fn(),
   upsertPendingCandidates: vi.fn(),
   syncPendingCandidateToCandidate: vi.fn(),
-  upsertScreeningTemplate: vi.fn(),
+  upsertScoringTemplate: vi.fn(),
   upsertTaskRuntimeSettings: vi.fn(),
   upsertCrawlTaskPeople: vi.fn(),
   deleteCandidate: vi.fn(),
+  deleteResume: vi.fn(),
   upsertResume: vi.fn(),
 }));
 
@@ -100,6 +99,7 @@ describe("recruiting store auto workflow", () => {
       updated_at: "2026-02-26T00:00:00Z",
     });
     backend.deleteCrawlTask.mockResolvedValue(true);
+    backend.deleteResume.mockResolvedValue(true);
     backend.loadDashboardMetrics.mockResolvedValue({
       total_jobs: 1,
       total_candidates: 0,
@@ -132,7 +132,7 @@ describe("recruiting store auto workflow", () => {
       auto_retry_count: 1,
       auto_retry_backoff_ms: 200,
     });
-    backend.getScreeningTemplate.mockResolvedValue({
+    backend.getScoringTemplate.mockResolvedValue({
       id: 1,
       scope: "global",
       name: "默认模板",
@@ -142,7 +142,7 @@ describe("recruiting store auto workflow", () => {
       created_at: "2026-02-26T00:00:00Z",
       updated_at: "2026-02-26T00:00:00Z",
     });
-    backend.listScreeningTemplates.mockResolvedValue([
+    backend.listScoringTemplates.mockResolvedValue([
       {
         id: 1,
         scope: "global",
@@ -269,7 +269,7 @@ describe("recruiting store auto workflow", () => {
       created_at: "2026-02-26T00:00:00Z",
       updated_at: "2026-02-26T00:00:00Z",
     });
-    backend.runCandidateAnalysis.mockResolvedValue({
+    backend.runCandidateScoring.mockResolvedValue({
       id: 1,
       candidate_id: 11,
       overall_score: 82,
@@ -285,8 +285,8 @@ describe("recruiting store auto workflow", () => {
     backend.listHiringDecisions.mockResolvedValue([]);
     backend.listInterviewEvaluations.mockResolvedValue([]);
     backend.listPipelineEvents.mockResolvedValue([]);
-    backend.listScreeningResults.mockResolvedValue([]);
-    backend.runResumeScreening.mockResolvedValue({
+    backend.listScoringResults.mockResolvedValue([]);
+    backend.runCandidateScoring.mockResolvedValue({
       id: 1,
       candidate_id: 11,
       job_id: 101,
@@ -301,17 +301,6 @@ describe("recruiting store auto workflow", () => {
       evidence: ["技能匹配命中 3 项"],
       verification_points: ["补充项目深度验证"],
       created_at: "2026-02-26T00:00:00Z",
-    });
-    backend.parseResumeFile.mockResolvedValue({
-      raw_text: "候选人简历文本",
-      parsed: {
-        skills: ["Vue3", "TypeScript"],
-        expectedSalaryK: 45,
-      },
-      metadata: {
-        fileName: "resume.pdf",
-        extension: "pdf",
-      },
     });
     backend.generateInterviewKit.mockResolvedValue({
       id: null,
@@ -410,7 +399,7 @@ describe("recruiting store auto workflow", () => {
       updated_at: "2026-02-26T00:00:00Z",
     });
     backend.deleteJob.mockResolvedValue(true);
-    backend.setJobScreeningTemplate.mockResolvedValue({
+    backend.setJobScoringTemplate.mockResolvedValue({
       id: 101,
       source: "boss",
       title: "高级前端工程师",
@@ -419,12 +408,12 @@ describe("recruiting store auto workflow", () => {
       salary_k: "35-50",
       description: "Vue3 + TS + Playwright",
       status: "ACTIVE",
-      screening_template_id: 1,
-      screening_template_name: "默认模板",
+      scoring_template_id: 1,
+      scoring_template_name: "默认模板",
       created_at: "2026-02-26T00:00:00Z",
       updated_at: "2026-02-26T00:00:00Z",
     });
-    backend.createScreeningTemplate.mockResolvedValue({
+    backend.createScoringTemplate.mockResolvedValue({
       id: 9,
       scope: "global",
       name: "前端模板",
@@ -440,7 +429,7 @@ describe("recruiting store auto workflow", () => {
       created_at: "2026-02-26T00:00:00Z",
       updated_at: "2026-02-26T00:00:00Z",
     });
-    backend.updateScreeningTemplate.mockResolvedValue({
+    backend.updateScoringTemplate.mockResolvedValue({
       id: 9,
       scope: "global",
       name: "前端模板v2",
@@ -456,7 +445,7 @@ describe("recruiting store auto workflow", () => {
       created_at: "2026-02-26T00:00:00Z",
       updated_at: "2026-02-26T00:00:00Z",
     });
-    backend.deleteScreeningTemplate.mockResolvedValue([
+    backend.deleteScoringTemplate.mockResolvedValue([
       {
         id: 1,
         scope: "global",
@@ -527,7 +516,7 @@ describe("recruiting store auto workflow", () => {
     expect(result.analysisTriggered).toBe(2);
 
     expect(backend.triggerSidecarCrawlResume).toHaveBeenCalledTimes(2);
-    expect(backend.runCandidateAnalysis).toHaveBeenCalledTimes(2);
+    expect(backend.runCandidateScoring).toHaveBeenCalledTimes(2);
     expect(backend.upsertResume).toHaveBeenCalledTimes(2);
     for (const [payload] of backend.upsertResume.mock.calls) {
       expect(payload).toEqual(expect.objectContaining({
@@ -753,33 +742,23 @@ describe("recruiting store auto workflow", () => {
       enableOcr: true,
     });
 
-    expect(backend.parseResumeFile).toHaveBeenCalledWith(
-      expect.objectContaining({
-        file_name: "resume.pdf",
-        enable_ocr: true,
-      }),
-    );
     expect(backend.upsertResume).toHaveBeenCalledWith(
       expect.objectContaining({
         candidate_id: 11,
         source: "manual",
-        raw_text: "候选人简历文本",
+        original_file: expect.objectContaining({
+          file_name: "resume.pdf",
+        }),
       }),
     );
-    expect(backend.runResumeScreening).toHaveBeenCalledWith(
-      expect.objectContaining({
-        candidate_id: 11,
-      }),
-    );
-    expect(backend.runCandidateAnalysis).toHaveBeenCalledWith(
-      expect.objectContaining({
-        candidate_id: 11,
-      }),
-    );
+    expect(backend.runCandidateScoring).toHaveBeenCalledTimes(1);
+    expect(backend.runCandidateScoring).toHaveBeenCalledWith(expect.objectContaining({
+      candidate_id: 11,
+    }));
     expect(backend.loadDashboardMetrics).toHaveBeenCalledTimes(2);
   });
 
-  it("imports resume file without triggering screening or analysis", async () => {
+  it("imports resume file without triggering scoring", async () => {
     const store = useRecruitingStore();
     await store.bootstrap();
 
@@ -790,35 +769,29 @@ describe("recruiting store auto workflow", () => {
       enableOcr: true,
     });
 
-    expect(backend.parseResumeFile).toHaveBeenCalledWith(
-      expect.objectContaining({
-        file_name: "resume.pdf",
-        enable_ocr: true,
-      }),
-    );
     expect(backend.upsertResume).toHaveBeenCalledWith(
       expect.objectContaining({
         candidate_id: 11,
         source: "manual",
-        raw_text: "候选人简历文本",
+        original_file: expect.objectContaining({
+          file_name: "resume.pdf",
+        }),
       }),
     );
-    expect(backend.runResumeScreening).not.toHaveBeenCalled();
-    expect(backend.runCandidateAnalysis).not.toHaveBeenCalled();
+    expect(backend.runCandidateScoring).not.toHaveBeenCalled();
     expect(backend.loadDashboardMetrics).toHaveBeenCalledTimes(2);
   });
 
-  it("reruns AI analysis without triggering screening", async () => {
+  it("reruns AI scoring", async () => {
     const store = useRecruitingStore();
     await store.bootstrap();
 
     await store.rerunAiAnalysis(11, 101);
 
-    expect(backend.runCandidateAnalysis).toHaveBeenCalledWith({
+    expect(backend.runCandidateScoring).toHaveBeenCalledWith({
       candidate_id: 11,
       job_id: 101,
     });
-    expect(backend.runResumeScreening).not.toHaveBeenCalled();
     expect(backend.listAnalysis).toHaveBeenCalledWith(11);
   });
 
@@ -1264,7 +1237,7 @@ describe("recruiting store auto workflow", () => {
           candidate_id: 11,
         })],
       });
-      expect(backend.runResumeScreening).toHaveBeenCalledWith({
+      expect(backend.runCandidateScoring).toHaveBeenCalledWith({
         candidate_id: 11,
         job_id: 101,
       });
@@ -1439,58 +1412,42 @@ describe("recruiting store auto workflow", () => {
     expect(backend.deleteJob).toHaveBeenCalledWith(101);
   });
 
-  it("supports screening template crud and job template binding", async () => {
+  it("supports scoring template crud and job template binding", async () => {
     const store = useRecruitingStore();
     await store.bootstrap();
 
-    const templates = await store.loadScreeningTemplates();
+    const templates = await store.loadScoringTemplates();
     expect(templates).toHaveLength(1);
 
-    await store.createScreeningTemplate({
+    await store.createScoringTemplate({
       name: "前端模板",
-      dimensions: [
-        {
-          key: "goal_orientation",
-          label: "目标导向",
-          weight: 100,
-        },
-      ],
-      risk_rules: {},
     });
-    await store.updateScreeningTemplate({
+    await store.updateScoringTemplate({
       template_id: 9,
       name: "前端模板v2",
-      dimensions: [
-        {
-          key: "goal_orientation",
-          label: "目标导向",
-          weight: 100,
-        },
-      ],
-      risk_rules: {},
     });
-    await store.deleteScreeningTemplate(9);
-    await store.setJobScreeningTemplate({
+    await store.deleteScoringTemplate(9);
+    await store.setJobScoringTemplate({
       job_id: 101,
       template_id: 1,
     });
 
-    expect(backend.listScreeningTemplates).toHaveBeenCalled();
-    expect(backend.createScreeningTemplate).toHaveBeenCalledWith(
+    expect(backend.listScoringTemplates).toHaveBeenCalled();
+    expect(backend.createScoringTemplate).toHaveBeenCalledWith(
       expect.objectContaining({
         name: "前端模板",
       }),
     );
-    expect(backend.updateScreeningTemplate).toHaveBeenCalledWith(
+    expect(backend.updateScoringTemplate).toHaveBeenCalledWith(
       expect.objectContaining({
         template_id: 9,
       }),
     );
-    expect(backend.deleteScreeningTemplate).toHaveBeenCalledWith(9);
-    expect(backend.setJobScreeningTemplate).toHaveBeenCalledWith({
+    expect(backend.deleteScoringTemplate).toHaveBeenCalledWith(9);
+    expect(backend.setJobScoringTemplate).toHaveBeenCalledWith({
       job_id: 101,
       template_id: 1,
     });
-    expect(store.jobs[0]?.screening_template_id).toBe(1);
+    expect(store.jobs[0]?.scoring_template_id).toBe(1);
   });
 });

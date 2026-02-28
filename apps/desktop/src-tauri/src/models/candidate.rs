@@ -77,30 +77,26 @@ pub(crate) struct ResumeRecord {
     pub(crate) source: String,
     pub(crate) raw_text: String,
     pub(crate) parsed: Value,
+    pub(crate) original_file_name: Option<String>,
+    pub(crate) original_file_content_type: Option<String>,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ResumeOriginalFileInput {
+    pub(crate) file_name: String,
+    pub(crate) content_base64: String,
+    pub(crate) content_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct UpsertResumeInput {
     pub(crate) candidate_id: i64,
     pub(crate) source: Option<SourceType>,
-    pub(crate) raw_text: String,
-    pub(crate) parsed: Value,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct ParseResumeFileInput {
-    pub(crate) file_name: String,
-    pub(crate) content_base64: String,
-    pub(crate) enable_ocr: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct ParseResumeFileOutput {
-    pub(crate) raw_text: String,
-    pub(crate) parsed: Value,
-    pub(crate) metadata: Value,
+    pub(crate) raw_text: Option<String>,
+    pub(crate) parsed: Option<Value>,
+    pub(crate) original_file: Option<ResumeOriginalFileInput>,
 }
 
 #[derive(Debug, Clone, Serialize)]

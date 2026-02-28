@@ -16,6 +16,17 @@ export interface StructuredScoringSectionView {
   items: StructuredScoringSectionItem[];
 }
 
+export type StructuredScoringModuleKey = "t0" | "t1" | "t2" | "t3";
+
+export interface StructuredScoringModuleView {
+  key: StructuredScoringModuleKey;
+  title: string;
+  weight: number;
+  score5: number | null;
+  comment: string;
+  items: StructuredScoringSectionItem[];
+}
+
 export interface StructuredScoringViewModel {
   overallScore5: number | null;
   overallScore100: number | null;
@@ -31,6 +42,7 @@ export interface StructuredScoringViewModel {
     t2: StructuredScoringSectionView;
     t3: StructuredScoringSectionView;
   };
+  modules: StructuredScoringModuleView[];
   templateItems: Array<{
     key: string;
     label: string;
@@ -160,6 +172,19 @@ function parseStringArray(value: unknown): string[] {
     .filter(Boolean);
 }
 
+function moduleTitle(key: StructuredScoringModuleKey): string {
+  if (key === "t0") {
+    return "T0 重要指标";
+  }
+  if (key === "t1") {
+    return "T1 指标配置";
+  }
+  if (key === "t2") {
+    return "T2 加分项";
+  }
+  return "T3 风险项";
+}
+
 export function resolveStructuredScoringViewModel(
   scoring: ScoringResultRecord | null | undefined,
 ): StructuredScoringViewModel | null {
@@ -181,6 +206,25 @@ export function resolveStructuredScoringViewModel(
   const riskLevel = asString(summary?.risk_level) || scoring.risk_level;
   const recommendation = asString(summary?.recommendation) || scoring.recommendation;
 
+  const modules: StructuredScoringModuleView[] = (["t0", "t1", "t2", "t3"] as const).map((key) => {
+    const section = key === "t0" ? t0 : key === "t1" ? t1 : key === "t2" ? t2 : t3;
+    const weight = key === "t0"
+      ? Math.round(asNumber(weights?.t0) ?? 50)
+      : key === "t1"
+        ? Math.round(asNumber(weights?.t1) ?? 30)
+        : key === "t2"
+          ? Math.round(asNumber(weights?.t2) ?? 10)
+          : Math.round(asNumber(weights?.t3) ?? 10);
+    return {
+      key,
+      title: moduleTitle(key),
+      weight,
+      score5: section.score5,
+      comment: section.comment,
+      items: section.items,
+    };
+  });
+
   return {
     overallScore5: round(asNumber(summary?.overall_score_5) ?? scoring.overall_score_5),
     overallScore100: Math.round(asNumber(summary?.overall_score_100) ?? scoring.overall_score),
@@ -201,6 +245,7 @@ export function resolveStructuredScoringViewModel(
     },
     templateName: asString(templateAssessment?.template) || "默认评分模板",
     sections: { t0, t1, t2, t3 },
+    modules,
     templateItems: t1.items.map((item) => ({
       key: item.key,
       label: item.label,

@@ -4,7 +4,7 @@ use tauri::State;
 use crate::core::error::AppError;
 use crate::core::state::AppState;
 use crate::core::time::now_iso;
-use crate::domains::screening::{
+use crate::domains::recruiting_utils::{
     map_ai_recommendation_to_final_decision, normalize_final_decision,
 };
 use crate::infra::audit::write_audit;

@@ -1,21 +1,27 @@
 use chrono::Utc;
-use reqwest::blocking::Client;
+use reqwest::blocking::{
+    multipart::{Form, Part},
+    Client,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
-use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::collections::BTreeMap;
 
 use crate::core::cipher::FieldCipher;
 use crate::core::error::{AppError, AppResult};
 use crate::core::time::now_iso;
 use crate::models::ai::{
-    AiAnalysisPayload, AiPromptContext, AiProviderProfileView, AiProviderSettingsView,
-    DimensionScore, EvidenceItem, ResolvedAiProviderSettings, StoredAiProviderProfile,
-    StoredAiProviderProfiles, StoredAiProviderSettings, TaskRuntimeSettings,
-    UpsertAiProviderSettingsInput,
+    AiProviderProfileView, AiProviderSettingsView, ResolvedAiProviderSettings,
+    StoredAiProviderProfile, StoredAiProviderProfiles, StoredAiProviderSettings,
+    TaskRuntimeSettings, UpsertAiProviderSettingsInput,
 };
+#[cfg(test)]
+use crate::models::ai::{AiAnalysisPayload, AiPromptContext, DimensionScore, EvidenceItem};
 use crate::models::common::AiProvider;
 
+#[cfg(test)]
 pub(crate) fn clamp_score(value: i32) -> i32 {
     value.clamp(0, 100)
 }
@@ -115,6 +121,7 @@ pub(crate) fn parse_json_from_text(text: &str) -> Result<Value, String> {
     serde_json::from_str::<Value>(&extracted).map_err(|error| error.to_string())
 }
 
+#[cfg(test)]
 pub(crate) fn get_array_strings(value: &Value, snake: &str, camel: &str) -> Vec<String> {
     value
         .get(snake)
@@ -130,6 +137,7 @@ pub(crate) fn get_array_strings(value: &Value, snake: &str, camel: &str) -> Vec<
         .unwrap_or_default()
 }
 
+#[cfg(test)]
 pub(crate) fn get_i32(value: &Value, snake: &str, camel: &str) -> Option<i32> {
     value
         .get(snake)
@@ -138,6 +146,7 @@ pub(crate) fn get_i32(value: &Value, snake: &str, camel: &str) -> Option<i32> {
         .map(|number| number as i32)
 }
 
+#[cfg(test)]
 pub(crate) fn get_f64(value: &Value, snake: &str, camel: &str) -> Option<f64> {
     value
         .get(snake)
@@ -145,6 +154,7 @@ pub(crate) fn get_f64(value: &Value, snake: &str, camel: &str) -> Option<f64> {
         .and_then(|item| item.as_f64())
 }
 
+#[cfg(test)]
 pub(crate) fn parse_dimension_scores(value: &Value) -> Vec<DimensionScore> {
     let rows = value
         .get("dimension_scores")
@@ -185,6 +195,7 @@ pub(crate) fn parse_dimension_scores(value: &Value) -> Vec<DimensionScore> {
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn parse_evidence(value: &Value) -> Vec<EvidenceItem> {
     let rows = value
         .get("evidence")
@@ -221,6 +232,7 @@ pub(crate) fn parse_evidence(value: &Value) -> Vec<EvidenceItem> {
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn parse_ai_provider_response(text: &str) -> Result<AiAnalysisPayload, String> {
     let value = parse_json_from_text(text)?;
     let overall_score = get_i32(&value, "overall_score", "overallScore")
@@ -249,6 +261,7 @@ pub(crate) fn parse_ai_provider_response(text: &str) -> Result<AiAnalysisPayload
     })
 }
 
+#[cfg(test)]
 pub(crate) fn ensure_analysis_payload(
     payload: AiAnalysisPayload,
     fallback: &AiAnalysisPayload,
@@ -834,6 +847,210 @@ pub(crate) fn trim_resume_excerpt(text: &str, limit: usize) -> String {
     text.chars().take(limit).collect()
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct TextGenerationAttachment {
+    pub(crate) file_name: String,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) content_type: Option<String>,
+}
+
+impl TextGenerationAttachment {
+    #[cfg(test)]
+    pub(crate) fn from_text(file_name: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            file_name: file_name.into(),
+            bytes: content.into().into_bytes(),
+            content_type: Some("text/plain; charset=utf-8".to_string()),
+        }
+    }
+
+    pub(crate) fn from_bytes(
+        file_name: impl Into<String>,
+        bytes: Vec<u8>,
+        content_type: Option<String>,
+    ) -> Self {
+        Self {
+            file_name: file_name.into(),
+            bytes,
+            content_type: content_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FileInputMode {
+    OpenAiContentFile,
+    QwenFileId,
+}
+
+fn normalize_upload_file_name(file_name: &str) -> String {
+    let sanitized = file_name
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let normalized = sanitized.trim_matches('_');
+    if normalized.is_empty() {
+        return "resume.txt".to_string();
+    }
+    if normalized.contains('.') {
+        normalized.to_string()
+    } else {
+        format!("{normalized}.txt")
+    }
+}
+
+fn provider_file_input_mode(settings: &ResolvedAiProviderSettings) -> Option<FileInputMode> {
+    let model = settings.model.trim().to_lowercase();
+    match settings.provider {
+        AiProvider::OpenApi => {
+            let allowlist = [
+                "gpt-5",
+                "gpt-5-mini",
+                "gpt-5-nano",
+                "gpt-4.1",
+                "gpt-4.1-mini",
+                "gpt-4.1-nano",
+                "o4-mini",
+            ];
+            if allowlist.iter().any(|item| model == *item) {
+                Some(FileInputMode::OpenAiContentFile)
+            } else {
+                None
+            }
+        }
+        AiProvider::Qwen => model
+            .contains("qwen-long")
+            .then_some(FileInputMode::QwenFileId)
+            .or_else(|| model.contains("qwen-doc").then_some(FileInputMode::QwenFileId)),
+        _ => None,
+    }
+}
+
+pub(crate) fn model_supports_file_upload(settings: &ResolvedAiProviderSettings) -> bool {
+    provider_file_input_mode(settings).is_some()
+}
+
+fn provider_file_upload_purpose(settings: &ResolvedAiProviderSettings) -> &'static str {
+    match settings.provider {
+        AiProvider::Qwen => "file-extract",
+        _ => "user_data",
+    }
+}
+
+fn ensure_openai_files_endpoint(base_url: &str) -> String {
+    let normalized = base_url.trim().trim_end_matches('/');
+    if normalized.ends_with("/files") {
+        normalized.to_string()
+    } else if normalized.ends_with("/chat/completions") {
+        format!("{}/files", normalized.trim_end_matches("/chat/completions"))
+    } else if normalized.ends_with("/text/chatcompletion_v2") {
+        format!(
+            "{}/files",
+            normalized.trim_end_matches("/text/chatcompletion_v2")
+        )
+    } else {
+        format!("{normalized}/files")
+    }
+}
+
+fn upload_text_attachment_file(
+    client: &Client,
+    settings: &ResolvedAiProviderSettings,
+    attachment: &TextGenerationAttachment,
+) -> Result<String, String> {
+    let api_key = settings
+        .api_key
+        .as_ref()
+        .ok_or_else(|| "provider_api_key_missing".to_string())?;
+    if attachment.bytes.is_empty() {
+        return Err("provider_file_content_empty".to_string());
+    }
+
+    let endpoint = ensure_openai_files_endpoint(&settings.base_url);
+    let purpose = provider_file_upload_purpose(settings);
+    let file_name = normalize_upload_file_name(&attachment.file_name);
+    let mut file_part = Part::bytes(attachment.bytes.clone()).file_name(file_name);
+    if let Some(content_type) = attachment.content_type.as_deref() {
+        file_part = file_part
+            .mime_str(content_type)
+            .map_err(|error| error.to_string())?;
+    }
+    let form = Form::new()
+        .text("purpose", purpose.to_string())
+        .part("file", file_part);
+
+    let response = client
+        .post(endpoint)
+        .bearer_auth(api_key)
+        .multipart(form)
+        .send()
+        .map_err(|error| error.to_string())?;
+
+    let status = response.status();
+    let body_text = response.text().map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        return Err(format!(
+            "provider_file_upload_http_{}: {}",
+            status.as_u16(),
+            trim_resume_excerpt(&body_text, 300)
+        ));
+    }
+
+    let body_json = serde_json::from_str::<Value>(&body_text).map_err(|error| error.to_string())?;
+    let file_id = body_json
+        .get("id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "provider_file_upload_missing_id".to_string())?;
+    Ok(file_id.to_string())
+}
+
+pub(crate) fn read_resume_attachment(
+    conn: &Connection,
+    candidate_id: i64,
+) -> Result<Option<TextGenerationAttachment>, String> {
+    let row = conn
+        .query_row(
+            "SELECT file_name, content_type, content_blob FROM resume_files WHERE candidate_id = ?1",
+            [candidate_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+
+    let Some((file_name, content_type, bytes)) = row else {
+        return Ok(None);
+    };
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(TextGenerationAttachment::from_bytes(
+        file_name,
+        bytes,
+        content_type,
+    )))
+}
+
+#[cfg(test)]
 pub(crate) fn build_ai_prompts(context: &AiPromptContext) -> (String, String) {
     let system_prompt = r#"你是资深招聘顾问。请基于给定候选人资料，输出严格 JSON（不要 markdown），字段如下：
 {
@@ -861,6 +1078,7 @@ pub(crate) fn build_ai_prompts(context: &AiPromptContext) -> (String, String) {
         "stage": context.stage,
         "tags": context.tags,
         "resumeParsed": context.resume_parsed,
+        "resumeText": context.resume_raw_text,
         "resumeExcerpt": trim_resume_excerpt(&context.resume_raw_text, 2600),
     });
 
@@ -946,6 +1164,7 @@ pub(crate) fn call_openai_compatible_provider(
     settings: &ResolvedAiProviderSettings,
     system_prompt: &str,
     user_prompt: &str,
+    attachment: Option<&TextGenerationAttachment>,
 ) -> Result<String, String> {
     let endpoint = ensure_openai_endpoint(&settings.base_url);
     let api_key = settings
@@ -953,33 +1172,85 @@ pub(crate) fn call_openai_compatible_provider(
         .as_ref()
         .ok_or_else(|| "provider_api_key_missing".to_string())?;
 
-    let response = client
-        .post(endpoint)
-        .bearer_auth(api_key)
-        .json(&serde_json::json!({
-            "model": settings.model,
-            "temperature": settings.temperature,
-            "max_tokens": settings.max_tokens,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
-        }))
-        .send()
-        .map_err(|error| error.to_string())?;
+    let fallback_messages = vec![
+        serde_json::json!({"role": "system", "content": system_prompt}),
+        serde_json::json!({"role": "user", "content": user_prompt}),
+    ];
 
-    let status = response.status();
-    let body_text = response.text().map_err(|error| error.to_string())?;
-    if !status.is_success() {
-        return Err(format!(
-            "provider_http_{}: {}",
-            status.as_u16(),
-            trim_resume_excerpt(&body_text, 300)
-        ));
+    let mut used_file_payload = false;
+    let messages = if let Some(mode) = provider_file_input_mode(settings) {
+        if let Some(file) = attachment.filter(|item| !item.bytes.is_empty()) {
+            match upload_text_attachment_file(client, settings, file) {
+                Ok(file_id) => {
+                    used_file_payload = true;
+                    match mode {
+                        FileInputMode::OpenAiContentFile => vec![
+                            serde_json::json!({"role": "system", "content": system_prompt}),
+                            serde_json::json!({
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "file",
+                                        "file": {
+                                            "file_id": file_id
+                                        }
+                                    },
+                                    {
+                                        "type": "text",
+                                        "text": user_prompt
+                                    }
+                                ]
+                            }),
+                        ],
+                        FileInputMode::QwenFileId => vec![
+                            serde_json::json!({"role": "system", "content": system_prompt}),
+                            serde_json::json!({"role": "system", "content": format!("fileid://{file_id}")}),
+                            serde_json::json!({"role": "user", "content": user_prompt}),
+                        ],
+                    }
+                }
+                Err(_) => fallback_messages.clone(),
+            }
+        } else {
+            fallback_messages.clone()
+        }
+    } else {
+        fallback_messages.clone()
+    };
+
+    let send_chat = |messages_payload: &[Value]| -> Result<String, String> {
+        let response = client
+            .post(&endpoint)
+            .bearer_auth(api_key)
+            .json(&serde_json::json!({
+                "model": settings.model,
+                "temperature": settings.temperature,
+                "max_tokens": settings.max_tokens,
+                "messages": messages_payload
+            }))
+            .send()
+            .map_err(|error| error.to_string())?;
+
+        let status = response.status();
+        let body_text = response.text().map_err(|error| error.to_string())?;
+        if !status.is_success() {
+            return Err(format!(
+                "provider_http_{}: {}",
+                status.as_u16(),
+                trim_resume_excerpt(&body_text, 300)
+            ));
+        }
+        let body_json =
+            serde_json::from_str::<Value>(&body_text).map_err(|error| error.to_string())?;
+        parse_openai_content(&body_json)
+            .ok_or_else(|| "provider_response_content_missing".to_string())
+    };
+
+    match send_chat(&messages) {
+        Ok(content) => Ok(content),
+        Err(error) if used_file_payload => send_chat(&fallback_messages).or(Err(error)),
+        Err(error) => Err(error),
     }
-
-    let body_json = serde_json::from_str::<Value>(&body_text).map_err(|error| error.to_string())?;
-    parse_openai_content(&body_json).ok_or_else(|| "provider_response_content_missing".to_string())
 }
 
 pub(crate) fn call_minimax_provider(
@@ -1050,6 +1321,7 @@ pub(crate) fn probe_provider_connectivity(
             &settings,
             "You are a connectivity checker. Reply with exactly OK.",
             "ping",
+            None,
         ),
     };
     let latency_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
@@ -1057,6 +1329,7 @@ pub(crate) fn probe_provider_connectivity(
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub(crate) enum AiInvokeProgressEvent {
     AttemptStart {
         attempt: i32,
@@ -1072,10 +1345,12 @@ pub(crate) enum AiInvokeProgressEvent {
     },
 }
 
+#[cfg(test)]
 pub(crate) fn invoke_cloud_provider(
     settings: &ResolvedAiProviderSettings,
     context: &AiPromptContext,
     fallback: &AiAnalysisPayload,
+    attachment: Option<&TextGenerationAttachment>,
     mut on_progress: Option<&mut dyn FnMut(AiInvokeProgressEvent)>,
 ) -> Result<AiAnalysisPayload, String> {
     if settings.api_key.is_none() {
@@ -1087,6 +1362,11 @@ pub(crate) fn invoke_cloud_provider(
         .build()
         .map_err(|error| error.to_string())?;
     let (system_prompt, user_prompt) = build_ai_prompts(context);
+    let fallback_attachment = TextGenerationAttachment::from_text(
+        "candidate-resume.txt",
+        context.resume_raw_text.clone(),
+    );
+    let resume_attachment = attachment.unwrap_or(&fallback_attachment);
 
     let attempts = settings.retry_count.max(1);
     let mut last_error = "provider_call_unknown_error".to_string();
@@ -1103,9 +1383,13 @@ pub(crate) fn invoke_cloud_provider(
             | AiProvider::Doubao
             | AiProvider::Deepseek
             | AiProvider::Glm
-            | AiProvider::OpenApi => {
-                call_openai_compatible_provider(&client, settings, &system_prompt, &user_prompt)
-            }
+            | AiProvider::OpenApi => call_openai_compatible_provider(
+                &client,
+                settings,
+                &system_prompt,
+                &user_prompt,
+                Some(resume_attachment),
+            ),
             AiProvider::Minimax => {
                 call_minimax_provider(&client, settings, &system_prompt, &user_prompt)
             }
@@ -1144,6 +1428,7 @@ pub(crate) fn invoke_text_generation(
     settings: &ResolvedAiProviderSettings,
     system_prompt: &str,
     user_prompt: &str,
+    attachment: Option<&TextGenerationAttachment>,
 ) -> Result<String, String> {
     if settings.api_key.is_none() {
         return Err(format!("{}_api_key_missing", settings.provider.as_db()));
@@ -1162,9 +1447,13 @@ pub(crate) fn invoke_text_generation(
             | AiProvider::Doubao
             | AiProvider::Deepseek
             | AiProvider::Glm
-            | AiProvider::OpenApi => {
-                call_openai_compatible_provider(&client, settings, system_prompt, user_prompt)
-            }
+            | AiProvider::OpenApi => call_openai_compatible_provider(
+                &client,
+                settings,
+                system_prompt,
+                user_prompt,
+                attachment,
+            ),
             AiProvider::Minimax => {
                 call_minimax_provider(&client, settings, system_prompt, user_prompt)
             }

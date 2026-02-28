@@ -18,9 +18,9 @@ use domains::ai_settings::{
 };
 use domains::candidate::{
     create_candidate, delete_candidate, list_analysis, list_candidates, list_candidates_page,
-    list_decision_candidates_page, list_interview_candidates_page, list_pending_candidates,
-    list_pipeline_events, merge_candidate_import, move_candidate_stage, parse_resume_file,
-    set_candidate_qualification, sync_pending_candidate_to_candidate,
+    delete_resume, get_resume,
+    list_decision_candidates_page, list_interview_candidates_page, list_pending_candidates, list_pipeline_events,
+    merge_candidate_import, move_candidate_stage, set_candidate_qualification, sync_pending_candidate_to_candidate,
     update_candidate, upsert_pending_candidates, upsert_resume,
 };
 use domains::crawl_task::{
@@ -34,9 +34,9 @@ use domains::interview::{
 };
 use domains::jobs::{create_job, delete_job, list_jobs, stop_job, update_job};
 use domains::scoring::{
-    create_scoring_template, delete_scoring_template, get_scoring_template,
-    list_scoring_results, list_scoring_templates, run_candidate_scoring,
-    set_job_scoring_template, update_scoring_template, upsert_scoring_template,
+    create_scoring_template, delete_scoring_template, get_scoring_template, list_scoring_results,
+    list_scoring_templates, run_candidate_scoring, set_job_scoring_template,
+    update_scoring_template, upsert_scoring_template,
 };
 use domains::search::search_candidates;
 use domains::sidecar_runtime::{
@@ -111,8 +111,9 @@ pub fn run() {
             list_decision_candidates_page,
             move_candidate_stage,
             list_pipeline_events,
+            get_resume,
+            delete_resume,
             upsert_resume,
-            parse_resume_file,
             upsert_pending_candidates,
             list_pending_candidates,
             sync_pending_candidate_to_candidate,

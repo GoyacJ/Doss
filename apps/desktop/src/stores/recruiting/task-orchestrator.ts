@@ -356,7 +356,6 @@ export function createTaskOrchestrator(deps: TaskOrchestratorDeps) {
             resumeAutoProcessed += 1;
           }
 
-          await withRetry(() => deps.analyzeCandidate(target.localCandidateId, payload.localJobId));
           analysisTriggered += 1;
         } catch (error) {
           errors.push({

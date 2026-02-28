@@ -6,5 +6,7 @@ pub(crate) mod hiring;
 pub(crate) mod interview;
 pub(crate) mod job;
 pub(crate) mod metrics;
+pub(crate) mod resume;
 pub(crate) mod scoring;
+#[cfg(test)]
 pub(crate) mod screening;

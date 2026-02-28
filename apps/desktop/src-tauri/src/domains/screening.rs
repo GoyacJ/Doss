@@ -13,7 +13,8 @@ use zip::ZipArchive;
 use crate::core::state::AppState;
 use crate::core::time::now_iso;
 use crate::domains::ai_runtime::{
-    invoke_text_generation, parse_json_from_text, resolve_ai_settings, trim_resume_excerpt,
+    invoke_text_generation, parse_json_from_text, read_resume_attachment, resolve_ai_settings,
+    trim_resume_excerpt, TextGenerationAttachment,
 };
 use crate::domains::jobs::read_job_by_id;
 use crate::infra::audit::write_audit;
@@ -710,7 +711,10 @@ fn build_default_risk_comment(
     risk_items: &[StructuredRiskItem],
 ) -> String {
     if risk_items.is_empty() {
-        return format!("风险等级 {}，风险评分 {:.1}/5，当前未发现显著风险。", risk_level, risk_score_5);
+        return format!(
+            "风险等级 {}，风险评分 {:.1}/5，当前未发现显著风险。",
+            risk_level, risk_score_5
+        );
     }
     format!(
         "风险等级 {}，风险评分 {:.1}/5。重点关注：{}。",
@@ -799,6 +803,7 @@ fn generate_screening_ai_comment_bundle(
     conn: &Connection,
     state: &AppState,
     payload: &Value,
+    attachment: Option<&TextGenerationAttachment>,
 ) -> Option<ScreeningAiCommentBundle> {
     let settings = resolve_ai_settings(conn, state.cipher.as_ref()).ok()?;
     if settings.api_key.is_none() {
@@ -806,7 +811,20 @@ fn generate_screening_ai_comment_bundle(
     }
 
     let (system_prompt, user_prompt) = build_screening_explanation_prompts(payload);
-    let content = invoke_text_generation(&settings, &system_prompt, &user_prompt).ok()?;
+    let fallback_attachment = payload
+        .get("resumeText")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| TextGenerationAttachment::from_text("screening-resume.txt", value));
+    let effective_attachment = attachment.or(fallback_attachment.as_ref());
+    let content = invoke_text_generation(
+        &settings,
+        &system_prompt,
+        &user_prompt,
+        effective_attachment,
+    )
+    .ok()?;
     let parsed = parse_json_from_text(&content).ok()?;
     let bundle = parse_screening_ai_comment_bundle(&parsed);
     if bundle.overall_comment.trim().is_empty()
@@ -1979,7 +1997,11 @@ pub(crate) fn run_resume_screening(
             weight: dimension.weight,
             score_100,
             score_5,
-            comment: format!("{} 维度信号评分 {:.1}/5.0", dimension.label, round_one_decimal(signal)),
+            comment: format!(
+                "{} 维度信号评分 {:.1}/5.0",
+                dimension.label,
+                round_one_decimal(signal)
+            ),
         });
     }
     let t1_score = clamp_score(t1_acc.round() as i32);
@@ -2160,25 +2182,16 @@ pub(crate) fn run_resume_screening(
     ));
 
     for item in &mut template_items {
-        item.comment = normalize_screening_comment(
-            &item.comment,
-            &item.comment,
-            SECTION_COMMENT_MAX_CHARS,
-        );
+        item.comment =
+            normalize_screening_comment(&item.comment, &item.comment, SECTION_COMMENT_MAX_CHARS);
     }
     for item in &mut bonus_items {
-        item.comment = normalize_screening_comment(
-            &item.comment,
-            &item.comment,
-            SECTION_COMMENT_MAX_CHARS,
-        );
+        item.comment =
+            normalize_screening_comment(&item.comment, &item.comment, SECTION_COMMENT_MAX_CHARS);
     }
     for item in &mut risk_items {
-        item.comment = normalize_screening_comment(
-            &item.comment,
-            &item.comment,
-            SECTION_COMMENT_MAX_CHARS,
-        );
+        item.comment =
+            normalize_screening_comment(&item.comment, &item.comment, SECTION_COMMENT_MAX_CHARS);
     }
 
     let default_overall_comment = build_default_overall_comment(
@@ -2242,10 +2255,19 @@ pub(crate) fn run_resume_screening(
                 "comment": item.comment,
             }))
             .collect::<Vec<_>>(),
+        "resumeText": resume_raw_text.clone(),
         "resumeExcerpt": trim_resume_excerpt(&resume_raw_text, 1200),
     });
 
-    let ai_comments = generate_screening_ai_comment_bundle(&conn, state.inner(), &ai_comment_payload);
+    let resume_attachment = read_resume_attachment(&conn, input.candidate_id)
+        .ok()
+        .flatten();
+    let ai_comments = generate_screening_ai_comment_bundle(
+        &conn,
+        state.inner(),
+        &ai_comment_payload,
+        resume_attachment.as_ref(),
+    );
     let mut overall_comment = normalize_screening_comment(
         &default_overall_comment,
         &default_overall_comment,
@@ -2280,11 +2302,8 @@ pub(crate) fn run_resume_screening(
 
         for item in &mut template_items {
             if let Some(comment) = bundle.template_comments.get(&item.key.to_lowercase()) {
-                item.comment = normalize_screening_comment(
-                    comment,
-                    &item.comment,
-                    SECTION_COMMENT_MAX_CHARS,
-                );
+                item.comment =
+                    normalize_screening_comment(comment, &item.comment, SECTION_COMMENT_MAX_CHARS);
             }
         }
     }

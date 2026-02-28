@@ -10,8 +10,8 @@ use crate::domains::ai_runtime::{
 use crate::domains::candidate::build_order_by_from_rules;
 use crate::domains::jobs::count_active_crawl_tasks_for_job;
 use crate::domains::screening::{
-    build_structured_resume_fields, count_jobs_using_screening_template,
-    calculate_screening_overall_score_100, calculate_screening_overall_score_5,
+    build_structured_resume_fields, calculate_screening_overall_score_100,
+    calculate_screening_overall_score_5, count_jobs_using_screening_template,
     create_global_screening_template_internal, delete_global_screening_template_internal,
     derive_screening_recommendation, evaluate_interview_feedback_payload, extract_docx_xml_text,
     normalize_screening_comment, normalize_screening_dimensions, resolve_screening_template,
@@ -153,11 +153,7 @@ fn order_by_builder_uses_whitelist_and_nulls_last() {
         ("updated_at", "updated_at"),
     ];
 
-    let order_by = build_order_by_from_rules(
-        Some(&rules),
-        &allowed,
-        "updated_at DESC, id DESC",
-    );
+    let order_by = build_order_by_from_rules(Some(&rules), &allowed, "updated_at DESC, id DESC");
 
     assert_eq!(
         order_by,
@@ -173,11 +169,7 @@ fn order_by_builder_falls_back_when_rules_invalid() {
     }];
     let allowed = [("updated_at", "updated_at")];
 
-    let order_by = build_order_by_from_rules(
-        Some(&rules),
-        &allowed,
-        "updated_at DESC, id DESC",
-    );
+    let order_by = build_order_by_from_rules(Some(&rules), &allowed, "updated_at DESC, id DESC");
 
     assert_eq!(order_by, "updated_at DESC, id DESC");
 }
@@ -279,7 +271,10 @@ fn screening_t3_risk_mapping_affects_overall_score() {
 #[test]
 fn normalize_screening_comment_applies_fallback_and_limit() {
     let fallback_result = normalize_screening_comment("", "默认说明", 4);
-    assert_eq!(fallback_result, "默认说明".chars().take(4).collect::<String>());
+    assert_eq!(
+        fallback_result,
+        "默认说明".chars().take(4).collect::<String>()
+    );
 
     let long_text = "这是一个很长的说明文本，用于验证长度截断是否生效。".repeat(20);
     let normalized = normalize_screening_comment(&long_text, "默认", 200);
@@ -550,6 +545,15 @@ fn migrate_db_applies_refactor_schema_extensions() {
         )
         .expect("check pending_candidates table");
     assert_eq!(pending_table_exists, 1);
+
+    let resume_files_table_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = 'resume_files'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("check resume_files table");
+    assert_eq!(resume_files_table_exists, 1);
 
     let candidate_has_address: i64 = conn
         .query_row(

@@ -6,7 +6,6 @@ import {
   type InterviewEvaluationRecord,
   type InterviewFeedbackRecord,
   type InterviewKitRecord,
-  type ParsedResumeFile,
   type PipelineEvent,
   type ScoringResultRecord,
   type UpsertResumePayload,
@@ -28,14 +27,9 @@ export interface AnalysisContextDeps {
   listScoringResults: (candidateId: number) => Promise<ScoringResultRecord[]>;
   listInterviewEvaluations: (candidateId: number) => Promise<InterviewEvaluationRecord[]>;
   listHiringDecisions: (candidateId: number) => Promise<HiringDecisionRecord[]>;
-  runResumeScreening?: (input: { candidate_id: number; job_id?: number }) => Promise<unknown>;
+  deleteResume: (candidateId: number) => Promise<boolean>;
   upsertResume: (input: UpsertResumePayload) => Promise<unknown>;
   refreshMetrics: () => Promise<void>;
-  parseResumeFile: (input: {
-    file_name: string;
-    content_base64: string;
-    enable_ocr?: boolean;
-  }) => Promise<ParsedResumeFile>;
   generateInterviewKit: (input: { candidate_id: number; job_id?: number }) => Promise<InterviewKitRecord>;
   saveInterviewKit: (input: {
     candidate_id: number;
@@ -114,26 +108,24 @@ async function fileToBase64(file: File): Promise<string> {
 export function createAnalysisContextModule(deps: AnalysisContextDeps) {
   async function saveResume(payload: {
     candidate_id: number;
-    raw_text: string;
-    parsed: Record<string, unknown>;
+    raw_text?: string;
+    parsed?: Record<string, unknown>;
     job_id?: number;
     source?: SourceType;
+    original_file?: {
+      file_name: string;
+      content_base64: string;
+      content_type?: string;
+    };
   }) {
     await deps.upsertResume({
       ...payload,
       source: payload.source ?? "manual",
     });
-    if (deps.runResumeScreening) {
-      await deps.runResumeScreening({
-        candidate_id: payload.candidate_id,
-        job_id: payload.job_id,
-      });
-    } else {
-      await deps.runCandidateScoring({
-        candidate_id: payload.candidate_id,
-        job_id: payload.job_id,
-      });
-    }
+    await deps.runCandidateScoring({
+      candidate_id: payload.candidate_id,
+      job_id: payload.job_id,
+    });
     const [latestScoringResults] = await Promise.all([
       deps.listScoringResults(payload.candidate_id),
       deps.refreshMetrics(),
@@ -166,7 +158,7 @@ export function createAnalysisContextModule(deps: AnalysisContextDeps) {
     deps.hiringDecisions.value[candidateId] = hiringDecisionData;
   }
 
-  async function runScreening(candidateId: number, jobId?: number, runId?: string) {
+  async function runScoring(candidateId: number, jobId?: number, runId?: string) {
     await deps.runCandidateScoring({
       candidate_id: candidateId,
       job_id: jobId,
@@ -191,24 +183,19 @@ export function createAnalysisContextModule(deps: AnalysisContextDeps) {
     file: File;
     enableOcr?: boolean;
     jobId?: number;
-  }): Promise<ParsedResumeFile> {
+  }): Promise<void> {
     const contentBase64 = await fileToBase64(payload.file);
-    const parsedFile = await deps.parseResumeFile({
-      file_name: payload.file.name,
-      content_base64: contentBase64,
-      enable_ocr: payload.enableOcr,
-    });
 
     await saveResume({
       candidate_id: payload.candidateId,
-      raw_text: parsedFile.raw_text,
-      parsed: parsedFile.parsed,
       job_id: payload.jobId,
+      original_file: {
+        file_name: payload.file.name,
+        content_base64: contentBase64,
+        content_type: payload.file.type || undefined,
+      },
     });
-    await analyzeCandidate(payload.candidateId, payload.jobId);
     await loadCandidateContext(payload.candidateId);
-
-    return parsedFile;
   }
 
   async function importResumeFile(payload: {
@@ -216,23 +203,25 @@ export function createAnalysisContextModule(deps: AnalysisContextDeps) {
     file: File;
     enableOcr?: boolean;
     jobId?: number;
-  }): Promise<ParsedResumeFile> {
+  }): Promise<void> {
     const contentBase64 = await fileToBase64(payload.file);
-    const parsedFile = await deps.parseResumeFile({
-      file_name: payload.file.name,
-      content_base64: contentBase64,
-      enable_ocr: payload.enableOcr,
-    });
 
     await deps.upsertResume({
       candidate_id: payload.candidateId,
-      raw_text: parsedFile.raw_text,
-      parsed: parsedFile.parsed,
       source: "manual",
+      original_file: {
+        file_name: payload.file.name,
+        content_base64: contentBase64,
+        content_type: payload.file.type || undefined,
+      },
     });
     await deps.refreshMetrics();
+  }
 
-    return parsedFile;
+  async function removeResume(candidateId: number) {
+    const removed = await deps.deleteResume(candidateId);
+    await deps.refreshMetrics();
+    return removed;
   }
 
   async function generateInterviewKit(candidateId: number, jobId?: number) {
@@ -282,10 +271,11 @@ export function createAnalysisContextModule(deps: AnalysisContextDeps) {
     saveResume,
     analyzeCandidate,
     loadCandidateContext,
-    runScreening,
+    runScoring,
     rerunAiAnalysis,
     importResumeFileAndAnalyze,
     importResumeFile,
+    removeResume,
     generateInterviewKit,
     saveInterviewKit,
     submitInterviewFeedback,

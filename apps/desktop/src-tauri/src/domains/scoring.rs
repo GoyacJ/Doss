@@ -6,14 +6,23 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::core::state::AppState;
 use crate::core::time::now_iso;
-use crate::domains::ai_runtime::{invoke_text_generation, resolve_ai_settings, trim_resume_excerpt};
+use crate::domains::ai_runtime::{
+    invoke_text_generation, model_supports_file_upload, parse_json_from_text, resolve_ai_settings,
+    trim_resume_excerpt,
+};
+use crate::domains::resume_materializer::ensure_resume_materialized;
+use crate::domains::resume_parser::{
+    expected_salary_k_from_parsed_json, parse_skills_from_parsed_json,
+    project_mentions_from_parsed_json,
+};
 use crate::domains::jobs::read_job_by_id;
-use crate::domains::screening::{
+use crate::domains::recruiting_utils::{
     clamp_score, dimension_signal_score, parse_job_required_skills, parse_job_salary_max,
-    parse_skills, round_one_decimal,
+    round_one_decimal,
 };
 use crate::infra::audit::write_audit;
 use crate::infra::db::open_connection;
+use crate::models::ai::ResolvedAiProviderSettings;
 use crate::models::scoring::{
     CreateScoringTemplateInput, RunCandidateScoringInput, ScoringItemConfig, ScoringResultRecord,
     ScoringSectionConfig, ScoringTemplateConfig, ScoringTemplateRecord, ScoringWeights,
@@ -21,8 +30,6 @@ use crate::models::scoring::{
 };
 
 const SCORING_PROGRESS_EVENT: &str = "candidate-scoring-progress";
-const OVERALL_COMMENT_MAX_CHARS: usize = 500;
-const SECTION_COMMENT_MAX_CHARS: usize = 220;
 
 #[derive(Debug, Clone)]
 struct ScoringProgressUpdate {
@@ -260,17 +267,248 @@ pub(crate) fn default_scoring_template_config() -> ScoringTemplateConfig {
 }
 
 fn normalize_text(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ").trim().to_string()
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
 }
 
-fn normalize_comment(text: &str, fallback: &str, limit: usize) -> String {
+fn normalize_comment(text: &str, fallback: &str) -> String {
     let normalized = normalize_text(text);
-    let value = if normalized.is_empty() {
+    if normalized.is_empty() {
         fallback.to_string()
     } else {
         normalized
+    }
+}
+
+fn score_band(score_5: f64) -> &'static str {
+    if score_5 >= 4.0 {
+        "较强"
+    } else if score_5 >= 3.0 {
+        "中等"
+    } else {
+        "偏弱"
+    }
+}
+
+fn skills_preview(ctx: &CandidateScoringContext, limit: usize) -> String {
+    ctx.extracted_skills
+        .iter()
+        .take(limit)
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn required_skill_match_text(ctx: &CandidateScoringContext) -> String {
+    if ctx.required_skills.is_empty() {
+        return "未配置岗位技能".to_string();
+    }
+    format!("{}/{}", ctx.matched_skill_count, ctx.required_skills.len())
+}
+
+fn default_item_reason(
+    section_key: &str,
+    item: &ScoringItemConfig,
+    score_5: f64,
+    ctx: &CandidateScoringContext,
+) -> String {
+    let band = score_band(score_5);
+    let skills = skills_preview(ctx, 2);
+    match section_key {
+        "t0" => {
+            if item.key.contains("skill") {
+                return format!(
+                    "核心技能匹配{}，建议核验深度。",
+                    required_skill_match_text(ctx)
+                );
+            }
+            if item.key.contains("year") || item.label.contains("年限") {
+                return format!("{:.1}年经验，年限匹配{}。", ctx.candidate_years, band);
+            }
+            if item.key.contains("resume") || item.label.contains("完整") {
+                if ctx.project_mentions > 0 {
+                    return format!("含{}段项目经历，信息较完整。", ctx.project_mentions);
+                }
+                return "简历项目信息偏少，需补充。".to_string();
+            }
+            format!("{}与岗位要求{}。", item.label, band)
+        }
+        "t1" => {
+            if !skills.is_empty() {
+                format!("{}见{}经历，表现{}。", item.label, skills, band)
+            } else {
+                format!("{}证据有限，建议面试核验。", item.label)
+            }
+        }
+        "t2" => {
+            if item.key.contains("project") {
+                return format!(
+                    "含{}段项目，{}潜力{}。",
+                    ctx.project_mentions, item.label, band
+                );
+            }
+            if item.key.contains("rare") || item.label.contains("稀缺") {
+                if let Some(rare_skill) = ctx
+                    .extracted_skills
+                    .iter()
+                    .find(|skill| {
+                        let lower = skill.to_lowercase();
+                        lower.contains("rust")
+                            || lower.contains("go")
+                            || lower.contains("playwright")
+                            || lower.contains("k8s")
+                    })
+                    .map(|skill| skill.trim().to_string())
+                {
+                    return format!("具备{}等栈，稀缺能力可加分。", rare_skill);
+                }
+            }
+            if item.key.contains("core") || item.key.contains("skill") {
+                return format!(
+                    "核心技能匹配{}，具备加分潜力。",
+                    required_skill_match_text(ctx)
+                );
+            }
+            if !skills.is_empty() {
+                return format!("简历体现{}能力，{}。", item.label, band);
+            }
+            format!("{}表现{}，建议补充案例。", item.label, band)
+        }
+        "t3" => {
+            let risk_text = if score_5 >= 3.5 {
+                "可控"
+            } else if score_5 >= 2.0 {
+                "需关注"
+            } else {
+                "偏高"
+            };
+            if item.key.contains("salary") || item.label.contains("薪资") {
+                if let (Some(expected), Some(max)) = (ctx.expected_salary_k, ctx.max_salary_k) {
+                    return format!("期望{:.0}K/预算{:.0}K，风险{}。", expected, max, risk_text);
+                }
+                return "薪资信息不足，建议确认期望。".to_string();
+            }
+            if item.key.contains("stability") || item.label.contains("稳定") {
+                return format!(
+                    "{:.1}年经验，稳定性风险{}。",
+                    ctx.candidate_years, risk_text
+                );
+            }
+            if item.key.contains("info") || item.label.contains("信息") {
+                if ctx.resume_raw_text.chars().count() < 220 {
+                    return "关键信息偏少，决策风险较高。".to_string();
+                }
+                return "项目与经历信息较全，风险可控。".to_string();
+            }
+            format!("{}{}。", item.label, risk_text)
+        }
+        _ => format!("{}表现{}。", item.label, band),
+    }
+}
+
+fn default_section_comment(section_key: &str, section_score: f64, items: &[ScoredItem]) -> String {
+    let title = section_key.to_uppercase();
+    if items.is_empty() {
+        return format!("{title}小结：简历证据不足，建议补充后复评。");
+    }
+
+    let mut top_item = &items[0];
+    let mut low_item = &items[0];
+    for item in items.iter().skip(1) {
+        if item.score_5 > top_item.score_5 {
+            top_item = item;
+        }
+        if item.score_5 < low_item.score_5 {
+            low_item = item;
+        }
+    }
+
+    let advice = match section_key {
+        "t0" => format!("建议优先核验{}相关项目证据。", low_item.label),
+        "t1" => format!("建议围绕{}追问具体行为案例。", low_item.label),
+        "t2" => format!("建议补充{}的量化成果数据。", low_item.label),
+        "t3" => format!("建议重点排查{}的真实风险。", low_item.label),
+        _ => format!("建议补充{}的关键证据。", low_item.label),
     };
-    value.chars().take(limit).collect::<String>()
+
+    format!(
+        "{title}小结：整体{}（{:.1}/5），优势在{}（{:.1}），短板在{}（{:.1}）。{}",
+        score_band(section_score),
+        section_score,
+        top_item.label,
+        top_item.score_5,
+        low_item.label,
+        low_item.score_5,
+        advice
+    )
+}
+
+fn build_overall_comment_fallback(
+    ctx: &CandidateScoringContext,
+    _weights: &ScoringWeights,
+    overall_score_5: f64,
+    _overall_score_100: i32,
+    t0: &SectionAssessment,
+    t1: &SectionAssessment,
+    t2: &SectionAssessment,
+    t3: &SectionAssessment,
+    recommendation: &str,
+    risk_level: &str,
+) -> String {
+    let recommendation_text = if recommendation == "PASS" {
+        "进入下一轮面试"
+    } else if recommendation == "REVIEW" {
+        "进入人工复核"
+    } else {
+        "暂缓推进"
+    };
+
+    let risk_text = match risk_level {
+        "HIGH" => "高风险",
+        "MEDIUM" => "中风险",
+        _ => "低风险",
+    };
+
+    let weakest_module = [
+        ("T0", t0.score_5, "硬性匹配与项目深度"),
+        ("T1", t1.score_5, "行为能力与协作案例"),
+        ("T2", t2.score_5, "项目影响力与加分项证明"),
+        ("T3", t3.score_5, "薪资与稳定性风险信息"),
+    ]
+    .iter()
+    .min_by(|a, b| a.1.total_cmp(&b.1))
+    .copied()
+    .unwrap_or(("T1", t1.score_5, "行为能力与协作案例"));
+
+    let skills = skills_preview(ctx, 3);
+    let skills_text = if skills.is_empty() {
+        "未提取到明确技能关键词".to_string()
+    } else {
+        format!("技能关键词包含{}", skills)
+    };
+
+    format!(
+        "候选人{:.1}年经验，简历提及{}段项目，{}；核心技能匹配{}。综合评分{:.1}/5（T0 {:.1}、T1 {:.1}、T2 {:.1}、T3 {:.1}），当前{}，建议{}。下一步建议围绕{}补充可量化证据，并在面试中重点核验{}。",
+        ctx.candidate_years,
+        ctx.project_mentions,
+        skills_text,
+        required_skill_match_text(ctx),
+        overall_score_5,
+        t0.score_5,
+        t1.score_5,
+        t2.score_5,
+        t3.score_5,
+        risk_text,
+        recommendation_text,
+        weakest_module.0,
+        weakest_module.2
+    )
 }
 
 fn normalize_item(item: &ScoringItemConfig) -> Result<ScoringItemConfig, String> {
@@ -291,7 +529,10 @@ fn normalize_item(item: &ScoringItemConfig) -> Result<ScoringItemConfig, String>
     })
 }
 
-fn normalize_section(name: &str, section: &ScoringSectionConfig) -> Result<ScoringSectionConfig, String> {
+fn normalize_section(
+    name: &str,
+    section: &ScoringSectionConfig,
+) -> Result<ScoringSectionConfig, String> {
     if section.items.is_empty() {
         return Err(format!("scoring_section_empty:{name}"));
     }
@@ -322,7 +563,8 @@ pub(crate) fn normalize_scoring_template_config(
     let base = config.unwrap_or_else(default_scoring_template_config);
 
     let sum = base.weights.t0 + base.weights.t1 + base.weights.t2 + base.weights.t3;
-    if base.weights.t0 <= 0 || base.weights.t1 <= 0 || base.weights.t2 <= 0 || base.weights.t3 <= 0 {
+    if base.weights.t0 <= 0 || base.weights.t1 <= 0 || base.weights.t2 <= 0 || base.weights.t3 <= 0
+    {
         return Err("scoring_weights_must_be_positive".to_string());
     }
     if sum != 100 {
@@ -378,9 +620,7 @@ fn read_scoring_template_by_id(
     })
 }
 
-fn resolve_resident_default_global_template_id(
-    conn: &Connection,
-) -> Result<Option<i64>, String> {
+fn resolve_resident_default_global_template_id(conn: &Connection) -> Result<Option<i64>, String> {
     let named_default = conn
         .query_row(
             r#"
@@ -691,10 +931,9 @@ fn fallback_score_for_item(
                 };
             }
             if key.contains("rare") || item.label.contains("稀缺") {
-                let has_rare = ctx
-                    .normalized_skills
-                    .iter()
-                    .any(|skill| skill.contains("playwright") || skill.contains("rust") || skill.contains("go"));
+                let has_rare = ctx.normalized_skills.iter().any(|skill| {
+                    skill.contains("playwright") || skill.contains("rust") || skill.contains("go")
+                });
                 return if has_rare { 4.4 } else { 2.4 };
             }
             if key.contains("core") || item.label.contains("核心") || key.contains("skill") {
@@ -755,8 +994,7 @@ fn parse_ai_item_map(items: Option<&Vec<Value>>) -> BTreeMap<String, Value> {
 }
 
 fn as_f64(value: Option<&Value>) -> Option<f64> {
-    value
-        .and_then(|item| item.as_f64().or_else(|| item.as_i64().map(|v| v as f64)))
+    value.and_then(|item| item.as_f64().or_else(|| item.as_i64().map(|v| v as f64)))
 }
 
 fn as_string(value: Option<&Value>) -> String {
@@ -789,13 +1027,11 @@ fn build_section_assessment(
             .unwrap_or(fallback_score);
         let reason = normalize_comment(
             &as_string(ai_item.and_then(|value| value.get("reason"))),
-            "基于候选人资料与岗位要求自动评估。",
-            SECTION_COMMENT_MAX_CHARS,
+            &default_item_reason(section_key, item, score_5, ctx),
         );
         let evidence = normalize_comment(
             &as_string(ai_item.and_then(|value| value.get("evidence"))),
             "证据来源：候选人简历与岗位描述。",
-            SECTION_COMMENT_MAX_CHARS,
         );
 
         scored_items.push(ScoredItem {
@@ -810,11 +1046,10 @@ fn build_section_assessment(
     }
 
     let section_score = section_score_5(&scored_items);
-    let default_comment = format!("{} 区块评分 {:.1}/5", section_key.to_uppercase(), section_score);
+    let default_comment = default_section_comment(section_key, section_score, &scored_items);
     let section_comment = normalize_comment(
         &as_string(ai_section.and_then(|value| value.get("comment"))),
         &default_comment,
-        SECTION_COMMENT_MAX_CHARS,
     );
 
     SectionAssessment {
@@ -824,7 +1059,10 @@ fn build_section_assessment(
     }
 }
 
-fn build_scoring_prompts(template: &ScoringTemplateRecord, ctx: &CandidateScoringContext) -> (String, String) {
+fn build_scoring_prompts(
+    template: &ScoringTemplateRecord,
+    ctx: &CandidateScoringContext,
+) -> (String, String) {
     let system_prompt = r#"你是招聘评分助手。请严格输出 JSON（不要 markdown，不要额外文本）。
 输出结构:
 {
@@ -832,6 +1070,7 @@ fn build_scoring_prompts(template: &ScoringTemplateRecord, ctx: &CandidateScorin
   "t1_assessment": {"items": [{"key": "...", "score_5": 0-5, "reason": "...", "evidence": "..."}], "comment": "..."},
   "t2_assessment": {"items": [{"key": "...", "score_5": 0-5, "reason": "...", "evidence": "..."}], "comment": "..."},
   "t3_assessment": {"items": [{"key": "...", "score_5": 0-5, "reason": "...", "evidence": "..."}], "comment": "..."},
+  "overall_comment": "...",
   "risk_level": "LOW|MEDIUM|HIGH",
   "highlights": ["..."],
   "risks": ["..."],
@@ -841,7 +1080,11 @@ fn build_scoring_prompts(template: &ScoringTemplateRecord, ctx: &CandidateScorin
 1) 只根据输入信息打分，不得编造。
 2) 每个区块 items 的 key 必须来自模板。
 3) score_5 保留 1 位小数。
-4) 语言简洁客观。"#;
+4) 每个指标 reason 为 30 字以内短评，必须包含“简历证据点+判断结论”，禁止空泛描述。
+5) 每个区块 comment 为 300 字以内，必须输出“模块小结”，包含优势、短板和下一步建议。
+6) overall_comment 为 500 字以内，必须包含简历整体概览、分数解读、整体评价、录用建议与行动建议；若超出请自我压缩重写后输出。
+7) 若证据不足，明确写出“信息不足”及需要补充的材料。
+8) 避免套话和重复句式，语言简洁客观。"#;
 
     let payload = serde_json::json!({
         "template": {
@@ -868,6 +1111,7 @@ fn build_scoring_prompts(template: &ScoringTemplateRecord, ctx: &CandidateScorin
             "maxSalaryK": ctx.max_salary_k,
         },
         "resumeParsed": ctx.resume_parsed,
+        "resumeText": ctx.resume_raw_text,
         "resumeExcerpt": trim_resume_excerpt(&ctx.resume_raw_text, 2600),
     });
 
@@ -887,6 +1131,110 @@ fn parse_string_array(value: Option<&Value>) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+}
+
+fn split_chunk_by_chars(text: &str, max_chars: usize) -> Vec<String> {
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut chunks = Vec::<String>::new();
+    let mut current = String::new();
+    let mut count = 0_usize;
+    for ch in text.chars() {
+        current.push(ch);
+        count += 1;
+        if count >= max_chars {
+            chunks.push(current.trim().to_string());
+            current.clear();
+            count = 0;
+        }
+    }
+    if !current.trim().is_empty() {
+        chunks.push(current.trim().to_string());
+    }
+    chunks
+}
+
+fn collect_resume_chunks(ctx: &CandidateScoringContext) -> Vec<String> {
+    let sections = ctx
+        .resume_parsed
+        .get("sections")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut chunks = Vec::<String>::new();
+
+    for section in sections {
+        let title = section
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or("Section")
+            .trim();
+        let content = section
+            .get("content")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim();
+        if content.is_empty() {
+            continue;
+        }
+        for chunk in split_chunk_by_chars(content, 2400) {
+            chunks.push(format!("[{title}]\n{chunk}"));
+        }
+    }
+
+    if chunks.is_empty() {
+        chunks = split_chunk_by_chars(&ctx.resume_raw_text, 2400);
+    }
+
+    chunks
+}
+
+fn invoke_text_generation_map_reduce(
+    settings: &ResolvedAiProviderSettings,
+    system_prompt: &str,
+    user_prompt: &str,
+    ctx: &CandidateScoringContext,
+) -> Result<String, String> {
+    let chunks = collect_resume_chunks(ctx);
+    if chunks.is_empty() {
+        return invoke_text_generation(settings, system_prompt, user_prompt, None);
+    }
+
+    let map_system_prompt = r#"你是招聘信息抽取助手。请仅输出 JSON，不要 markdown。
+输出结构:
+{
+  "facts": ["..."],
+  "skills": ["..."],
+  "highlights": ["..."],
+  "risks": ["..."]
+}
+要求：只根据输入 chunk 内容总结事实，不得编造。"#;
+    let mut mapped_rows = Vec::<Value>::new();
+    for (index, chunk) in chunks.iter().enumerate() {
+        let map_payload = serde_json::json!({
+            "chunkIndex": index + 1,
+            "chunkTotal": chunks.len(),
+            "requiredSkills": ctx.required_skills,
+            "chunkText": chunk,
+        });
+        let map_text = invoke_text_generation(
+            settings,
+            map_system_prompt,
+            &map_payload.to_string(),
+            None,
+        )?;
+        let map_value = parse_json_from_text(&map_text)?;
+        mapped_rows.push(map_value);
+    }
+
+    let base_payload = serde_json::from_str::<Value>(user_prompt)
+        .unwrap_or_else(|_| serde_json::json!({ "rawUserPrompt": user_prompt }));
+    let reduce_payload = serde_json::json!({
+        "baseInput": base_payload,
+        "chunkFacts": mapped_rows,
+    });
+    invoke_text_generation(settings, system_prompt, &reduce_payload.to_string(), None)
 }
 
 fn run_candidate_scoring_blocking<F>(
@@ -928,25 +1276,9 @@ where
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("Candidate {} not found", input.candidate_id))?;
 
-    let (resume_raw_text, resume_parsed): (String, Value) = conn
-        .query_row(
-            "SELECT raw_text, parsed_json FROM resumes WHERE candidate_id = ?1",
-            [input.candidate_id],
-            |row| {
-                let parsed_json_text: String = row.get(1)?;
-                let parsed_json = serde_json::from_str(&parsed_json_text).map_err(|err| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        1,
-                        rusqlite::types::Type::Text,
-                        Box::new(err),
-                    )
-                })?;
-                Ok((row.get(0)?, parsed_json))
-            },
-        )
-        .optional()
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "Resume required before scoring".to_string())?;
+    let materialized_resume = ensure_resume_materialized(&conn, input.candidate_id)?;
+    let resume_raw_text = materialized_resume.raw_text.clone();
+    let resume_parsed = materialized_resume.parsed_value.clone();
 
     let effective_job_id = input.job_id.or(candidate.4);
 
@@ -988,7 +1320,7 @@ where
         })),
     ));
 
-    let extracted_skills = parse_skills(&resume_parsed);
+    let extracted_skills = parse_skills_from_parsed_json(&resume_parsed);
     let normalized_skills = extracted_skills
         .iter()
         .map(|skill| skill.to_lowercase())
@@ -1007,14 +1339,10 @@ where
         matched_skill_count as f64 / required_skills.len() as f64
     };
 
-    let project_mentions = resume_parsed
-        .get("projectMentions")
-        .and_then(|value| value.as_i64())
-        .unwrap_or_else(|| resume_raw_text.matches("项目").count() as i64);
+    let project_mentions = project_mentions_from_parsed_json(&resume_parsed)
+        .max(resume_raw_text.matches("项目").count() as i64);
 
-    let expected_salary_k = resume_parsed
-        .get("expectedSalaryK")
-        .and_then(|value| value.as_f64());
+    let expected_salary_k = expected_salary_k_from_parsed_json(&resume_parsed);
 
     let ctx = CandidateScoringContext {
         candidate_years: candidate.1,
@@ -1033,7 +1361,9 @@ where
         project_mentions,
     };
 
-    let ai_settings = resolve_ai_settings(&conn, &state.cipher).map_err(|error| error.to_string())?;
+    let ai_settings =
+        resolve_ai_settings(&conn, &state.cipher).map_err(|error| error.to_string())?;
+    let resume_attachment = materialized_resume.attachment.clone();
     let mut ai_value = Value::Null;
     if ai_settings.api_key.is_some() {
         on_progress(scoring_progress_update(
@@ -1044,24 +1374,86 @@ where
             None,
         ));
         let (system_prompt, user_prompt) = build_scoring_prompts(&template, &ctx);
-        if let Ok(content) = invoke_text_generation(&ai_settings, &system_prompt, &user_prompt) {
+        let ai_result = if model_supports_file_upload(&ai_settings) && resume_attachment.is_some() {
+            match invoke_text_generation(
+                &ai_settings,
+                &system_prompt,
+                &user_prompt,
+                resume_attachment.as_ref(),
+            ) {
+                Ok(content) => Ok(content),
+                Err(_) => invoke_text_generation_map_reduce(
+                    &ai_settings,
+                    &system_prompt,
+                    &user_prompt,
+                    &ctx,
+                ),
+            }
+        } else {
+            invoke_text_generation_map_reduce(&ai_settings, &system_prompt, &user_prompt, &ctx)
+        };
+        if let Ok(content) = ai_result {
             if let Ok(value) = serde_json::from_str::<Value>(&content) {
                 ai_value = value;
             }
         }
     }
 
-    on_progress(scoring_progress_update("t0", "running", "start", "正在评估 T0 重要指标", None));
-    let t0_assessment = build_section_assessment("t0", &template.config.t0, ai_value.get("t0_assessment"), &ctx);
+    on_progress(scoring_progress_update(
+        "t0",
+        "running",
+        "start",
+        "正在评估 T0 重要指标",
+        None,
+    ));
+    let t0_assessment = build_section_assessment(
+        "t0",
+        &template.config.t0,
+        ai_value.get("t0_assessment"),
+        &ctx,
+    );
 
-    on_progress(scoring_progress_update("t1", "running", "start", "正在评估 T1 指标配置", None));
-    let t1_assessment = build_section_assessment("t1", &template.config.t1, ai_value.get("t1_assessment"), &ctx);
+    on_progress(scoring_progress_update(
+        "t1",
+        "running",
+        "start",
+        "正在评估 T1 指标配置",
+        None,
+    ));
+    let t1_assessment = build_section_assessment(
+        "t1",
+        &template.config.t1,
+        ai_value.get("t1_assessment"),
+        &ctx,
+    );
 
-    on_progress(scoring_progress_update("t2", "running", "start", "正在评估 T2 加分项", None));
-    let t2_assessment = build_section_assessment("t2", &template.config.t2, ai_value.get("t2_assessment"), &ctx);
+    on_progress(scoring_progress_update(
+        "t2",
+        "running",
+        "start",
+        "正在评估 T2 加分项",
+        None,
+    ));
+    let t2_assessment = build_section_assessment(
+        "t2",
+        &template.config.t2,
+        ai_value.get("t2_assessment"),
+        &ctx,
+    );
 
-    on_progress(scoring_progress_update("t3", "running", "start", "正在评估 T3 风险项", None));
-    let t3_assessment = build_section_assessment("t3", &template.config.t3, ai_value.get("t3_assessment"), &ctx);
+    on_progress(scoring_progress_update(
+        "t3",
+        "running",
+        "start",
+        "正在评估 T3 风险项",
+        None,
+    ));
+    let t3_assessment = build_section_assessment(
+        "t3",
+        &template.config.t3,
+        ai_value.get("t3_assessment"),
+        &ctx,
+    );
 
     let overall_score_5 = round_one_decimal(
         t0_assessment.score_5 * (template.config.weights.t0 as f64 / 100.0)
@@ -1077,36 +1469,29 @@ where
         _ => risk_level_from_t3_score(t3_assessment.score_5).to_string(),
     };
 
-    let recommendation = recommendation_from_scores(
-        t0_assessment.score_5,
-        overall_score,
-        &normalized_risk_level,
-    );
+    let recommendation =
+        recommendation_from_scores(t0_assessment.score_5, overall_score, &normalized_risk_level);
 
     let highlights = parse_string_array(ai_value.get("highlights"));
     let risks = parse_string_array(ai_value.get("risks"));
     let suggestions = parse_string_array(ai_value.get("suggestions"));
 
-    let overall_comment_fallback = format!(
-        "综合评分 {:.1}/5（T0 {:.1}、T1 {:.1}、T2 {:.1}、T3 {:.1}），建议 {}。",
+    let overall_comment_fallback = build_overall_comment_fallback(
+        &ctx,
+        &template.config.weights,
         overall_score_5,
-        t0_assessment.score_5,
-        t1_assessment.score_5,
-        t2_assessment.score_5,
-        t3_assessment.score_5,
-        if recommendation == "PASS" {
-            "通过"
-        } else if recommendation == "REVIEW" {
-            "复核"
-        } else {
-            "谨慎推进"
-        }
+        overall_score,
+        &t0_assessment,
+        &t1_assessment,
+        &t2_assessment,
+        &t3_assessment,
+        &recommendation,
+        &normalized_risk_level,
     );
 
     let overall_comment = normalize_comment(
         &as_string(ai_value.get("overall_comment")),
         &overall_comment_fallback,
-        OVERALL_COMMENT_MAX_CHARS,
     );
 
     let structured_result = serde_json::json!({
@@ -1190,7 +1575,13 @@ where
         "suggestions": suggestions,
     });
 
-    on_progress(scoring_progress_update("persist", "running", "start", "正在写入评分结果", None));
+    on_progress(scoring_progress_update(
+        "persist",
+        "running",
+        "start",
+        "正在写入评分结果",
+        None,
+    ));
     let created_at = now_iso();
 
     conn.execute(
@@ -1272,7 +1663,11 @@ pub(crate) fn upsert_scoring_template(
     input: UpsertScoringTemplateInput,
 ) -> Result<ScoringTemplateRecord, String> {
     let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
-    let scope = if input.job_id.is_some() { "job" } else { "global" };
+    let scope = if input.job_id.is_some() {
+        "job"
+    } else {
+        "global"
+    };
     let config = normalize_scoring_template_config(input.config)?;
     let name = input
         .name
@@ -1480,8 +1875,11 @@ pub(crate) fn set_job_scoring_template(
         )
         .map_err(|error| error.to_string())?;
     } else {
-        conn.execute("DELETE FROM job_scoring_overrides WHERE job_id = ?1", [input.job_id])
-            .map_err(|error| error.to_string())?;
+        conn.execute(
+            "DELETE FROM job_scoring_overrides WHERE job_id = ?1",
+            [input.job_id],
+        )
+        .map_err(|error| error.to_string())?;
     }
 
     conn.execute(
@@ -1550,7 +1948,13 @@ pub(crate) async fn run_candidate_scoring(
                 &app_handle,
                 &run_id,
                 candidate_id,
-                scoring_progress_update("persist", "completed", "end", "评分完成并已刷新结果", None),
+                scoring_progress_update(
+                    "persist",
+                    "completed",
+                    "end",
+                    "评分完成并已刷新结果",
+                    None,
+                ),
             );
             Ok(record)
         }
@@ -1627,4 +2031,155 @@ pub(crate) fn list_scoring_results(
 
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_test_context() -> CandidateScoringContext {
+        CandidateScoringContext {
+            candidate_years: 4.0,
+            candidate_stage: "SCREENING".to_string(),
+            candidate_tags: vec!["vue".to_string()],
+            resume_raw_text: "候选人具备完整项目经验与技能信息".to_string(),
+            resume_parsed: serde_json::json!({}),
+            resume_lower: "候选人具备完整项目经验与技能信息".to_string(),
+            required_skills: vec!["vue".to_string()],
+            extracted_skills: vec!["Vue".to_string()],
+            normalized_skills: vec!["vue".to_string()],
+            matched_skill_count: 1,
+            skill_coverage: 1.0,
+            expected_salary_k: Some(35.0),
+            max_salary_k: Some(40.0),
+            project_mentions: 2,
+        }
+    }
+
+    fn build_test_template() -> ScoringTemplateRecord {
+        ScoringTemplateRecord {
+            id: 1,
+            scope: "global".to_string(),
+            job_id: None,
+            name: "测试模板".to_string(),
+            config: default_scoring_template_config(),
+            created_at: "2026-03-01T00:00:00Z".to_string(),
+            updated_at: "2026-03-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn normalize_comment_should_not_truncate_text() {
+        let raw = "这是一个用于验证不会被截断的超长文本";
+        let value = normalize_comment(raw, "fallback");
+        assert_eq!(value, raw);
+    }
+
+    #[test]
+    fn build_section_assessment_reason_should_not_use_generic_fallback() {
+        let section = ScoringSectionConfig {
+            items: vec![ScoringItemConfig {
+                key: "goal_orientation".to_string(),
+                label: "目标导向".to_string(),
+                description: "".to_string(),
+                weight: 100,
+            }],
+        };
+
+        let result = build_section_assessment("t1", &section, None, &build_test_context());
+        assert_eq!(result.items.len(), 1);
+        assert_ne!(result.items[0].reason, "基于候选人资料与岗位要求自动评估。");
+    }
+
+    #[test]
+    fn build_scoring_prompts_should_require_evidence_based_outputs() {
+        let (system_prompt, _user_prompt) =
+            build_scoring_prompts(&build_test_template(), &build_test_context());
+        assert!(system_prompt.contains("简历证据点+判断结论"));
+        assert!(system_prompt.contains("模块小结"));
+        assert!(system_prompt.contains("整体评价"));
+    }
+
+    #[test]
+    fn t0_skill_reason_should_reference_match_ratio() {
+        let section = ScoringSectionConfig {
+            items: vec![ScoringItemConfig {
+                key: "required_skills_match".to_string(),
+                label: "岗位技能匹配".to_string(),
+                description: "".to_string(),
+                weight: 100,
+            }],
+        };
+
+        let result = build_section_assessment("t0", &section, None, &build_test_context());
+        assert_eq!(result.items.len(), 1);
+        assert!(result.items[0].reason.contains("/"));
+    }
+
+    #[test]
+    fn section_comment_fallback_should_include_module_summary_and_advice() {
+        let section = ScoringSectionConfig {
+            items: vec![
+                ScoringItemConfig {
+                    key: "goal_orientation".to_string(),
+                    label: "目标导向".to_string(),
+                    description: "".to_string(),
+                    weight: 50,
+                },
+                ScoringItemConfig {
+                    key: "team_collaboration".to_string(),
+                    label: "团队协作".to_string(),
+                    description: "".to_string(),
+                    weight: 50,
+                },
+            ],
+        };
+
+        let result = build_section_assessment("t1", &section, None, &build_test_context());
+        assert!(result.comment.contains("小结"));
+        assert!(result.comment.contains("优势"));
+        assert!(result.comment.contains("建议"));
+    }
+
+    #[test]
+    fn overall_comment_fallback_should_include_resume_context_and_suggestion() {
+        let ctx = build_test_context();
+        let template = build_test_template();
+        let t0 = SectionAssessment {
+            score_5: 4.2,
+            items: vec![],
+            comment: "T0小结".to_string(),
+        };
+        let t1 = SectionAssessment {
+            score_5: 4.0,
+            items: vec![],
+            comment: "T1小结".to_string(),
+        };
+        let t2 = SectionAssessment {
+            score_5: 3.9,
+            items: vec![],
+            comment: "T2小结".to_string(),
+        };
+        let t3 = SectionAssessment {
+            score_5: 3.3,
+            items: vec![],
+            comment: "T3小结".to_string(),
+        };
+        let comment = build_overall_comment_fallback(
+            &ctx,
+            &template.config.weights,
+            4.0,
+            80,
+            &t0,
+            &t1,
+            &t2,
+            &t3,
+            "REVIEW",
+            "MEDIUM",
+        );
+
+        assert!(comment.contains("年经验"));
+        assert!(comment.contains("技能匹配"));
+        assert!(comment.contains("建议"));
+    }
 }

@@ -27,12 +27,11 @@ import { buildCandidateManualPayload } from "../lib/candidate-form";
 import { formatStageLabel } from "../lib/pipeline";
 import {
   resolveStructuredScoringViewModel,
-  riskSeverityTone,
 } from "../lib/scoring-structured";
 import { resolveScoringRerunFeedback } from "../lib/scoring-rerun-feedback";
 import { stageTone } from "../lib/status";
 import { normalizeSortRules } from "../lib/table-sort";
-import { listCandidatesPage } from "../services/backend";
+import { deleteResume, getResume, listCandidatesPage } from "../services/backend";
 import { useRecruitingStore } from "../stores/recruiting";
 import { useToastStore } from "../stores/toast";
 
@@ -112,6 +111,14 @@ const creatingCandidate = ref(false);
 const savingDetail = ref(false);
 const createResumeFile = ref<File | null>(null);
 const createResumeInput = ref<HTMLInputElement | null>(null);
+const detailResumeFile = ref<File | null>(null);
+const detailResumeInput = ref<HTMLInputElement | null>(null);
+const detailResumeUploading = ref(false);
+const detailResumeRemoving = ref(false);
+const detailResumeEnableOcr = ref(false);
+const detailResumeUploadTip = ref("");
+const detailPersistedResumeFileName = ref("");
+const resumeFileNameByCandidate = ref<Record<number, string>>({});
 const analysisProgressVisible = ref(false);
 const analysisProgressMinimized = ref(false);
 const analysisProgressStepIndex = ref(0);
@@ -268,6 +275,10 @@ const genderOptions = [
 
 const resumeAccept = ".pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.bmp,.tif,.tiff";
 const selectedResumeFileName = computed(() => createResumeFile.value?.name || "");
+const hasDetailResumeSelection = computed(() => Boolean(detailResumeFile.value?.name));
+const hasDetailPersistedResume = computed(() => Boolean(detailPersistedResumeFileName.value));
+const detailResumeFileName = computed(() => detailResumeFile.value?.name || detailPersistedResumeFileName.value);
+const detailResumeFileLabel = computed(() => (hasDetailResumeSelection.value ? "待上传文件" : "已上传文件"));
 
 function formatScore5(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) {
@@ -385,6 +396,45 @@ function clearCreateResume() {
   createResumeFile.value = null;
   if (createResumeInput.value) {
     createResumeInput.value.value = "";
+  }
+}
+
+function onDetailResumeChange(event: Event) {
+  const target = event.target as HTMLInputElement | null;
+  const file = target?.files?.[0];
+  detailResumeFile.value = file ?? null;
+  detailResumeUploadTip.value = "";
+  if (file) {
+    void uploadDetailResume(file);
+  }
+}
+
+function clearDetailResume() {
+  detailResumeFile.value = null;
+  detailResumeEnableOcr.value = false;
+  detailResumeUploadTip.value = "";
+  if (detailResumeInput.value) {
+    detailResumeInput.value.value = "";
+  }
+}
+
+function openDetailResumePicker() {
+  if (savingDetail.value || actionLoading.value || detailResumeUploading.value || detailResumeRemoving.value) {
+    return;
+  }
+  detailResumeInput.value?.click();
+}
+
+async function loadDetailResumeSnapshot(candidateId: number) {
+  const resume = await getResume(candidateId);
+  const fileName = (resume?.original_file_name ?? "").trim();
+  if (fileName) {
+    resumeFileNameByCandidate.value[candidateId] = fileName;
+  } else {
+    delete resumeFileNameByCandidate.value[candidateId];
+  }
+  if (selectedCandidateId.value === candidateId) {
+    detailPersistedResumeFileName.value = fileName;
   }
 }
 
@@ -633,10 +683,17 @@ async function saveCandidate() {
 async function openDrawer(candidate: CandidateRecord) {
   selectedCandidateId.value = candidate.id;
   fillDetailForm(candidate);
+  detailPersistedResumeFileName.value = resumeFileNameByCandidate.value[candidate.id] ?? "";
   drawerOpen.value = true;
   drawerLoading.value = true;
   try {
-    await store.loadCandidateContext(candidate.id);
+    const [contextResult] = await Promise.allSettled([
+      store.loadCandidateContext(candidate.id),
+      loadDetailResumeSnapshot(candidate.id),
+    ]);
+    if (contextResult.status === "rejected") {
+      throw contextResult.reason;
+    }
   } catch (error) {
     toast.warning(resolveErrorMessage(error, "候选人上下文加载失败"));
   } finally {
@@ -667,6 +724,7 @@ async function removeCandidate() {
   deletingCandidateId.value = candidate.id;
   try {
     await store.deleteCandidate(candidate.id);
+    delete resumeFileNameByCandidate.value[candidate.id];
     deleteConfirmCandidate.value = null;
     if (selectedCandidateId.value === candidate.id) {
       selectedCandidateId.value = null;
@@ -731,35 +789,95 @@ async function saveCandidateDetail() {
   }
 }
 
-async function rerunScreening() {
+async function uploadDetailResume(file?: File) {
+  const targetFile = file ?? detailResumeFile.value;
+  if (!selectedCandidate.value || !targetFile || detailResumeUploading.value || detailResumeRemoving.value) {
+    return;
+  }
+  const candidateId = selectedCandidate.value.id;
+  const jobId = selectedCandidate.value.job_id ?? undefined;
+  detailResumeUploading.value = true;
+  detailResumeUploadTip.value = "正在上传简历...";
+  try {
+    await store.importResumeFile({
+      candidateId,
+      file: targetFile,
+      enableOcr: detailResumeEnableOcr.value,
+      jobId,
+    });
+    const uploadedName = targetFile.name.trim();
+    if (uploadedName) {
+      resumeFileNameByCandidate.value[candidateId] = uploadedName;
+      detailPersistedResumeFileName.value = uploadedName;
+    }
+    await Promise.allSettled([
+      store.loadCandidateContext(candidateId),
+      loadDetailResumeSnapshot(candidateId),
+    ]);
+    detailResumeUploadTip.value = "简历已上传";
+    toast.success("简历上传成功");
+  } catch (error) {
+    detailResumeUploadTip.value = "上传失败，请重新选择";
+    toast.danger(resolveErrorMessage(error, "简历上传失败"));
+  } finally {
+    detailResumeUploading.value = false;
+  }
+}
+
+async function removeDetailResume() {
+  if (!selectedCandidate.value || detailResumeUploading.value || detailResumeRemoving.value) {
+    return;
+  }
+  const candidateId = selectedCandidate.value.id;
+  detailResumeRemoving.value = true;
+  detailResumeUploadTip.value = "正在移除简历...";
+  try {
+    const removeFromStore = (store as unknown as {
+      removeResume?: (id: number) => Promise<boolean>;
+    }).removeResume;
+    const removed = typeof removeFromStore === "function"
+      ? await removeFromStore(candidateId)
+      : await deleteResume(candidateId);
+    if (typeof removeFromStore !== "function") {
+      await store.refreshMetrics();
+    }
+    detailPersistedResumeFileName.value = "";
+    delete resumeFileNameByCandidate.value[candidateId];
+    await Promise.allSettled([
+      store.loadCandidateContext(candidateId),
+      loadDetailResumeSnapshot(candidateId),
+    ]);
+    detailResumeUploadTip.value = removed ? "简历已移除" : "当前无已上传简历";
+    if (removed) {
+      toast.success("简历已移除");
+    } else {
+      toast.warning("当前无已上传简历");
+    }
+  } catch (error) {
+    detailResumeUploadTip.value = "移除失败，请重试";
+    toast.danger(resolveErrorMessage(error, "移除简历失败"));
+  } finally {
+    detailResumeRemoving.value = false;
+  }
+}
+
+async function rerunScoring() {
   if (!selectedCandidate.value || actionLoading.value) {
     return;
   }
   const candidateId = selectedCandidate.value.id;
   const jobId = selectedCandidate.value.job_id ?? undefined;
   const runId = `scoring-${candidateId}-${Date.now()}`;
-  const timeoutMs = 90_000;
-  let timeoutId: ReturnType<typeof setTimeout> | null = null;
   actionLoading.value = true;
   startAnalysisProgress(runId, candidateId);
   try {
     await setupAnalysisProgressListener(runId, candidateId);
-    await Promise.race([
-      store.runScreening(candidateId, jobId, runId),
-      new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(() => {
-          reject(new Error("scoring_timeout"));
-        }, timeoutMs);
-      }),
-    ]);
+    await store.runScoring(candidateId, jobId, runId);
     await store.loadCandidateContext(candidateId);
     finishAnalysisProgress("completed", "评分完成并已刷新结果");
     toast.success("评分结果已更新");
   } catch (error) {
-    const normalizedError = error instanceof Error && error.message === "scoring_timeout"
-      ? new Error("评分超时，请重试")
-      : error;
-    const feedback = resolveScoringRerunFeedback(normalizedError, "重新分析失败");
+    const feedback = resolveScoringRerunFeedback(error, "重新分析失败");
     finishAnalysisProgress("failed", feedback.message);
     if (feedback.tone === "warning") {
       toast.warning(feedback.message);
@@ -767,9 +885,6 @@ async function rerunScreening() {
     }
     toast.danger(feedback.message);
   } finally {
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-    }
     actionLoading.value = false;
   }
 }
@@ -861,6 +976,14 @@ watch(() => filters.nameLike, () => {
   filterNameLikeTimer = setTimeout(() => {
     reloadRowsFromFilters();
   }, 250);
+});
+
+watch(drawerOpen, (open) => {
+  if (!open) {
+    clearDetailResume();
+    detailPersistedResumeFileName.value = "";
+    detailResumeRemoving.value = false;
+  }
 });
 
 onMounted(async () => {
@@ -1126,19 +1249,83 @@ onUnmounted(() => {
             <UiField class="col-span-2 lt-lg:col-span-1" label="标签" help="多个标签可用英文逗号、中文逗号或换行分隔">
               <input v-model="detailForm.tagsText" :disabled="savingDetail" placeholder="例如：Vue, TypeScript, 稳定" />
             </UiField>
+            <UiField class="col-span-2 lt-lg:col-span-1" label="简历上传" help="支持 .pdf .docx .txt .md 以及图片格式">
+              <div class="relative">
+                <input
+                  ref="detailResumeInput"
+                  type="file"
+                  :accept="resumeAccept"
+                  :disabled="savingDetail || actionLoading || detailResumeUploading || detailResumeRemoving"
+                  class="pointer-events-none absolute h-0 w-0 opacity-0"
+                  @change="onDetailResumeChange"
+                />
+                <div class="flex items-center gap-2 rounded-xl border border-line bg-card px-2 py-1.5">
+                  <button
+                    type="button"
+                    class="shrink-0 rounded-lg border border-line bg-base px-3 py-1.5 text-sm text-fg hover:bg-card disabled:cursor-not-allowed disabled:opacity-60"
+                    :disabled="savingDetail || actionLoading || detailResumeUploading || detailResumeRemoving"
+                    @click="openDetailResumePicker"
+                  >
+                    选择文件
+                  </button>
+                  <input
+                    type="text"
+                    readonly
+                    :value="detailResumeFileName || '未选择文件'"
+                    class="min-w-0 flex-1 border-none bg-transparent px-1 py-1 text-sm text-muted outline-none"
+                  />
+                  <button
+                    v-if="hasDetailResumeSelection"
+                    type="button"
+                    class="h-5 w-5 shrink-0 rounded-full border border-line bg-card text-xs text-muted hover:text-fg"
+                    :disabled="savingDetail || actionLoading || detailResumeUploading || detailResumeRemoving"
+                    @click="clearDetailResume"
+                  >
+                    ×
+                  </button>
+                </div>
+              </div>
+              <label class="mt-2 inline-flex items-center gap-2 text-xs text-muted">
+                <input
+                  v-model="detailResumeEnableOcr"
+                  type="checkbox"
+                  :disabled="savingDetail || actionLoading || detailResumeUploading || detailResumeRemoving"
+                />
+                <span>文本为空时启用 OCR（适用于扫描件）</span>
+              </label>
+              <div v-if="hasDetailPersistedResume" class="mt-2 flex items-center gap-2">
+                <UiButton
+                  variant="ghost"
+                  type="button"
+                  :disabled="savingDetail || actionLoading || detailResumeUploading || detailResumeRemoving"
+                  @click="removeDetailResume"
+                >
+                  {{ detailResumeRemoving ? "移除中..." : "移除已上传简历" }}
+                </UiButton>
+              </div>
+              <p v-if="detailResumeFileName" class="m-0 mt-2 text-xs text-muted truncate">
+                {{ detailResumeFileLabel }}：{{ detailResumeFileName }}
+              </p>
+              <p v-if="hasDetailPersistedResume && !hasDetailResumeSelection" class="m-0 mt-1 text-xs text-muted">
+                重新选择文件并上传将覆盖当前简历
+              </p>
+              <p v-if="detailResumeUploadTip" class="m-0 mt-1 text-xs text-muted">
+                {{ detailResumeUploadTip }}
+              </p>
+            </UiField>
           </div>
 
           <div class="mt-3 flex flex-wrap gap-2">
             <UiButton :disabled="savingDetail || actionLoading" @click="saveCandidateDetail">
               {{ savingDetail ? "保存中..." : "保存修改" }}
             </UiButton>
-            <UiButton :disabled="savingDetail || actionLoading" @click="rerunScreening">重新分析</UiButton>
+            <UiButton :disabled="savingDetail || actionLoading" @click="rerunScoring">重新分析</UiButton>
             <UiButton variant="secondary" :disabled="savingDetail || actionLoading" @click="goInterview">邀约面试</UiButton>
             <UiButton variant="ghost" :disabled="savingDetail || actionLoading" @click="rejectCandidate">遗憾</UiButton>
           </div>
         </UiPanel>
 
-        <UiPanel v-if="selectedScoring.length && selectedStructuredAssessment" class="mt-3" title="结构化 AI 评分">
+        <UiPanel v-if="selectedScoring.length && selectedStructuredAssessment" class="mt-3" title="AI评估">
           <div class="flex items-center gap-2 mb-2 flex-wrap">
             <UiBadge :tone="screeningTone(selectedScoring[0].recommendation)">
               {{ screeningRecommendationLabel(selectedScoring[0].recommendation) }}
@@ -1146,6 +1333,7 @@ onUnmounted(() => {
             <UiBadge :tone="selectedScoring[0].risk_level === 'HIGH' ? 'danger' : selectedScoring[0].risk_level === 'MEDIUM' ? 'warning' : 'info'">
               {{ screeningRiskLabel(selectedScoring[0].risk_level) }}
             </UiBadge>
+            <p class="m-0 text-xs text-muted">模板：{{ selectedStructuredAssessment.templateName }}</p>
           </div>
 
           <div class="rounded-xl border border-line bg-card/70 p-3">
@@ -1170,15 +1358,28 @@ onUnmounted(() => {
                 <p class="m-0">T3：{{ formatScore5(selectedStructuredAssessment.subscores.t3) }}</p>
               </div>
             </div>
-            <p class="m-0 mt-2 text-sm leading-6">{{ selectedStructuredAssessment.overallComment }}</p>
+            <div class="mt-3 border-t border-line pt-2">
+              <p class="m-0 text-sm font-700">整体总结</p>
+              <p class="m-0 mt-1 text-sm leading-6">{{ selectedStructuredAssessment.overallComment }}</p>
+            </div>
           </div>
 
-          <div class="mt-3 rounded-xl border border-line bg-card/70 p-3">
-            <div class="mb-2 flex items-center justify-between gap-2 flex-wrap">
-              <p class="m-0 text-sm font-700">模板维度评分</p>
-              <p class="m-0 text-xs text-muted">{{ selectedStructuredAssessment.templateName }}</p>
+          <div
+            v-for="module in selectedStructuredAssessment.modules"
+            :key="module.key"
+            class="mt-3 rounded-xl border border-line bg-card/70 p-3"
+          >
+            <div class="flex items-center justify-between gap-2 flex-wrap">
+              <p class="m-0 text-sm font-700">{{ module.title }}</p>
+              <div class="flex items-center gap-2">
+                <span class="text-xs text-muted">权重 {{ module.weight }}%</span>
+                <span class="text-xs text-muted">模块分 {{ formatScore5(module.score5) }} / 5</span>
+              </div>
             </div>
-            <div class="overflow-x-auto">
+
+            <p class="m-0 mt-2 text-sm text-muted leading-6">{{ module.comment }}</p>
+
+            <div class="mt-2 overflow-x-auto">
               <table class="w-full border-collapse text-sm">
                 <thead>
                   <tr class="text-left text-muted">
@@ -1188,66 +1389,24 @@ onUnmounted(() => {
                 </thead>
                 <tbody>
                   <tr
-                    v-for="item in selectedStructuredAssessment.templateItems"
-                    :key="item.key"
+                    v-for="item in module.items"
+                    :key="`${module.key}-${item.key}`"
                     class="border-t border-line align-top"
                   >
                     <td class="px-2 py-2">
                       <p class="m-0 font-600">{{ item.label }}（{{ item.weight }}%）</p>
-                      <p class="m-0 mt-1 text-xs text-muted leading-5">{{ item.comment }}</p>
+                      <p class="m-0 mt-1 text-xs text-muted leading-5">{{ item.reason }}</p>
                     </td>
                     <td class="px-2 py-2 whitespace-nowrap">
-                      <p class="m-0">
-                        {{ formatScore5(item.score5) }} / 5
-                      </p>
-                      <p class="m-0 mt-1 text-xs text-muted">
-                        {{ item.score100 ?? "-" }} / 100
-                      </p>
+                      <p class="m-0">{{ formatScore5(item.score5) }} / 5</p>
                     </td>
                   </tr>
-                  <tr v-if="selectedStructuredAssessment.templateItems.length === 0">
-                    <td colspan="2" class="px-2 py-3 text-center text-muted">暂无模板维度结果</td>
+                  <tr v-if="module.items.length === 0">
+                    <td colspan="2" class="px-2 py-3 text-center text-muted">暂无模块指标结果</td>
                   </tr>
                 </tbody>
               </table>
             </div>
-          </div>
-
-          <div class="mt-3 rounded-xl border border-line bg-card/70 p-3">
-            <div class="flex items-center justify-between gap-2 flex-wrap">
-              <p class="m-0 text-sm font-700">加分项评估</p>
-              <p class="m-0 text-xs text-muted">加分项评分 {{ formatScore5(selectedStructuredAssessment.bonusScore5) }} / 5</p>
-            </div>
-            <ul class="m-0 mt-2 list-disc pl-4 text-sm leading-6">
-              <li v-for="item in selectedStructuredAssessment.bonusItems" :key="item.title">
-                <span class="font-600">{{ item.title }}</span>
-                <span v-if="item.score5 !== null">（{{ formatScore5(item.score5) }} / 5）</span>
-                <span class="text-muted"> - {{ item.comment }}</span>
-              </li>
-              <li v-if="selectedStructuredAssessment.bonusItems.length === 0" class="text-muted">暂无明显加分项</li>
-            </ul>
-            <p class="m-0 mt-2 text-sm text-muted leading-6">{{ selectedStructuredAssessment.bonusComment }}</p>
-          </div>
-
-          <div class="mt-3 rounded-xl border border-line bg-card/70 p-3">
-            <div class="flex items-center justify-between gap-2 flex-wrap">
-              <p class="m-0 text-sm font-700">风险评估</p>
-              <div class="flex items-center gap-2">
-                <UiBadge :tone="selectedScoring[0].risk_level === 'HIGH' ? 'danger' : selectedScoring[0].risk_level === 'MEDIUM' ? 'warning' : 'info'">
-                  {{ screeningRiskLabel(selectedScoring[0].risk_level) }}
-                </UiBadge>
-                <span class="text-xs text-muted">风险分 {{ formatScore5(selectedStructuredAssessment.riskScore5) }} / 5</span>
-              </div>
-            </div>
-            <ul class="m-0 mt-2 list-disc pl-4 text-sm leading-6">
-              <li v-for="(item, index) in selectedStructuredAssessment.riskItems" :key="`${item.title}-${index}`">
-                <span class="font-600">{{ item.title }}</span>
-                <UiBadge class="ml-1" :tone="riskSeverityTone(item.severity)">{{ item.severity }}</UiBadge>
-                <span class="text-muted"> - {{ item.comment }}</span>
-              </li>
-              <li v-if="selectedStructuredAssessment.riskItems.length === 0" class="text-muted">暂无显著风险项</li>
-            </ul>
-            <p class="m-0 mt-2 text-sm text-muted leading-6">{{ selectedStructuredAssessment.riskComment }}</p>
           </div>
 
           <div v-if="selectedStructuredAssessment.riskAlerts.length" class="mt-3 rounded-xl border border-line p-3">

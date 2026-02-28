@@ -9,7 +9,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 import {
   checkSidecarHealth,
   ensureSidecar,
-  createScreeningTemplate,
+  createScoringTemplate,
   createCandidate,
   createCrawlTask,
   createJob,
@@ -17,24 +17,24 @@ import {
   deleteCrawlTask,
   deleteAiProviderProfile,
   deleteJob,
-  deleteScreeningTemplate,
+  deleteScoringTemplate,
   finalizeHiringDecision,
   listCandidatesPage,
   listDecisionCandidatesPage,
   listInterviewCandidatesPage,
   listPendingCandidates,
   listAnalysis,
+  deleteResume,
+  getResume,
   listHiringDecisions,
   listInterviewEvaluations,
   listPipelineEvents,
-  listScreeningTemplates,
-  listScreeningResults,
-  parseResumeFile,
+  listScoringTemplates,
+  listScoringResults,
   generateInterviewKit,
-  getScreeningTemplate,
-  runCandidateAnalysis,
+  getScoringTemplate,
+  runCandidateScoring,
   runInterviewEvaluation,
-  runResumeScreening,
   saveInterviewRecording,
   saveInterviewKit,
   setCandidateQualification,
@@ -45,17 +45,18 @@ import {
   triggerSidecarCrawlCandidates,
   triggerSidecarCrawlJobs,
   triggerSidecarCrawlResume,
-  setJobScreeningTemplate,
+  setJobScoringTemplate,
   stopJob,
   listCrawlTaskPeople,
   updateCandidate,
   updateJob,
-  updateScreeningTemplate,
+  updateScoringTemplate,
   updateCrawlTask,
   updateCrawlTaskPeopleSync,
   upsertResume,
   upsertCrawlTaskPeople,
   upsertPendingCandidates,
+  upsertScoringTemplate,
   upsertTaskRuntimeSettings,
 } from "./backend";
 
@@ -169,17 +170,17 @@ describe("backend AI profile commands", () => {
     });
   });
 
-  it("passes snake_case args for screening commands", async () => {
-    await getScreeningTemplate(12);
-    await runResumeScreening({
+  it("passes snake_case args for scoring commands", async () => {
+    await getScoringTemplate(12);
+    await runCandidateScoring({
       candidate_id: 101,
       job_id: 12,
     });
 
-    expect(invokeMock).toHaveBeenCalledWith("get_screening_template", {
+    expect(invokeMock).toHaveBeenCalledWith("get_scoring_template", {
       job_id: 12,
     });
-    expect(invokeMock).toHaveBeenCalledWith("run_resume_screening", {
+    expect(invokeMock).toHaveBeenCalledWith("run_candidate_scoring", {
       input: {
         candidate_id: 101,
         job_id: 12,
@@ -190,10 +191,12 @@ describe("backend AI profile commands", () => {
   it("passes camelCase args for candidate timeline and analysis commands", async () => {
     await listPipelineEvents(101);
     await listAnalysis(102);
-    await listScreeningResults(103);
+    await getResume(102);
+    await deleteResume(102);
+    await listScoringResults(103);
     await listHiringDecisions(104);
     await listInterviewEvaluations(105);
-    await runCandidateAnalysis({
+    await runCandidateScoring({
       candidate_id: 106,
       job_id: 12,
       run_id: "run-106",
@@ -205,7 +208,15 @@ describe("backend AI profile commands", () => {
     expect(invokeMock).toHaveBeenCalledWith("list_analysis", {
       candidateId: 102,
     });
-    expect(invokeMock).toHaveBeenCalledWith("list_screening_results", {
+    expect(invokeMock).toHaveBeenCalledWith("get_resume", {
+      candidateId: 102,
+      candidate_id: 102,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("delete_resume", {
+      candidateId: 102,
+      candidate_id: 102,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("list_scoring_results", {
       candidateId: 103,
     });
     expect(invokeMock).toHaveBeenCalledWith("list_hiring_decisions", {
@@ -214,7 +225,7 @@ describe("backend AI profile commands", () => {
     expect(invokeMock).toHaveBeenCalledWith("list_interview_evaluations", {
       candidateId: 105,
     });
-    expect(invokeMock).toHaveBeenCalledWith("run_candidate_analysis", {
+    expect(invokeMock).toHaveBeenCalledWith("run_candidate_scoring", {
       input: {
         candidate_id: 106,
         job_id: 12,
@@ -323,11 +334,6 @@ describe("backend AI profile commands", () => {
         skills: ["vue3"],
       },
     });
-    await parseResumeFile({
-      file_name: "resume.pdf",
-      content_base64: "aGVsbG8=",
-      enable_ocr: true,
-    });
     await createCrawlTask({
       source: "boss",
       mode: "compliant",
@@ -382,13 +388,6 @@ describe("backend AI profile commands", () => {
         parsed: {
           skills: ["vue3"],
         },
-      },
-    });
-    expect(invokeMock).toHaveBeenCalledWith("parse_resume_file", {
-      input: {
-        file_name: "resume.pdf",
-        content_base64: "aGVsbG8=",
-        enable_ocr: true,
       },
     });
     expect(invokeMock).toHaveBeenCalledWith("create_crawl_task", {
@@ -523,76 +522,50 @@ describe("backend AI profile commands", () => {
     });
   });
 
-  it("passes payloads for screening template list/crud and job binding commands", async () => {
-    await listScreeningTemplates();
-    await createScreeningTemplate({
-      name: "前端筛选模板",
-      dimensions: [
-        {
-          key: "goal_orientation",
-          label: "目标导向",
-          weight: 100,
-        },
-      ],
-      risk_rules: {
-        highRiskKeywords: ["频繁跳槽"],
-      },
+  it("passes payloads for scoring template list/crud and job binding commands", async () => {
+    await listScoringTemplates();
+    await createScoringTemplate({
+      name: "前端评分模板",
     });
-    await updateScreeningTemplate({
+    await updateScoringTemplate({
       template_id: 6,
-      name: "前端筛选模板 v2",
-      dimensions: [
-        {
-          key: "team_collaboration",
-          label: "团队协作",
-          weight: 100,
-        },
-      ],
-      risk_rules: {},
+      name: "前端评分模板 v2",
     });
-    await setJobScreeningTemplate({
+    await upsertScoringTemplate({
+      job_id: 12,
+      name: "岗位评分模板",
+    });
+    await setJobScoringTemplate({
       job_id: 12,
       template_id: 6,
     });
-    await deleteScreeningTemplate(6);
+    await deleteScoringTemplate(6);
 
-    expect(invokeMock).toHaveBeenCalledWith("list_screening_templates");
-    expect(invokeMock).toHaveBeenCalledWith("create_screening_template", {
+    expect(invokeMock).toHaveBeenCalledWith("list_scoring_templates");
+    expect(invokeMock).toHaveBeenCalledWith("create_scoring_template", {
       input: {
-        name: "前端筛选模板",
-        dimensions: [
-          {
-            key: "goal_orientation",
-            label: "目标导向",
-            weight: 100,
-          },
-        ],
-        risk_rules: {
-          highRiskKeywords: ["频繁跳槽"],
-        },
+        name: "前端评分模板",
       },
     });
-    expect(invokeMock).toHaveBeenCalledWith("update_screening_template", {
+    expect(invokeMock).toHaveBeenCalledWith("update_scoring_template", {
       input: {
         template_id: 6,
-        name: "前端筛选模板 v2",
-        dimensions: [
-          {
-            key: "team_collaboration",
-            label: "团队协作",
-            weight: 100,
-          },
-        ],
-        risk_rules: {},
+        name: "前端评分模板 v2",
       },
     });
-    expect(invokeMock).toHaveBeenCalledWith("set_job_screening_template", {
+    expect(invokeMock).toHaveBeenCalledWith("upsert_scoring_template", {
+      input: {
+        job_id: 12,
+        name: "岗位评分模板",
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith("set_job_scoring_template", {
       input: {
         job_id: 12,
         template_id: 6,
       },
     });
-    expect(invokeMock).toHaveBeenCalledWith("delete_screening_template", {
+    expect(invokeMock).toHaveBeenCalledWith("delete_scoring_template", {
       templateId: 6,
     });
   });

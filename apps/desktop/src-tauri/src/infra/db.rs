@@ -77,6 +77,17 @@ pub(crate) fn migrate_db(db_path: &Path) -> AppResult<()> {
             FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS resume_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_id INTEGER NOT NULL UNIQUE,
+            file_name TEXT NOT NULL,
+            content_type TEXT,
+            content_blob BLOB NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS analysis_results (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             candidate_id INTEGER NOT NULL,
@@ -351,6 +362,7 @@ pub(crate) fn migrate_db(db_path: &Path) -> AppResult<()> {
         CREATE INDEX IF NOT EXISTS idx_jobs_updated_at ON jobs(updated_at);
         CREATE INDEX IF NOT EXISTS idx_candidates_updated_at ON candidates(updated_at);
         CREATE INDEX IF NOT EXISTS idx_candidates_stage ON candidates(stage);
+        CREATE INDEX IF NOT EXISTS idx_resume_files_candidate ON resume_files(candidate_id);
         CREATE INDEX IF NOT EXISTS idx_applications_job_stage ON applications(job_id, stage);
         CREATE INDEX IF NOT EXISTS idx_crawl_tasks_status ON crawl_tasks(status);
         CREATE INDEX IF NOT EXISTS idx_crawl_task_people_task ON crawl_task_people(task_id, updated_at DESC);

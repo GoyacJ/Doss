@@ -261,6 +261,8 @@ export interface ResumeRecord {
   source: string;
   raw_text: string;
   parsed: Record<string, unknown>;
+  original_file_name?: string | null;
+  original_file_content_type?: string | null;
   created_at: string;
   updated_at: string;
 }
