@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import type { CandidateRecord, SortRule } from "@doss/shared";
 import { useRoute, useRouter } from "vue-router";
 import UiBadge from "../components/UiBadge.vue";
@@ -11,7 +11,6 @@ import UiSelect from "../components/UiSelect.vue";
 import UiTableFilterPanel from "../components/UiTableFilterPanel.vue";
 import UiTable from "../components/UiTable.vue";
 import UiTablePagination from "../components/UiTablePagination.vue";
-import UiTableToolbar from "../components/UiTableToolbar.vue";
 import UiTd from "../components/UiTd.vue";
 import UiTh from "../components/UiTh.vue";
 import { formatStageLabel } from "../lib/pipeline";
@@ -79,6 +78,8 @@ function sortByColumn(payload: { field: string; direction: "asc" | "desc" }) {
   ];
   sorts.value = normalizeSortRules(next, sortOptions.map((item) => item.value));
 }
+
+let filterNameLikeTimer: ReturnType<typeof setTimeout> | null = null;
 
 const drawerOpen = ref(false);
 const drawerLoading = ref(false);
@@ -203,8 +204,11 @@ async function loadRows() {
   }
 }
 
-function applyFilters() {
-  page.value = 1;
+function reloadRowsFromFilters() {
+  if (page.value !== 1) {
+    page.value = 1;
+    return;
+  }
   void loadRows();
 }
 
@@ -469,6 +473,19 @@ watch(
   { deep: true },
 );
 
+watch(() => filters.jobId, () => {
+  reloadRowsFromFilters();
+});
+
+watch(() => filters.nameLike, () => {
+  if (filterNameLikeTimer) {
+    clearTimeout(filterNameLikeTimer);
+  }
+  filterNameLikeTimer = setTimeout(() => {
+    reloadRowsFromFilters();
+  }, 250);
+});
+
 onMounted(async () => {
   await Promise.allSettled([
     store.bootstrap(),
@@ -483,19 +500,28 @@ onMounted(async () => {
     }
   }
 });
+
+onUnmounted(() => {
+  if (filterNameLikeTimer) {
+    clearTimeout(filterNameLikeTimer);
+  }
+});
 </script>
 
 <template>
   <section class="flex flex-col gap-4">
-    <UiPanel title="待面试列表">
-      <UiTableToolbar
-        v-model:quick-keyword="filters.nameLike"
-        v-model:advanced-open="advancedFilterOpen"
-        :disabled="loading"
-        quick-placeholder="输入姓名关键词"
-        @apply="applyFilters"
-        @refresh="loadRows"
-      />
+    <UiPanel>
+      <template #header>
+        <div class="mb-1 flex flex-col items-start gap-2">
+          <h3 class="m-0 text-lg font-700">待面试列表</h3>
+          <input
+            v-model="filters.nameLike"
+            class="interview-header-input w-full max-w-80 lt-sm:max-w-full"
+            placeholder="输入姓名关键词"
+            :disabled="loading"
+          />
+        </div>
+      </template>
 
       <UiTableFilterPanel v-model:open="advancedFilterOpen">
         <UiField label="职位筛选">
@@ -678,3 +704,11 @@ onMounted(async () => {
     </div>
   </Teleport>
 </template>
+
+<style scoped>
+.interview-header-input {
+  min-height: 40px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+</style>

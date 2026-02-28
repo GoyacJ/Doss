@@ -641,22 +641,21 @@ onMounted(async () => {
 
 <template>
   <section class="flex flex-col gap-4">
-    <header class="flex items-center justify-between gap-3">
+    <header class="flex items-center gap-3">
       <h2 class="text-2xl font-700">采集任务</h2>
-      <div class="flex items-center gap-2">
-        <UiButton variant="secondary" @click="store.refreshTasks">刷新</UiButton>
-        <UiButton @click="openCreateModal">新增采集任务</UiButton>
-      </div>
     </header>
 
-    <UiPanel title="任务列表">
-      <UiTableToolbar
-        v-model:quick-keyword="taskTableFilters.quickKeyword"
-        v-model:advanced-open="taskAdvancedFilterOpen"
-        quick-placeholder="输入来源/职位/状态关键词"
-        :show-refresh="false"
-        :show-apply="false"
-      />
+    <UiPanel>
+      <template #header>
+        <div class="mb-1 flex items-center justify-between gap-3 flex-wrap">
+          <input
+            v-model="taskTableFilters.quickKeyword"
+            class="crawl-header-input w-full max-w-80 lt-sm:max-w-full"
+            placeholder="输入来源/职位/状态关键词"
+          />
+          <UiButton @click="openCreateModal">新增采集任务</UiButton>
+        </div>
+      </template>
 
       <UiTableFilterPanel v-model:open="taskAdvancedFilterOpen">
         <div class="grid grid-cols-3 gap-2.5 lt-lg:grid-cols-2 lt-sm:grid-cols-1">
@@ -978,3 +977,11 @@ onMounted(async () => {
     </div>
   </Teleport>
 </template>
+
+<style scoped>
+.crawl-header-input {
+  min-height: 40px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+</style>

@@ -11,7 +11,6 @@ import UiSelect from "../components/UiSelect.vue";
 import UiTableFilterPanel from "../components/UiTableFilterPanel.vue";
 import UiTable from "../components/UiTable.vue";
 import UiTablePagination from "../components/UiTablePagination.vue";
-import UiTableToolbar from "../components/UiTableToolbar.vue";
 import UiTd from "../components/UiTd.vue";
 import UiTh from "../components/UiTh.vue";
 import {
@@ -99,6 +98,8 @@ function sortByColumn(payload: { field: string; direction: "asc" | "desc" }) {
   ];
   sorts.value = normalizeSortRules(next, sortOptions.map((item) => item.value));
 }
+
+let filterNameLikeTimer: ReturnType<typeof setTimeout> | null = null;
 
 const drawerOpen = ref(false);
 const drawerLoading = ref(false);
@@ -320,8 +321,11 @@ async function loadRows() {
   }
 }
 
-function applyFilters() {
-  page.value = 1;
+function reloadRowsFromFilters() {
+  if (page.value !== 1) {
+    page.value = 1;
+    return;
+  }
   void loadRows();
 }
 
@@ -835,6 +839,23 @@ watch(
   { deep: true },
 );
 
+watch(() => filters.jobId, () => {
+  reloadRowsFromFilters();
+});
+
+watch(() => filters.stage, () => {
+  reloadRowsFromFilters();
+});
+
+watch(() => filters.nameLike, () => {
+  if (filterNameLikeTimer) {
+    clearTimeout(filterNameLikeTimer);
+  }
+  filterNameLikeTimer = setTimeout(() => {
+    reloadRowsFromFilters();
+  }, 250);
+});
+
 onMounted(async () => {
   await Promise.allSettled([
     store.bootstrap(),
@@ -851,6 +872,9 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  if (filterNameLikeTimer) {
+    clearTimeout(filterNameLikeTimer);
+  }
   closeAnalysisProgress();
 });
 </script>
@@ -864,19 +888,15 @@ onUnmounted(() => {
     <UiPanel>
       <template #header>
         <div class="mb-1 flex items-center justify-between gap-3 flex-wrap">
-          <h3 class="m-0 text-lg font-700">候选人列表</h3>
+          <input
+            v-model="filters.nameLike"
+            class="candidates-header-input w-full max-w-80 lt-sm:max-w-full"
+            placeholder="输入姓名关键词"
+            :disabled="loading"
+          />
           <UiButton :disabled="loading" @click="openCreateCandidateModal">创建候选人</UiButton>
         </div>
       </template>
-
-      <UiTableToolbar
-        v-model:quick-keyword="filters.nameLike"
-        v-model:advanced-open="advancedFilterOpen"
-        :disabled="loading"
-        quick-placeholder="输入姓名关键词"
-        @apply="applyFilters"
-        @refresh="loadRows"
-      />
 
       <UiTableFilterPanel v-model:open="advancedFilterOpen">
         <div class="grid grid-cols-2 gap-2.5 lt-sm:grid-cols-1">
@@ -1381,3 +1401,11 @@ onUnmounted(() => {
     </div>
   </Teleport>
 </template>
+
+<style scoped>
+.candidates-header-input {
+  min-height: 40px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+</style>
