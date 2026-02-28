@@ -31,9 +31,18 @@ const blockedPatterns = [
   /验证码/u,
   /人机/u,
   /请完成验证/u,
+  /身份验证/u,
+  /安全验证/u,
+  /异常访问行为/u,
+  /点击按钮进行验证/u,
   /captcha/i,
   /forbidden/i,
   /访问过于频繁/u,
+];
+
+const blockedUrlPatterns = [
+  /\/web\/user\/safe\/verify/i,
+  /verify-slider/i,
 ];
 
 const sessionInvalidPatterns = [
@@ -76,64 +85,40 @@ export async function navigateAndStabilize(page: Page, url: string, mode: CrawlM
 }
 
 export async function assertPageAvailable(page: Page, source: string): Promise<void> {
+  const currentUrl = page.url();
+  let pageTitle = "";
+  try {
+    pageTitle = await page.title();
+  } catch {
+    pageTitle = "";
+  }
+
   const bodyText = await page.evaluate(() => {
     const doc = (globalThis as { document?: unknown }).document as
       | { body?: { innerText?: string | null } }
       | undefined;
     return doc?.body?.innerText?.slice(0, 4000) ?? "";
   });
+  const visiblePageText = `${pageTitle}\n${bodyText}`;
 
   if (!bodyText.trim()) {
     throw new Error(`${source}_empty_page_content`);
   }
 
-  if (blockedPatterns.some((pattern) => pattern.test(bodyText))) {
+  if (
+    blockedPatterns.some((pattern) => pattern.test(visiblePageText))
+    || blockedUrlPatterns.some((pattern) => pattern.test(currentUrl))
+  ) {
     throw new Error(`${source}_captcha_or_blocked`);
   }
 
-  if (sessionInvalidPatterns.some((pattern) => pattern.test(bodyText))) {
+  if (sessionInvalidPatterns.some((pattern) => pattern.test(visiblePageText))) {
     throw new Error(`${source}_session_invalid_or_login_required`);
   }
 }
 
 export async function extractJobCards(page: Page, selectors: PageFieldSelectors): Promise<unknown[]> {
   return page.evaluate((schema) => {
-    const firstMatchText = (
-      root: { querySelector: (selector: string) => { textContent?: string | null } | null },
-      targets: string[],
-    ) => {
-      for (const selector of targets) {
-        const node = root.querySelector(selector);
-        const text = node?.textContent?.trim();
-        if (text) {
-          return text;
-        }
-      }
-      return "";
-    };
-
-    const firstMatchHref = (
-      root: {
-        querySelector: (selector: string) => { href?: string; getAttribute?: (name: string) => string | null } | null;
-      },
-      targets: string[],
-    ) => {
-      for (const selector of targets) {
-        const node = root.querySelector(selector);
-        const href = node?.href?.trim();
-        if (!href) {
-          const attrHref = node?.getAttribute?.("href")?.trim();
-          if (attrHref) {
-            return attrHref;
-          }
-        }
-        if (href) {
-          return href;
-        }
-      }
-      return "";
-    };
-
     const doc = (globalThis as { document?: unknown }).document as
       | { querySelectorAll: (selectors: string) => unknown[] }
       | undefined;
@@ -150,14 +135,85 @@ export async function extractJobCards(page: Page, selectors: PageFieldSelectors)
         querySelector: (selector: string) => { textContent?: string | null; href?: string; getAttribute?: (name: string) => string | null } | null;
         getAttribute: (name: string) => string | null;
       };
+      let title = "";
+      if (schema.title) {
+        for (const selector of schema.title) {
+          const text = node.querySelector(selector)?.textContent?.trim();
+          if (text) {
+            title = text;
+            break;
+          }
+        }
+      }
+
+      let company = "";
+      if (schema.company) {
+        for (const selector of schema.company) {
+          const text = node.querySelector(selector)?.textContent?.trim();
+          if (text) {
+            company = text;
+            break;
+          }
+        }
+      }
+
+      let city = "";
+      if (schema.city) {
+        for (const selector of schema.city) {
+          const text = node.querySelector(selector)?.textContent?.trim();
+          if (text) {
+            city = text;
+            break;
+          }
+        }
+      }
+
+      let salaryK = "";
+      if (schema.salary) {
+        for (const selector of schema.salary) {
+          const text = node.querySelector(selector)?.textContent?.trim();
+          if (text) {
+            salaryK = text;
+            break;
+          }
+        }
+      }
+
+      let description = "";
+      if (schema.description) {
+        for (const selector of schema.description) {
+          const text = node.querySelector(selector)?.textContent?.trim();
+          if (text) {
+            description = text;
+            break;
+          }
+        }
+      }
+
+      let jobUrl = "";
+      if (schema.link) {
+        for (const selector of schema.link) {
+          const linkNode = node.querySelector(selector);
+          const href = linkNode?.href?.trim();
+          if (href) {
+            jobUrl = href;
+            break;
+          }
+          const attrHref = linkNode?.getAttribute?.("href")?.trim();
+          if (attrHref) {
+            jobUrl = attrHref;
+            break;
+          }
+        }
+      }
 
       return {
-        title: schema.title ? firstMatchText(node, schema.title) : "",
-        company: schema.company ? firstMatchText(node, schema.company) : "",
-        city: schema.city ? firstMatchText(node, schema.city) : "",
-        salaryK: schema.salary ? firstMatchText(node, schema.salary) : "",
-        description: schema.description ? firstMatchText(node, schema.description) : "",
-        jobUrl: schema.link ? firstMatchHref(node, schema.link) : "",
+        title,
+        company,
+        city,
+        salaryK,
+        description,
+        jobUrl,
         externalId:
           node.getAttribute("data-job-id") ??
           node.getAttribute("data-id") ??
@@ -170,42 +226,6 @@ export async function extractJobCards(page: Page, selectors: PageFieldSelectors)
 
 export async function extractCandidateCards(page: Page, selectors: PageFieldSelectors): Promise<unknown[]> {
   return page.evaluate((schema) => {
-    const firstMatchText = (
-      root: { querySelector: (selector: string) => { textContent?: string | null } | null },
-      targets: string[],
-    ) => {
-      for (const selector of targets) {
-        const node = root.querySelector(selector);
-        const text = node?.textContent?.trim();
-        if (text) {
-          return text;
-        }
-      }
-      return "";
-    };
-
-    const firstMatchHref = (
-      root: {
-        querySelector: (selector: string) => { href?: string; getAttribute?: (name: string) => string | null } | null;
-      },
-      targets: string[],
-    ) => {
-      for (const selector of targets) {
-        const node = root.querySelector(selector);
-        const href = node?.href?.trim();
-        if (!href) {
-          const attrHref = node?.getAttribute?.("href")?.trim();
-          if (attrHref) {
-            return attrHref;
-          }
-        }
-        if (href) {
-          return href;
-        }
-      }
-      return "";
-    };
-
     const doc = (globalThis as { document?: unknown }).document as
       | { querySelectorAll: (selectors: string) => unknown[] }
       | undefined;
@@ -222,15 +242,96 @@ export async function extractCandidateCards(page: Page, selectors: PageFieldSele
         querySelector: (selector: string) => { textContent?: string | null; href?: string; getAttribute?: (name: string) => string | null } | null;
         getAttribute: (name: string) => string | null;
       };
-      const link = schema.link ? firstMatchHref(node, schema.link) : "";
+      let name = "";
+      if (schema.name) {
+        for (const selector of schema.name) {
+          const text = node.querySelector(selector)?.textContent?.trim();
+          if (text) {
+            name = text;
+            break;
+          }
+        }
+      }
+
+      let currentCompany = "";
+      if (schema.company) {
+        for (const selector of schema.company) {
+          const text = node.querySelector(selector)?.textContent?.trim();
+          if (text) {
+            currentCompany = text;
+            break;
+          }
+        }
+      }
+
+      let years = "";
+      if (schema.years) {
+        for (const selector of schema.years) {
+          const text = node.querySelector(selector)?.textContent?.trim();
+          if (text) {
+            years = text;
+            break;
+          }
+        }
+      }
+
+      let tag = "";
+      if (schema.tag) {
+        for (const selector of schema.tag) {
+          const text = node.querySelector(selector)?.textContent?.trim();
+          if (text) {
+            tag = text;
+            break;
+          }
+        }
+      }
+
+      let phone = "";
+      if (schema.phone) {
+        for (const selector of schema.phone) {
+          const text = node.querySelector(selector)?.textContent?.trim();
+          if (text) {
+            phone = text;
+            break;
+          }
+        }
+      }
+
+      let email = "";
+      if (schema.email) {
+        for (const selector of schema.email) {
+          const text = node.querySelector(selector)?.textContent?.trim();
+          if (text) {
+            email = text;
+            break;
+          }
+        }
+      }
+
+      let link = "";
+      if (schema.link) {
+        for (const selector of schema.link) {
+          const linkNode = node.querySelector(selector);
+          const href = linkNode?.href?.trim();
+          if (href) {
+            link = href;
+            break;
+          }
+          const attrHref = linkNode?.getAttribute?.("href")?.trim();
+          if (attrHref) {
+            link = attrHref;
+            break;
+          }
+        }
+      }
 
       return {
-        name: schema.name ? firstMatchText(node, schema.name) : "",
-        currentCompany: schema.company ? firstMatchText(node, schema.company) : "",
-        years: schema.years ? firstMatchText(node, schema.years) : "",
-        tag: schema.tag ? firstMatchText(node, schema.tag) : "",
-        phone: schema.phone ? firstMatchText(node, schema.phone) : "",
-        email: schema.email ? firstMatchText(node, schema.email) : "",
+        name,
+        currentCompany,
+        years,
+        tag,
+        phone,
+        email,
         profileUrl: link,
         externalId:
           node.getAttribute("data-geek") ??

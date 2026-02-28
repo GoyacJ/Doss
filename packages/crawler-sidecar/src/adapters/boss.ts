@@ -25,6 +25,33 @@ interface BossAdapterOptions {
   headless: boolean;
 }
 
+const CAPTCHA_RECOVERY_TIMEOUT_MS = 120_000;
+const CAPTCHA_RECOVERY_POLL_MS = 1_200;
+
+function isCaptchaBlockedError(error: unknown, source: string): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message.trim();
+  return message === `${source}_captcha_or_blocked`
+    || message.includes(`${source}_captcha_or_blocked`);
+}
+
+function isSessionInvalidError(error: unknown, source: string): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message.trim();
+  return message === `${source}_session_invalid_or_login_required`
+    || message.includes(`${source}_session_invalid_or_login_required`);
+}
+
+function isManualRecoveryError(error: unknown, source: string): boolean {
+  return isCaptchaBlockedError(error, source) || isSessionInvalidError(error, source);
+}
+
 export function buildBossSearchUrl(params: CrawlJobsParams): string {
   const url = new URL("https://www.zhipin.com/web/geek/job");
   url.searchParams.set("query", params.keyword.trim());
@@ -105,6 +132,62 @@ export class BossAdapter implements SourceAdapter {
   constructor(private readonly options: BossAdapterOptions) {
   }
 
+  private async crawlJobsOnce(
+    mode: CrawlMode,
+    params: CrawlJobsParams,
+    headless: boolean,
+  ): Promise<unknown[]> {
+    return withPersistentContext(
+      {
+        sessionDir: this.options.sessionDir,
+        headless,
+      },
+      async (_context, page) => {
+        const targetUrl = buildBossSearchUrl(params);
+        await navigateAndStabilize(page, targetUrl, mode);
+        await assertPageAvailable(page, this.source);
+
+        const rawRows = await extractJobCards(page, this.jobSelectors);
+        const normalized = normalizeBossJobRows(rawRows);
+        if (normalized.length === 0) {
+          throw new Error("boss_jobs_parse_empty");
+        }
+        return normalized;
+      },
+    );
+  }
+
+  private async recoverCaptchaAndAwaitManualVerify(
+    mode: CrawlMode,
+    params: CrawlJobsParams,
+  ): Promise<void> {
+    await withPersistentContext(
+      {
+        sessionDir: this.options.sessionDir,
+        headless: false,
+      },
+      async (_context, page) => {
+        const targetUrl = buildBossSearchUrl(params);
+        await navigateAndStabilize(page, targetUrl, mode);
+
+        const deadline = Date.now() + CAPTCHA_RECOVERY_TIMEOUT_MS;
+        while (Date.now() < deadline) {
+          try {
+            await assertPageAvailable(page, this.source);
+            return;
+          } catch (error) {
+            if (!isManualRecoveryError(error, this.source)) {
+              throw error;
+            }
+            await page.waitForTimeout(CAPTCHA_RECOVERY_POLL_MS);
+          }
+        }
+
+        throw new Error(`${this.source}_captcha_or_blocked`);
+      },
+    );
+  }
+
   async checkSession(): Promise<{ valid: boolean; message?: string }> {
     try {
       return await withPersistentContext(
@@ -137,18 +220,16 @@ export class BossAdapter implements SourceAdapter {
   }
 
   async crawlJobs(mode: CrawlMode, params: CrawlJobsParams): Promise<unknown[]> {
-    return withPersistentContext(this.options, async (_context, page) => {
-      const targetUrl = buildBossSearchUrl(params);
-      await navigateAndStabilize(page, targetUrl, mode);
-      await assertPageAvailable(page, this.source);
-
-      const rawRows = await extractJobCards(page, this.jobSelectors);
-      const normalized = normalizeBossJobRows(rawRows);
-      if (normalized.length === 0) {
-        throw new Error("boss_jobs_parse_empty");
+    try {
+      return await this.crawlJobsOnce(mode, params, this.options.headless);
+    } catch (error) {
+      if (!this.options.headless || !isManualRecoveryError(error, this.source)) {
+        throw error;
       }
-      return normalized;
-    });
+
+      await this.recoverCaptchaAndAwaitManualVerify(mode, params);
+      return this.crawlJobsOnce(mode, params, false);
+    }
   }
 
   async crawlCandidates(mode: CrawlMode, params: CrawlCandidatesParams): Promise<unknown[]> {
