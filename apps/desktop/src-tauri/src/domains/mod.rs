@@ -5,6 +5,7 @@ pub mod crawl_task;
 pub mod hiring;
 pub mod interview;
 pub mod jobs;
+pub mod scoring;
 pub mod screening;
 pub mod search;
 pub mod sidecar_runtime;

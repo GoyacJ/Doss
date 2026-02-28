@@ -8,27 +8,27 @@ import {
   type InterviewKitRecord,
   type ParsedResumeFile,
   type PipelineEvent,
-  type ScreeningResultRecord,
+  type ScoringResultRecord,
   type UpsertResumePayload,
 } from "../../services/backend";
 import type { UiAnalysisRecord } from "./types";
 
 export interface AnalysisContextDeps {
   analyses: Ref<Record<number, UiAnalysisRecord[]>>;
-  screeningResults: Ref<Record<number, ScreeningResultRecord[]>>;
+  scoringResults: Ref<Record<number, ScoringResultRecord[]>>;
   interviewKits: Ref<Record<number, InterviewKitRecord | null>>;
   interviewFeedback: Ref<Record<number, InterviewFeedbackRecord[]>>;
   interviewEvaluations: Ref<Record<number, InterviewEvaluationRecord[]>>;
   hiringDecisions: Ref<Record<number, HiringDecisionRecord[]>>;
   pipelineEvents: Ref<Record<number, PipelineEvent[]>>;
   mapAnalysis: (record: BackendAnalysisRecord) => UiAnalysisRecord;
-  runCandidateAnalysis: (input: { candidate_id: number; job_id?: number; run_id?: string }) => Promise<unknown>;
+  runCandidateScoring: (input: { candidate_id: number; job_id?: number; run_id?: string }) => Promise<unknown>;
   listAnalysis: (candidateId: number) => Promise<BackendAnalysisRecord[]>;
   listPipelineEvents: (candidateId: number) => Promise<PipelineEvent[]>;
-  listScreeningResults: (candidateId: number) => Promise<ScreeningResultRecord[]>;
+  listScoringResults: (candidateId: number) => Promise<ScoringResultRecord[]>;
   listInterviewEvaluations: (candidateId: number) => Promise<InterviewEvaluationRecord[]>;
   listHiringDecisions: (candidateId: number) => Promise<HiringDecisionRecord[]>;
-  runResumeScreening: (input: { candidate_id: number; job_id?: number }) => Promise<ScreeningResultRecord>;
+  runResumeScreening?: (input: { candidate_id: number; job_id?: number }) => Promise<unknown>;
   upsertResume: (input: UpsertResumePayload) => Promise<unknown>;
   refreshMetrics: () => Promise<void>;
   parseResumeFile: (input: {
@@ -123,58 +123,67 @@ export function createAnalysisContextModule(deps: AnalysisContextDeps) {
       ...payload,
       source: payload.source ?? "manual",
     });
-    await deps.runResumeScreening({
-      candidate_id: payload.candidate_id,
-      job_id: payload.job_id,
-    });
-    const [latestScreeningResults] = await Promise.all([
-      deps.listScreeningResults(payload.candidate_id),
+    if (deps.runResumeScreening) {
+      await deps.runResumeScreening({
+        candidate_id: payload.candidate_id,
+        job_id: payload.job_id,
+      });
+    } else {
+      await deps.runCandidateScoring({
+        candidate_id: payload.candidate_id,
+        job_id: payload.job_id,
+      });
+    }
+    const [latestScoringResults] = await Promise.all([
+      deps.listScoringResults(payload.candidate_id),
       deps.refreshMetrics(),
     ]);
-    deps.screeningResults.value[payload.candidate_id] = latestScreeningResults;
+    deps.scoringResults.value[payload.candidate_id] = latestScoringResults;
   }
 
   async function analyzeCandidate(candidateId: number, jobId?: number, runId?: string) {
-    await deps.runCandidateAnalysis({
+    await deps.runCandidateScoring({
       candidate_id: candidateId,
       job_id: jobId,
       ...(runId ? { run_id: runId } : {}),
     });
+    deps.scoringResults.value[candidateId] = await deps.listScoringResults(candidateId);
     deps.analyses.value[candidateId] = (await deps.listAnalysis(candidateId)).map(deps.mapAnalysis);
   }
 
   async function loadCandidateContext(candidateId: number) {
-    const [analysisData, eventData, screeningData, interviewEvaluationData, hiringDecisionData] = await Promise.all([
+    const [analysisData, eventData, scoringData, interviewEvaluationData, hiringDecisionData] = await Promise.all([
       deps.listAnalysis(candidateId),
       deps.listPipelineEvents(candidateId),
-      deps.listScreeningResults(candidateId),
+      deps.listScoringResults(candidateId),
       deps.listInterviewEvaluations(candidateId),
       deps.listHiringDecisions(candidateId),
     ]);
     deps.analyses.value[candidateId] = analysisData.map(deps.mapAnalysis);
     deps.pipelineEvents.value[candidateId] = eventData;
-    deps.screeningResults.value[candidateId] = screeningData;
+    deps.scoringResults.value[candidateId] = scoringData;
     deps.interviewEvaluations.value[candidateId] = interviewEvaluationData;
     deps.hiringDecisions.value[candidateId] = hiringDecisionData;
   }
 
-  async function runScreening(candidateId: number, jobId?: number) {
-    await deps.runResumeScreening({
+  async function runScreening(candidateId: number, jobId?: number, runId?: string) {
+    await deps.runCandidateScoring({
       candidate_id: candidateId,
       job_id: jobId,
+      ...(runId ? { run_id: runId } : {}),
     });
-    deps.screeningResults.value[candidateId] = await deps.listScreeningResults(candidateId);
-    return deps.screeningResults.value[candidateId];
+    deps.scoringResults.value[candidateId] = await deps.listScoringResults(candidateId);
+    return deps.scoringResults.value[candidateId];
   }
 
   async function rerunAiAnalysis(candidateId: number, jobId?: number, runId?: string) {
-    await deps.runCandidateAnalysis({
+    await deps.runCandidateScoring({
       candidate_id: candidateId,
       job_id: jobId,
       ...(runId ? { run_id: runId } : {}),
     });
     await loadCandidateContext(candidateId);
-    return deps.analyses.value[candidateId] ?? [];
+    return deps.scoringResults.value[candidateId] ?? [];
   }
 
   async function importResumeFileAndAnalyze(payload: {

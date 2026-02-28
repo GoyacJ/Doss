@@ -94,8 +94,8 @@ pub(crate) fn read_job_by_id(conn: &Connection, job_id: i64) -> Result<Job, Stri
             j.created_at,
             j.updated_at
         FROM jobs j
-        LEFT JOIN job_screening_overrides jo ON jo.job_id = j.id
-        LEFT JOIN screening_templates st ON st.id = jo.template_id
+        LEFT JOIN job_scoring_overrides jo ON jo.job_id = j.id
+        LEFT JOIN scoring_templates st ON st.id = jo.template_id
         WHERE j.id = ?1
         "#,
         [job_id],
@@ -110,8 +110,8 @@ pub(crate) fn read_job_by_id(conn: &Connection, job_id: i64) -> Result<Job, Stri
                 salary_k: row.get(6)?,
                 description: row.get(7)?,
                 status: row.get(8)?,
-                screening_template_id: row.get(9)?,
-                screening_template_name: row.get(10)?,
+                scoring_template_id: row.get(9)?,
+                scoring_template_name: row.get(10)?,
                 created_at: row.get(11)?,
                 updated_at: row.get(12)?,
             })
@@ -285,8 +285,8 @@ pub(crate) fn list_jobs(state: State<'_, AppState>) -> Result<Vec<Job>, String> 
                 j.created_at,
                 j.updated_at
             FROM jobs j
-            LEFT JOIN job_screening_overrides jo ON jo.job_id = j.id
-            LEFT JOIN screening_templates st ON st.id = jo.template_id
+            LEFT JOIN job_scoring_overrides jo ON jo.job_id = j.id
+            LEFT JOIN scoring_templates st ON st.id = jo.template_id
             ORDER BY j.updated_at DESC
             "#,
         )
@@ -304,8 +304,8 @@ pub(crate) fn list_jobs(state: State<'_, AppState>) -> Result<Vec<Job>, String> 
                 salary_k: row.get(6)?,
                 description: row.get(7)?,
                 status: row.get(8)?,
-                screening_template_id: row.get(9)?,
-                screening_template_name: row.get(10)?,
+                scoring_template_id: row.get(9)?,
+                scoring_template_name: row.get(10)?,
                 created_at: row.get(11)?,
                 updated_at: row.get(12)?,
             })

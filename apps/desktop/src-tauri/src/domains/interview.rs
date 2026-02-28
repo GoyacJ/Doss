@@ -120,7 +120,7 @@ pub(crate) fn generate_interview_kit(
 
     let screening_hint = conn
         .query_row(
-            "SELECT recommendation, risk_level FROM screening_results WHERE candidate_id = ?1 ORDER BY created_at DESC LIMIT 1",
+            "SELECT recommendation, risk_level FROM scoring_results WHERE candidate_id = ?1 ORDER BY created_at DESC LIMIT 1",
             [input.candidate_id],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
@@ -128,13 +128,27 @@ pub(crate) fn generate_interview_kit(
         .map_err(|error| error.to_string())?;
     let latest_analysis_risks = conn
         .query_row(
-            "SELECT risks_json FROM analysis_results WHERE candidate_id = ?1 ORDER BY created_at DESC LIMIT 1",
+            "SELECT structured_result_json FROM scoring_results WHERE candidate_id = ?1 ORDER BY created_at DESC LIMIT 1",
             [input.candidate_id],
             |row| row.get::<_, String>(0),
         )
         .optional()
         .map_err(|error| error.to_string())?
-        .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| {
+            value
+                .get("risks")
+                .and_then(|item| item.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str())
+                        .map(str::trim)
+                        .filter(|item| !item.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+        })
         .unwrap_or_default();
 
     let questions = build_generated_interview_questions(

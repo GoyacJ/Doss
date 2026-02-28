@@ -20,7 +20,7 @@ use domains::candidate::{
     create_candidate, delete_candidate, list_analysis, list_candidates, list_candidates_page,
     list_decision_candidates_page, list_interview_candidates_page, list_pending_candidates,
     list_pipeline_events, merge_candidate_import, move_candidate_stage, parse_resume_file,
-    run_candidate_analysis, set_candidate_qualification, sync_pending_candidate_to_candidate,
+    set_candidate_qualification, sync_pending_candidate_to_candidate,
     update_candidate, upsert_pending_candidates, upsert_resume,
 };
 use domains::crawl_task::{
@@ -33,10 +33,10 @@ use domains::interview::{
     save_interview_kit, save_interview_recording, submit_interview_feedback,
 };
 use domains::jobs::{create_job, delete_job, list_jobs, stop_job, update_job};
-use domains::screening::{
-    create_screening_template, delete_screening_template, get_screening_template,
-    list_screening_results, list_screening_templates, run_resume_screening,
-    set_job_screening_template, update_screening_template, upsert_screening_template,
+use domains::scoring::{
+    create_scoring_template, delete_scoring_template, get_scoring_template,
+    list_scoring_results, list_scoring_templates, run_candidate_scoring,
+    set_job_scoring_template, update_scoring_template, upsert_scoring_template,
 };
 use domains::search::search_candidates;
 use domains::sidecar_runtime::{
@@ -116,15 +116,15 @@ pub fn run() {
             upsert_pending_candidates,
             list_pending_candidates,
             sync_pending_candidate_to_candidate,
-            get_screening_template,
-            upsert_screening_template,
-            list_screening_templates,
-            create_screening_template,
-            update_screening_template,
-            delete_screening_template,
-            set_job_screening_template,
-            run_resume_screening,
-            list_screening_results,
+            get_scoring_template,
+            upsert_scoring_template,
+            list_scoring_templates,
+            create_scoring_template,
+            update_scoring_template,
+            delete_scoring_template,
+            set_job_scoring_template,
+            run_candidate_scoring,
+            list_scoring_results,
             generate_interview_kit,
             save_interview_kit,
             save_interview_recording,
@@ -144,7 +144,6 @@ pub fn run() {
             test_ai_provider_settings,
             get_task_runtime_settings,
             upsert_task_runtime_settings,
-            run_candidate_analysis,
             list_analysis,
             create_crawl_task,
             update_crawl_task,

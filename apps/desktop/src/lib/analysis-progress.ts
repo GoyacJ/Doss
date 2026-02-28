@@ -1,6 +1,6 @@
-export const ANALYSIS_PROGRESS_EVENT = "candidate-analysis-progress";
+export const ANALYSIS_PROGRESS_EVENT = "candidate-scoring-progress";
 
-export type AnalysisProgressPhase = "prepare" | "ai" | "persist";
+export type AnalysisProgressPhase = "prepare" | "ai" | "t0" | "t1" | "t2" | "t3" | "persist";
 export type AnalysisProgressStatus = "running" | "completed" | "failed";
 export type AnalysisProgressKind = "start" | "progress" | "retry" | "summary" | "end";
 
@@ -19,7 +19,7 @@ export interface AnalysisTraceItem extends AnalysisProgressEventPayload {
   id: string;
 }
 
-const PHASE_ORDER: AnalysisProgressPhase[] = ["prepare", "ai", "persist"];
+const FINAL_STEP_INDEX = 5;
 
 function toTimestamp(value: string): number {
   const parsed = Date.parse(value);
@@ -27,7 +27,22 @@ function toTimestamp(value: string): number {
 }
 
 export function phaseToStepIndex(phase: AnalysisProgressPhase): number {
-  return PHASE_ORDER.indexOf(phase);
+  if (phase === "prepare") {
+    return 0;
+  }
+  if (phase === "ai" || phase === "t0") {
+    return 1;
+  }
+  if (phase === "t1") {
+    return 2;
+  }
+  if (phase === "t2") {
+    return 3;
+  }
+  if (phase === "t3") {
+    return 4;
+  }
+  return FINAL_STEP_INDEX;
 }
 
 export function shouldAcceptAnalysisProgressEvent(
@@ -51,7 +66,7 @@ export function resolveAnalysisStepIndex(
     return currentIndex;
   }
   if (status === "completed" && phase === "persist") {
-    return PHASE_ORDER.length - 1;
+    return currentIndex <= 2 ? 2 : FINAL_STEP_INDEX;
   }
   return Math.max(currentIndex, phaseIndex);
 }
@@ -82,11 +97,22 @@ export function appendAnalysisTrace(
 
 export function buildFallbackAnalysisMessage(phase: AnalysisProgressPhase): string {
   if (phase === "prepare") {
-    return "正在整理候选人与岗位上下文...";
+    return "正在解析候选人与模板上下文...";
+  }
+  if (phase === "t0") {
+    return "正在评估 T0 重要指标...";
   }
   if (phase === "ai") {
-    return "正在综合技能、年限与风险信号生成评估...";
+    return "正在评估候选人与岗位匹配度...";
   }
-  return "正在写入分析结果并刷新视图...";
+  if (phase === "t1") {
+    return "正在评估 T1 指标配置...";
+  }
+  if (phase === "t2") {
+    return "正在评估 T2 加分项...";
+  }
+  if (phase === "t3") {
+    return "正在评估 T3 风险项...";
+  }
+  return "正在写入评分结果并刷新视图...";
 }
-

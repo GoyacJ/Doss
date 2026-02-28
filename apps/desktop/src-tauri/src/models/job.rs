@@ -13,8 +13,8 @@ pub(crate) struct Job {
     pub(crate) salary_k: Option<String>,
     pub(crate) description: Option<String>,
     pub(crate) status: String,
-    pub(crate) screening_template_id: Option<i64>,
-    pub(crate) screening_template_name: Option<String>,
+    pub(crate) scoring_template_id: Option<i64>,
+    pub(crate) scoring_template_name: Option<String>,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
 }

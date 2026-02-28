@@ -26,10 +26,10 @@ import {
 import { buildCandidateManualPayload } from "../lib/candidate-form";
 import { formatStageLabel } from "../lib/pipeline";
 import {
-  resolveStructuredScreeningViewModel,
+  resolveStructuredScoringViewModel,
   riskSeverityTone,
-} from "../lib/screening-structured";
-import { resolveScreeningRerunFeedback } from "../lib/screening-rerun-feedback";
+} from "../lib/scoring-structured";
+import { resolveScoringRerunFeedback } from "../lib/scoring-rerun-feedback";
 import { stageTone } from "../lib/status";
 import { normalizeSortRules } from "../lib/table-sort";
 import { listCandidatesPage } from "../services/backend";
@@ -127,18 +127,33 @@ const analysisTraceListRef = ref<HTMLUListElement | null>(null);
 const analysisProgressSteps = [
   {
     key: "prepare",
-    label: "准备候选人资料",
-    description: "读取候选人上下文并构建分析输入。",
+    label: "模板与上下文准备",
+    description: "读取岗位模板与候选人上下文。",
   },
   {
-    key: "ai",
-    label: "调用AI模型分析",
-    description: "正在执行模型分析，请稍候。",
+    key: "t0",
+    label: "T0 重要指标",
+    description: "分析岗位描述/技能要求匹配度。",
+  },
+  {
+    key: "t1",
+    label: "T1 指标配置",
+    description: "分析当前模板指标与候选人匹配度。",
+  },
+  {
+    key: "t2",
+    label: "T2 加分项",
+    description: "分析候选人是否具备额外加分项。",
+  },
+  {
+    key: "t3",
+    label: "T3 风险项",
+    description: "分析候选人风险项（低风险高分）。",
   },
   {
     key: "persist",
-    label: "写入并刷新结果",
-    description: "保存分析结果并刷新页面数据。",
+    label: "落库并刷新结果",
+    description: "保存评分结果并刷新页面数据。",
   },
 ] as const;
 
@@ -158,7 +173,7 @@ const latestAnalysisTraceMessage = computed(() => {
 
 const analysisTracePanelTitle = computed(() => {
   if (!analysisTraceItems.value.length) {
-    return "正在准备分析过程...";
+    return "正在准备评分过程...";
   }
   return `当前阶段：${currentAnalysisStep.value.label}`;
 });
@@ -206,11 +221,11 @@ const selectedCandidate = computed(() => {
     ?? null;
 });
 
-const selectedScreening = computed(() => {
+const selectedScoring = computed(() => {
   if (!selectedCandidateId.value) {
     return [];
   }
-  return store.screeningResults[selectedCandidateId.value] ?? [];
+  return store.scoringResults[selectedCandidateId.value] ?? [];
 });
 
 const selectedEvents = computed(() => {
@@ -221,7 +236,7 @@ const selectedEvents = computed(() => {
 });
 
 const selectedStructuredAssessment = computed(() =>
-  resolveStructuredScreeningViewModel(selectedScreening.value[0]),
+  resolveStructuredScoringViewModel(selectedScoring.value[0]),
 );
 
 const stageOptions = [
@@ -505,7 +520,7 @@ function startAnalysisProgress(runId: string, candidateId: number) {
     phase: "prepare",
     status: "running",
     kind: "start",
-    message: "已开始重新分析，正在准备候选人资料",
+    message: "已开始重新评分，正在准备模板与候选人上下文",
     at: new Date().toISOString(),
   });
 
@@ -722,40 +737,29 @@ async function rerunScreening() {
   }
   const candidateId = selectedCandidate.value.id;
   const jobId = selectedCandidate.value.job_id ?? undefined;
-  const runId = `${candidateId}-${Date.now()}`;
+  const runId = `scoring-${candidateId}-${Date.now()}`;
+  const timeoutMs = 90_000;
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
   actionLoading.value = true;
   startAnalysisProgress(runId, candidateId);
   try {
-    addAnalysisTrace({
-      runId,
-      candidateId,
-      phase: "prepare",
-      status: "running",
-      kind: "progress",
-      message: "正在重新执行结构化初筛",
-      at: new Date().toISOString(),
-    });
-    await store.runScreening(candidateId, jobId);
-    addAnalysisTrace({
-      runId,
-      candidateId,
-      phase: "prepare",
-      status: "running",
-      kind: "progress",
-      message: "结构化初筛完成，正在继续AI分析",
-      at: new Date().toISOString(),
-    });
     await setupAnalysisProgressListener(runId, candidateId);
-    await nextTick();
-    await new Promise<void>((resolve) => {
-      requestAnimationFrame(() => resolve());
-    });
-    await store.analyzeCandidate(candidateId, jobId, runId);
+    await Promise.race([
+      store.runScreening(candidateId, jobId, runId),
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error("scoring_timeout"));
+        }, timeoutMs);
+      }),
+    ]);
     await store.loadCandidateContext(candidateId);
-    finishAnalysisProgress("completed", "分析完成并已刷新结果");
-    toast.success("初筛与AI分析结果已更新");
+    finishAnalysisProgress("completed", "评分完成并已刷新结果");
+    toast.success("评分结果已更新");
   } catch (error) {
-    const feedback = resolveScreeningRerunFeedback(error, "重新分析失败");
+    const normalizedError = error instanceof Error && error.message === "scoring_timeout"
+      ? new Error("评分超时，请重试")
+      : error;
+    const feedback = resolveScoringRerunFeedback(normalizedError, "重新分析失败");
     finishAnalysisProgress("failed", feedback.message);
     if (feedback.tone === "warning") {
       toast.warning(feedback.message);
@@ -763,6 +767,9 @@ async function rerunScreening() {
     }
     toast.danger(feedback.message);
   } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
     actionLoading.value = false;
   }
 }
@@ -1131,13 +1138,13 @@ onUnmounted(() => {
           </div>
         </UiPanel>
 
-        <UiPanel v-if="selectedScreening.length && selectedStructuredAssessment" class="mt-3" title="结构化 AI 评估">
+        <UiPanel v-if="selectedScoring.length && selectedStructuredAssessment" class="mt-3" title="结构化 AI 评分">
           <div class="flex items-center gap-2 mb-2 flex-wrap">
-            <UiBadge :tone="screeningTone(selectedScreening[0].recommendation)">
-              {{ screeningRecommendationLabel(selectedScreening[0].recommendation) }}
+            <UiBadge :tone="screeningTone(selectedScoring[0].recommendation)">
+              {{ screeningRecommendationLabel(selectedScoring[0].recommendation) }}
             </UiBadge>
-            <UiBadge :tone="selectedScreening[0].risk_level === 'HIGH' ? 'danger' : selectedScreening[0].risk_level === 'MEDIUM' ? 'warning' : 'info'">
-              {{ screeningRiskLabel(selectedScreening[0].risk_level) }}
+            <UiBadge :tone="selectedScoring[0].risk_level === 'HIGH' ? 'danger' : selectedScoring[0].risk_level === 'MEDIUM' ? 'warning' : 'info'">
+              {{ screeningRiskLabel(selectedScoring[0].risk_level) }}
             </UiBadge>
           </div>
 
@@ -1226,8 +1233,8 @@ onUnmounted(() => {
             <div class="flex items-center justify-between gap-2 flex-wrap">
               <p class="m-0 text-sm font-700">风险评估</p>
               <div class="flex items-center gap-2">
-                <UiBadge :tone="selectedScreening[0].risk_level === 'HIGH' ? 'danger' : selectedScreening[0].risk_level === 'MEDIUM' ? 'warning' : 'info'">
-                  {{ screeningRiskLabel(selectedScreening[0].risk_level) }}
+                <UiBadge :tone="selectedScoring[0].risk_level === 'HIGH' ? 'danger' : selectedScoring[0].risk_level === 'MEDIUM' ? 'warning' : 'info'">
+                  {{ screeningRiskLabel(selectedScoring[0].risk_level) }}
                 </UiBadge>
                 <span class="text-xs text-muted">风险分 {{ formatScore5(selectedStructuredAssessment.riskScore5) }} / 5</span>
               </div>
@@ -1280,7 +1287,7 @@ onUnmounted(() => {
       class="fixed inset-0 z-[87] flex items-center justify-center bg-black/35 p-4"
     >
       <div class="w-full max-w-3xl">
-        <UiPanel title="AI分析中">
+        <UiPanel title="AI评分中">
           <div class="mt-1 flex items-center gap-2 overflow-x-auto pb-1">
             <template v-for="(step, index) in analysisProgressSteps" :key="step.key">
               <div class="flex min-w-[180px] items-center gap-2">

@@ -1,4 +1,5 @@
-use rusqlite::Connection;
+use chrono::Utc;
+use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 
 use crate::core::error::AppResult;
@@ -90,6 +91,47 @@ pub(crate) fn migrate_db(db_path: &Path) -> AppResult<()> {
             created_at TEXT NOT NULL,
             FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
             FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS scoring_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT NOT NULL,
+            job_id INTEGER,
+            name TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(scope, job_id),
+            FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS job_scoring_overrides (
+            job_id INTEGER PRIMARY KEY,
+            template_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+            FOREIGN KEY(template_id) REFERENCES scoring_templates(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS scoring_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_id INTEGER NOT NULL,
+            job_id INTEGER,
+            template_id INTEGER,
+            overall_score INTEGER NOT NULL,
+            overall_score_5 REAL NOT NULL,
+            t0_score_5 REAL NOT NULL,
+            t1_score_5 REAL NOT NULL,
+            t2_score_5 REAL NOT NULL,
+            t3_score_5 REAL NOT NULL,
+            recommendation TEXT NOT NULL,
+            risk_level TEXT NOT NULL,
+            structured_result_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
+            FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE SET NULL,
+            FOREIGN KEY(template_id) REFERENCES scoring_templates(id) ON DELETE SET NULL
         );
 
         CREATE TABLE IF NOT EXISTS screening_templates (
@@ -315,6 +357,7 @@ pub(crate) fn migrate_db(db_path: &Path) -> AppResult<()> {
         CREATE INDEX IF NOT EXISTS idx_crawl_task_people_sync ON crawl_task_people(task_id, sync_status);
         CREATE INDEX IF NOT EXISTS idx_pending_candidates_dedupe ON pending_candidates(dedupe_key);
         CREATE INDEX IF NOT EXISTS idx_pending_candidates_sync_status ON pending_candidates(sync_status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_scoring_results_candidate ON scoring_results(candidate_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_screening_results_candidate ON screening_results(candidate_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_interview_kits_candidate ON interview_kits(candidate_id, updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_interview_feedback_candidate ON interview_feedback(candidate_id, created_at DESC);
@@ -394,6 +437,32 @@ pub(crate) fn migrate_db(db_path: &Path) -> AppResult<()> {
         "#,
         [],
     );
+
+    let scoring_reset_marker: Option<String> = conn
+        .query_row(
+            "SELECT value_json FROM app_settings WHERE key = 'scoring_v2_reset_done' LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    if scoring_reset_marker.is_none() {
+        let now = Utc::now().to_rfc3339();
+        conn.execute("DELETE FROM analysis_results", [])?;
+        conn.execute("DELETE FROM screening_results", [])?;
+        conn.execute("DELETE FROM job_screening_overrides", [])?;
+        conn.execute("DELETE FROM screening_dimensions", [])?;
+        conn.execute("DELETE FROM screening_templates", [])?;
+        conn.execute(
+            r#"
+            INSERT INTO app_settings(key, value_json, updated_at)
+            VALUES ('scoring_v2_reset_done', 'true', ?1)
+            ON CONFLICT(key)
+            DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
+            "#,
+            [now],
+        )?;
+    }
 
     Ok(())
 }

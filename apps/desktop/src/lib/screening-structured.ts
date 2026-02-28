@@ -1,5 +1,3 @@
-import type { ScreeningResultRecord } from "../services/backend";
-
 export interface StructuredTemplateViewItem {
   key: string;
   label: string;
@@ -83,7 +81,7 @@ function toScore5From100(score100: number | null | undefined): number | null {
   if (score100 === null || score100 === undefined || !Number.isFinite(score100)) {
     return null;
   }
-  return round((score100 / 20), 2);
+  return round(score100 / 20, 2);
 }
 
 function riskLevelScore5(level: string): number {
@@ -176,13 +174,14 @@ function normalizeRiskItem(item: unknown): StructuredRiskViewItem | null {
 }
 
 export function resolveStructuredScreeningViewModel(
-  screening: ScreeningResultRecord | null | undefined,
+  screening: unknown,
 ): StructuredScreeningViewModel | null {
-  if (!screening) {
+  const screeningRecord = asRecord(screening);
+  if (!screeningRecord) {
     return null;
   }
 
-  const structured = asRecord(screening.structured_result) ?? {};
+  const structured = asRecord(screeningRecord.structured_result) ?? {};
   const summary = asRecord(structured.summary);
   const templateAssessment = asRecord(structured.template_assessment);
   const bonusAssessment = asRecord(structured.bonus_assessment);
@@ -194,16 +193,25 @@ export function resolveStructuredScreeningViewModel(
 
   const overallScore100 = asNumber(summary?.overall_score_100)
     ?? asNumber(summary?.overallScore100)
-    ?? screening.overall_score;
+    ?? asNumber(summary?.overall_score)
+    ?? asNumber(screeningRecord.overall_score);
   const overallScore5 = asNumber(summary?.overall_score_5)
     ?? asNumber(summary?.overallScore5)
     ?? toScore5From100(overallScore100);
 
-  const t0Score = asNumber(summarySubscores?.t0) ?? screening.t0_score;
-  const t1Score = asNumber(summarySubscores?.t1) ?? toScore5From100(screening.t1_score);
+  const t0Score = asNumber(summarySubscores?.t0) ?? asNumber(screeningRecord.t0_score) ?? asNumber(screeningRecord.t0_score_5);
+  const t1Score = asNumber(summarySubscores?.t1)
+    ?? toScore5From100(asNumber(screeningRecord.t1_score))
+    ?? asNumber(screeningRecord.t1_score_5);
   const t2Score = asNumber(summarySubscores?.t2)
-    ?? (screening.bonus_score ? round((screening.bonus_score / 15) * 5, 2) : 0);
-  const t3Score = asNumber(summarySubscores?.t3) ?? riskLevelScore5(screening.risk_level);
+    ?? (() => {
+      const legacyBonus = asNumber(screeningRecord.bonus_score);
+      if (legacyBonus === null) {
+        return null;
+      }
+      return round((legacyBonus / 15) * 5, 2);
+    })();
+  const t3Score = asNumber(summarySubscores?.t3) ?? riskLevelScore5(asString(screeningRecord.risk_level));
 
   const fallbackWeightsOld = asRecord(structured.weights);
   const t1Old = asRecord(fallbackWeightsOld?.t1);
@@ -231,7 +239,7 @@ export function resolveStructuredScreeningViewModel(
   const overallComment = asString(summary?.overall_comment)
     || asString(summary?.overallComment)
     || asString(structured.overall_comment)
-    || screening.recommendation;
+    || asString(screeningRecord.recommendation);
 
   const templateName = asString(templateAssessment?.template)
     || asString(t1Old?.template)
@@ -240,11 +248,14 @@ export function resolveStructuredScreeningViewModel(
   const bonusScore5 = asNumber(bonusAssessment?.score_5)
     ?? asNumber(bonusAssessment?.score5)
     ?? (() => {
-      const legacyBonus = asNumber(t2Old?.bonus) ?? screening.bonus_score;
+      const legacyBonus = asNumber(t2Old?.bonus) ?? asNumber(screeningRecord.bonus_score);
+      if (legacyBonus === null) {
+        return null;
+      }
       return round((legacyBonus / 15) * 5, 2);
     })();
 
-  const riskLevel = asString(riskAssessment?.level) || screening.risk_level;
+  const riskLevel = asString(riskAssessment?.level) || asString(screeningRecord.risk_level);
   const riskScore5 = asNumber(riskAssessment?.score_5)
     ?? asNumber(riskAssessment?.score5)
     ?? riskLevelScore5(riskLevel);
@@ -260,7 +271,7 @@ export function resolveStructuredScreeningViewModel(
     overallScore5: overallScore5 === null ? null : round(overallScore5, 2),
     overallScore100: overallScore100 === null ? null : Math.round(overallScore100),
     overallComment: overallComment || "-",
-    recommendation: screening.recommendation,
+    recommendation: asString(screeningRecord.recommendation),
     riskLevel,
     weights,
     subscores: {
@@ -281,13 +292,13 @@ export function resolveStructuredScreeningViewModel(
   };
 }
 
-export function riskSeverityTone(severity: string): "danger" | "warning" | "info" {
-  const normalized = severity.trim().toUpperCase();
+export function riskSeverityTone(level: string): "danger" | "warning" | "info" {
+  const normalized = level.toUpperCase();
   if (normalized === "HIGH") {
     return "danger";
   }
-  if (normalized === "LOW") {
-    return "info";
+  if (normalized === "MEDIUM") {
+    return "warning";
   }
-  return "warning";
+  return "info";
 }

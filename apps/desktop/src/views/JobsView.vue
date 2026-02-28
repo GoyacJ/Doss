@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import type { JobRecord, SortRule } from "@doss/shared";
-import type { ScreeningDimension, ScreeningTemplateRecord } from "../services/backend";
+import type { ScoringItemConfig, ScoringTemplateConfig, ScoringTemplateRecord } from "../services/backend";
 import { jobStatusLabel, jobStatusTone } from "../lib/status";
-import { resolveOverrideTemplateOptions, resolveResidentDefaultTemplate } from "../lib/screening-template-options";
+import {
+  resolveOverrideScoringTemplateOptions,
+  resolveResidentDefaultScoringTemplate,
+} from "../lib/scoring-template-options";
 import { useRecruitingStore } from "../stores/recruiting";
 import UiBadge from "../components/UiBadge.vue";
 import UiButton from "../components/UiButton.vue";
@@ -37,7 +40,7 @@ const templateEditorOpen = ref(false);
 const templateEditorMode = ref<"create" | "edit">("create");
 const savingTemplate = ref(false);
 const deletingTemplateId = ref<number | null>(null);
-const deleteConfirmTemplate = ref<ScreeningTemplateRecord | null>(null);
+const deleteConfirmTemplate = ref<ScoringTemplateRecord | null>(null);
 const jobsAdvancedFilterOpen = ref(false);
 
 const jobForm = reactive({
@@ -52,13 +55,17 @@ const jobForm = reactive({
 const templateForm = reactive<{
   template_id: number;
   name: string;
-  dimensions: ScreeningDimension[];
-  risk_rules_text: string;
+  config: ScoringTemplateConfig;
 }>({
   template_id: 0,
   name: "",
-  dimensions: [],
-  risk_rules_text: "{}",
+  config: {
+    weights: { t0: 50, t1: 30, t2: 10, t3: 10 },
+    t0: { items: [] },
+    t1: { items: [] },
+    t2: { items: [] },
+    t3: { items: [] },
+  },
 });
 
 const jobTableFilters = reactive({
@@ -76,12 +83,18 @@ const jobPageSize = ref(10);
 const templatePage = ref(1);
 const templatePageSize = ref(10);
 
+const sectionKeys = ["t0", "t1", "t2", "t3"] as const;
+type SectionKey = typeof sectionKeys[number];
+
 const templateWeightTotal = computed(() =>
-  templateForm.dimensions.reduce((sum, item) => sum + Number(item.weight || 0), 0),
+  Number(templateForm.config.weights.t0 || 0)
+  + Number(templateForm.config.weights.t1 || 0)
+  + Number(templateForm.config.weights.t2 || 0)
+  + Number(templateForm.config.weights.t3 || 0),
 );
-const residentDefaultTemplate = computed(() => resolveResidentDefaultTemplate(store.screeningTemplates));
+const residentDefaultTemplate = computed(() => resolveResidentDefaultScoringTemplate(store.scoringTemplates));
 const overrideTemplateOptions = computed(() =>
-  resolveOverrideTemplateOptions(store.screeningTemplates),
+  resolveOverrideScoringTemplateOptions(store.scoringTemplates),
 );
 const residentDefaultTemplateId = computed(() => residentDefaultTemplate.value?.id ?? null);
 const isEditingResidentDefaultTemplate = computed(() =>
@@ -152,7 +165,7 @@ const filteredJobs = computed(() =>
       job.company,
       job.city,
       job.salary_k,
-      job.screening_template_name,
+      job.scoring_template_name,
     )) {
       return false;
     }
@@ -175,7 +188,7 @@ const jobSortResolver: SortResolver<JobRecord, JobSortField> = {
   city: (row) => row.city,
   salary_k: (row) => row.salary_k,
   status: (row) => row.status ?? "ACTIVE",
-  template_name: (row) => row.screening_template_name ?? residentDefaultTemplate.value?.name ?? "默认筛选模板",
+  template_name: (row) => row.scoring_template_name ?? residentDefaultTemplate.value?.name ?? "默认评分模板",
   updated_at: (row) => row.updated_at,
 };
 
@@ -187,7 +200,7 @@ const pagedJobs = computed(() =>
 );
 
 const filteredTemplates = computed(() =>
-  store.screeningTemplates.filter((template) =>
+  store.scoringTemplates.filter((template) =>
     includesKeyword(
       templateTableFilters.quickKeyword,
       template.name,
@@ -196,9 +209,13 @@ const filteredTemplates = computed(() =>
     )),
 );
 
-const templateSortResolver: SortResolver<ScreeningTemplateRecord, TemplateSortField> = {
+const templateSortResolver: SortResolver<ScoringTemplateRecord, TemplateSortField> = {
   name: (row) => row.name,
-  dimension_count: (row) => row.dimensions.length,
+  dimension_count: (row) =>
+    row.config.t0.items.length
+    + row.config.t1.items.length
+    + row.config.t2.items.length
+    + row.config.t3.items.length,
   updated_at: (row) => row.updated_at,
 };
 
@@ -243,17 +260,105 @@ function resolveErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-function createDefaultDimensions(): ScreeningDimension[] {
-  return [
-    { key: "goal_orientation", label: "目标导向", weight: 30 },
-    { key: "team_collaboration", label: "团队协作", weight: 15 },
-    { key: "self_drive", label: "自驱力", weight: 15 },
-    { key: "reflection_iteration", label: "反思迭代", weight: 10 },
-    { key: "openness", label: "开放性", weight: 8 },
-    { key: "resilience", label: "抗压韧性", weight: 7 },
-    { key: "learning_ability", label: "学习能力", weight: 10 },
-    { key: "values_fit", label: "价值观契合", weight: 5 },
-  ];
+function createDefaultScoringConfig(): ScoringTemplateConfig {
+  return {
+    weights: { t0: 50, t1: 30, t2: 10, t3: 10 },
+    t0: {
+      items: [
+        {
+          key: "required_skills_match",
+          label: "岗位技能匹配",
+          description: "岗位描述/技能要求与候选人技能覆盖是否匹配。",
+          weight: 50,
+        },
+        {
+          key: "years_experience_match",
+          label: "经验年限匹配",
+          description: "候选人年限是否满足岗位复杂度要求。",
+          weight: 30,
+        },
+        {
+          key: "resume_completeness",
+          label: "简历信息完整度",
+          description: "简历证据是否足以支撑判断。",
+          weight: 20,
+        },
+      ],
+    },
+    t1: {
+      items: [
+        { key: "goal_orientation", label: "目标导向", description: "是否有明确目标并形成可交付结果。", weight: 30 },
+        { key: "team_collaboration", label: "团队协作", description: "跨角色协作、沟通与推进效率。", weight: 15 },
+        { key: "self_drive", label: "自驱力", description: "主动承担、持续推进和问题闭环能力。", weight: 15 },
+        { key: "reflection_iteration", label: "反思迭代", description: "复盘意识和迭代改进能力。", weight: 10 },
+        { key: "openness", label: "开放性", description: "对反馈与变化的接受度和执行力。", weight: 8 },
+        { key: "resilience", label: "抗压韧性", description: "复杂场景下的稳定性和恢复能力。", weight: 7 },
+        { key: "learning_ability", label: "学习能力", description: "知识吸收与迁移速度。", weight: 10 },
+        { key: "values_fit", label: "价值观契合", description: "与团队协作价值观一致性。", weight: 5 },
+      ],
+    },
+    t2: {
+      items: [
+        {
+          key: "core_skill_bonus",
+          label: "核心技能加分",
+          description: "核心技能命中程度是否超出岗位最低要求。",
+          weight: 40,
+        },
+        {
+          key: "project_impact_bonus",
+          label: "项目影响力加分",
+          description: "项目成果是否有可量化业务影响。",
+          weight: 30,
+        },
+        {
+          key: "rare_stack_bonus",
+          label: "稀缺技术栈加分",
+          description: "是否具备岗位稀缺/高价值技术栈。",
+          weight: 30,
+        },
+      ],
+    },
+    t3: {
+      items: [
+        {
+          key: "salary_risk",
+          label: "薪资风险",
+          description: "薪资预期与岗位预算差异风险（低风险高分）。",
+          weight: 35,
+        },
+        {
+          key: "stability_risk",
+          label: "稳定性风险",
+          description: "履历稳定性与持续投入风险（低风险高分）。",
+          weight: 35,
+        },
+        {
+          key: "info_completeness_risk",
+          label: "信息缺失风险",
+          description: "关键信息缺失带来的决策风险（低风险高分）。",
+          weight: 30,
+        },
+      ],
+    },
+  };
+}
+
+function createDefaultSectionItem(section: SectionKey, index: number): ScoringItemConfig {
+  return {
+    key: `${section}_item_${index}`,
+    label: `${section.toUpperCase()} 指标${index}`,
+    description: "",
+    weight: 10,
+  };
+}
+
+function cloneScoringConfig(config: ScoringTemplateConfig): ScoringTemplateConfig {
+  return JSON.parse(JSON.stringify(config)) as ScoringTemplateConfig;
+}
+
+function sectionWeightTotal(sectionKey: SectionKey): number {
+  return templateForm.config[sectionKey].items.reduce((sum, item) => sum + Number(item.weight || 0), 0);
 }
 
 function resetJobForm() {
@@ -269,8 +374,7 @@ function resetJobForm() {
 function resetTemplateForm() {
   templateForm.template_id = 0;
   templateForm.name = "";
-  templateForm.dimensions = createDefaultDimensions();
-  templateForm.risk_rules_text = "{}";
+  templateForm.config = createDefaultScoringConfig();
 }
 
 function toOptionalText(value: string): string | undefined {
@@ -288,7 +392,7 @@ function normalizeJobTemplateId(templateId: number | null | undefined): number {
     : 0;
 }
 
-function isResidentDefaultTemplate(template: ScreeningTemplateRecord): boolean {
+function isResidentDefaultTemplate(template: ScoringTemplateRecord): boolean {
   return residentDefaultTemplateId.value === template.id;
 }
 
@@ -306,8 +410,8 @@ function openEditJobModal(job: JobRecord) {
   jobForm.city = job.city || "";
   jobForm.salary_k = job.salary_k || "";
   jobForm.description = job.description || "";
-  const templateId = job.screening_template_id ?? 0;
-  jobForm.template_id = store.screeningTemplates.length > 0
+  const templateId = job.scoring_template_id ?? 0;
+  jobForm.template_id = store.scoringTemplates.length > 0
     ? normalizeJobTemplateId(templateId)
     : templateId;
   jobModalOpen.value = true;
@@ -355,7 +459,7 @@ async function saveJob() {
       });
     }
 
-    await store.setJobScreeningTemplate({
+    await store.setJobScoringTemplate({
       job_id: savedJob.id,
       template_id: jobForm.template_id > 0 ? jobForm.template_id : null,
     });
@@ -441,16 +545,11 @@ function openCreateTemplateEditor() {
   templateEditorOpen.value = true;
 }
 
-function openEditTemplateEditor(template: ScreeningTemplateRecord) {
+function openEditTemplateEditor(template: ScoringTemplateRecord) {
   templateEditorMode.value = "edit";
   templateForm.template_id = template.id;
   templateForm.name = template.name || "";
-  templateForm.dimensions = template.dimensions.map((item) => ({
-    key: item.key,
-    label: item.label,
-    weight: item.weight,
-  }));
-  templateForm.risk_rules_text = JSON.stringify(template.risk_rules ?? {}, null, 2);
+  templateForm.config = cloneScoringConfig(template.config);
   templateEditorOpen.value = true;
 }
 
@@ -462,70 +561,72 @@ function handleTemplateDrawerBackdropClick() {
   closeTemplateListModal();
 }
 
-function addTemplateDimension() {
-  const next = templateForm.dimensions.length + 1;
-  templateForm.dimensions.push({
-    key: `custom_dimension_${next}`,
-    label: `自定义维度${next}`,
-    weight: 5,
-  });
+function sectionLabel(section: SectionKey): string {
+  if (section === "t0") {
+    return "T0 重要指标";
+  }
+  if (section === "t1") {
+    return "T1 指标配置";
+  }
+  if (section === "t2") {
+    return "T2 加分项";
+  }
+  return "T3 风险项";
 }
 
-function removeTemplateDimension(index: number) {
-  if (templateForm.dimensions.length <= 1) {
-    toast.warning("至少保留一个维度");
+function addTemplateItem(section: SectionKey) {
+  const next = templateForm.config[section].items.length + 1;
+  templateForm.config[section].items.push(createDefaultSectionItem(section, next));
+}
+
+function removeTemplateItem(section: SectionKey, index: number) {
+  if (templateForm.config[section].items.length <= 1) {
+    toast.warning(`${sectionLabel(section)} 至少保留一个条目`);
     return;
   }
-  templateForm.dimensions.splice(index, 1);
-}
-
-function parseTemplateRiskRules(): Record<string, unknown> | null {
-  const text = templateForm.risk_rules_text.trim();
-  if (!text) {
-    return {};
-  }
-
-  try {
-    const parsed = JSON.parse(text);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      toast.warning("风险规则必须是 JSON 对象");
-      return null;
-    }
-    return parsed as Record<string, unknown>;
-  } catch {
-    toast.warning("风险规则 JSON 格式不正确");
-    return null;
-  }
+  templateForm.config[section].items.splice(index, 1);
 }
 
 async function saveTemplate() {
   if (templateWeightTotal.value !== 100) {
-    toast.warning(`权重总和必须为100，当前为 ${templateWeightTotal.value}`);
+    toast.warning(`区块权重总和必须为 100，当前为 ${templateWeightTotal.value}`);
     return;
   }
 
-  const normalizedDimensions = templateForm.dimensions.map((item) => ({
-    key: item.key.trim(),
-    label: item.label.trim(),
-    weight: Number(item.weight),
-  }));
-  if (normalizedDimensions.some((item) => !item.key || !item.label)) {
-    toast.warning("请填写完整的维度 key 与名称");
-    return;
-  }
-
-  const riskRules = parseTemplateRiskRules();
-  if (!riskRules) {
-    return;
+  const normalizedConfig = cloneScoringConfig(templateForm.config);
+  for (const section of sectionKeys) {
+    if (normalizedConfig[section].items.length === 0) {
+      toast.warning(`${sectionLabel(section)} 至少保留一个条目`);
+      return;
+    }
+    let sectionSum = 0;
+    for (const item of normalizedConfig[section].items) {
+      item.key = item.key.trim();
+      item.label = item.label.trim();
+      item.description = item.description.trim();
+      item.weight = Number(item.weight);
+      if (!item.key || !item.label) {
+        toast.warning(`${sectionLabel(section)} 请填写完整的条目 key 与名称`);
+        return;
+      }
+      if (!Number.isFinite(item.weight) || item.weight <= 0) {
+        toast.warning(`${sectionLabel(section)} 条目权重必须大于 0`);
+        return;
+      }
+      sectionSum += item.weight;
+    }
+    if (sectionSum !== 100) {
+      toast.warning(`${sectionLabel(section)} 条目权重总和必须为 100，当前为 ${sectionSum}`);
+      return;
+    }
   }
 
   savingTemplate.value = true;
   try {
     if (templateEditorMode.value === "create") {
-      await store.createScreeningTemplate({
+      await store.createScoringTemplate({
         name: templateForm.name.trim() || "新评分模板",
-        dimensions: normalizedDimensions,
-        risk_rules: riskRules,
+        config: normalizedConfig,
       });
       toast.success("评分模板已创建");
     } else {
@@ -533,16 +634,15 @@ async function saveTemplate() {
         toast.danger("模板ID缺失");
         return;
       }
-      await store.updateScreeningTemplate({
+      await store.updateScoringTemplate({
         template_id: templateForm.template_id,
         name: templateForm.name.trim() || undefined,
-        dimensions: normalizedDimensions,
-        risk_rules: riskRules,
+        config: normalizedConfig,
       });
       toast.success("评分模板已更新");
     }
 
-    await store.loadScreeningTemplates();
+    await store.loadScoringTemplates();
     closeTemplateEditor(true);
   } catch (error) {
     toast.danger(resolveErrorMessage(error, "保存评分模板失败"));
@@ -551,9 +651,9 @@ async function saveTemplate() {
   }
 }
 
-function askRemoveTemplate(template: ScreeningTemplateRecord) {
+function askRemoveTemplate(template: ScoringTemplateRecord) {
   if (isResidentDefaultTemplate(template)) {
-    toast.warning("默认筛选模板不可删除，可直接编辑");
+    toast.warning("默认评分模板不可删除，可直接编辑");
     return;
   }
   deleteConfirmTemplate.value = template;
@@ -574,7 +674,7 @@ async function removeTemplate() {
 
   deletingTemplateId.value = template.id;
   try {
-    await store.deleteScreeningTemplate(template.id);
+    await store.deleteScoringTemplate(template.id);
     if (jobForm.template_id === template.id) {
       jobForm.template_id = 0;
     }
@@ -588,9 +688,9 @@ async function removeTemplate() {
 }
 
 watch(
-  () => store.screeningTemplates,
+  () => store.scoringTemplates,
   () => {
-    if (!jobModalOpen.value || store.screeningTemplates.length === 0) {
+    if (!jobModalOpen.value || store.scoringTemplates.length === 0) {
       return;
     }
     jobForm.template_id = normalizeJobTemplateId(jobForm.template_id);
@@ -644,7 +744,7 @@ watch(
 
 onMounted(async () => {
   try {
-    await store.loadScreeningTemplates();
+    await store.loadScoringTemplates();
   } catch (error) {
     toast.danger(resolveErrorMessage(error, "加载评分模板失败"));
   }
@@ -708,7 +808,7 @@ onMounted(async () => {
             <UiTd>
               <UiBadge :tone="jobStatusTone(job.status)">{{ jobStatusLabel(job.status) }}</UiBadge>
             </UiTd>
-            <UiTd>{{ job.screening_template_name || residentDefaultTemplate?.name || "默认筛选模板" }}</UiTd>
+            <UiTd>{{ job.scoring_template_name || residentDefaultTemplate?.name || "默认评分模板" }}</UiTd>
             <UiTd no-wrap>{{ job.updated_at }}</UiTd>
             <UiTd no-wrap>
               <div class="flex justify-center gap-2 flex-wrap">
@@ -767,7 +867,7 @@ onMounted(async () => {
           </div>
           <UiField class="mt-2.5" label="评分模板">
             <select v-model.number="jobForm.template_id">
-              <option :value="0">{{ residentDefaultTemplate?.name || "默认筛选模板" }}</option>
+              <option :value="0">{{ residentDefaultTemplate?.name || "默认评分模板" }}</option>
               <option v-for="template in overrideTemplateOptions" :key="template.id" :value="template.id">
                 {{ template.name }}
               </option>
@@ -846,7 +946,9 @@ onMounted(async () => {
                     {{ template.name }}
                     <span v-if="isResidentDefaultTemplate(template)" class="ml-1 text-xs text-muted">(默认)</span>
                   </UiTd>
-                  <UiTd>{{ template.dimensions.length }}</UiTd>
+                  <UiTd>
+                    {{ template.config.t0.items.length + template.config.t1.items.length + template.config.t2.items.length + template.config.t3.items.length }}
+                  </UiTd>
                   <UiTd no-wrap>{{ template.updated_at }}</UiTd>
                   <UiTd no-wrap>
                     <div class="flex justify-center gap-2 flex-wrap">
@@ -879,40 +981,73 @@ onMounted(async () => {
               <input v-model="templateForm.name" placeholder="例如：前端工程师模板" />
             </UiField>
             <p v-if="isEditingResidentDefaultTemplate" class="mt-1 text-sm text-muted">
-              当前为系统默认筛选模板，常驻不可删除，可直接编辑维度与风险规则。
+              当前为系统默认评分模板，常驻不可删除，可直接编辑四区块配置。
             </p>
 
-            <div class="mt-3 mb-2 flex items-center gap-2">
-              <UiButton variant="secondary" @click="addTemplateDimension">新增维度</UiButton>
+            <div class="mt-3 rounded-xl border border-line p-3">
+              <p class="m-0 text-sm font-700">区块权重（总和必须=100）</p>
+              <div class="mt-2 grid grid-cols-2 gap-2 lt-lg:grid-cols-1">
+                <UiField label="T0 权重">
+                  <input v-model.number="templateForm.config.weights.t0" type="number" min="1" max="100" step="1" />
+                </UiField>
+                <UiField label="T1 权重">
+                  <input v-model.number="templateForm.config.weights.t1" type="number" min="1" max="100" step="1" />
+                </UiField>
+                <UiField label="T2 权重">
+                  <input v-model.number="templateForm.config.weights.t2" type="number" min="1" max="100" step="1" />
+                </UiField>
+                <UiField label="T3 权重">
+                  <input v-model.number="templateForm.config.weights.t3" type="number" min="1" max="100" step="1" />
+                </UiField>
+              </div>
+              <p class="mt-2 mb-0 text-sm" :class="templateWeightTotal === 100 ? 'text-brand' : 'text-danger'">
+                区块权重合计: {{ templateWeightTotal }} / 100
+              </p>
             </div>
 
-            <div class="grid gap-2.5">
+            <div class="mt-3 grid gap-3">
               <div
-                v-for="(item, index) in templateForm.dimensions"
-                :key="`${item.key}-${index}`"
-                class="border border-line rounded-xl p-2.5 grid grid-cols-[1fr_1fr_140px_auto] gap-2 lt-lg:grid-cols-1"
+                v-for="section in sectionKeys"
+                :key="section"
+                class="border border-line rounded-xl p-3"
               >
-                <UiField label="维度 Key">
-                  <input v-model="item.key" placeholder="例如：goal_orientation" />
-                </UiField>
-                <UiField label="维度名称">
-                  <input v-model="item.label" placeholder="例如：目标导向" />
-                </UiField>
-                <UiField label="权重">
-                  <input v-model.number="item.weight" type="number" min="1" max="100" step="1" />
-                </UiField>
-                <div class="flex items-end">
-                  <UiButton variant="ghost" @click="removeTemplateDimension(index)">删除</UiButton>
+                <div class="flex items-center justify-between gap-2 flex-wrap">
+                  <p class="m-0 text-sm font-700">{{ sectionLabel(section) }}</p>
+                  <div class="flex items-center gap-2">
+                    <UiButton variant="secondary" @click="addTemplateItem(section)">新增条目</UiButton>
+                    <span
+                      class="text-xs"
+                      :class="sectionWeightTotal(section) === 100 ? 'text-muted' : 'text-danger'"
+                    >
+                      条目权重合计 {{ sectionWeightTotal(section) }} / 100
+                    </span>
+                  </div>
+                </div>
+                <div class="mt-2 grid gap-2">
+                  <div
+                    v-for="(item, index) in templateForm.config[section].items"
+                    :key="`${section}-${item.key}-${index}`"
+                    class="border border-line rounded-lg p-2 grid grid-cols-[1fr_1fr_1fr_120px_auto] gap-2 lt-lg:grid-cols-1"
+                  >
+                    <UiField label="Key">
+                      <input v-model="item.key" :placeholder="`${section}_item_key`" />
+                    </UiField>
+                    <UiField label="名称">
+                      <input v-model="item.label" placeholder="条目名称" />
+                    </UiField>
+                    <UiField label="说明">
+                      <input v-model="item.description" placeholder="条目说明" />
+                    </UiField>
+                    <UiField label="权重">
+                      <input v-model.number="item.weight" type="number" min="1" max="100" step="1" />
+                    </UiField>
+                    <div class="flex items-end">
+                      <UiButton variant="ghost" @click="removeTemplateItem(section, index)">删除</UiButton>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
-
-            <UiField class="mt-3" label="风险规则（JSON）" help="用于补充筛选风险规则，可为空对象">
-              <textarea v-model="templateForm.risk_rules_text" rows="6" placeholder='{"highRiskKeywords":["频繁跳槽"]}' />
-            </UiField>
-            <p class="mt-3 mb-2 text-sm" :class="templateWeightTotal === 100 ? 'text-brand' : 'text-danger'">
-              权重合计: {{ templateWeightTotal }} / 100
-            </p>
           </div>
 
           <div v-if="templateEditorOpen" class="mt-4 flex flex-wrap justify-end gap-2">

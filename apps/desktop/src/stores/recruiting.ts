@@ -20,11 +20,11 @@ import {
   updateCandidate as updateCandidateApi,
   deleteCandidate as deleteCandidateApi,
   setCandidateQualification as setCandidateQualificationApi,
-  createScreeningTemplate as createScreeningTemplateApi,
+  createScreeningTemplate as createScoringTemplateApi,
   createCrawlTask,
   createJob,
   deleteJob as deleteJobApi,
-  deleteScreeningTemplate as deleteScreeningTemplateApi,
+  deleteScreeningTemplate as deleteScoringTemplateApi,
   getHealth,
   listCandidates,
   listCrawlTasks,
@@ -41,11 +41,11 @@ import {
   triggerSidecarCrawlCandidates,
   triggerSidecarCrawlJobs,
   triggerSidecarCrawlResume,
-  setJobScreeningTemplate as setJobScreeningTemplateApi,
+  setJobScreeningTemplate as setJobScoringTemplateApi,
   stopJob as stopJobApi,
   upsertTaskRuntimeSettings,
   updateJob as updateJobApi,
-  updateScreeningTemplate as updateScreeningTemplateApi,
+  updateScreeningTemplate as updateScoringTemplateApi,
   updateCrawlTask,
   updateCrawlTaskPeopleSync as updateCrawlTaskPeopleSyncApi,
   upsertCrawlTaskPeople as upsertCrawlTaskPeopleApi,
@@ -55,21 +55,26 @@ import {
   type AiProviderId,
   type AiProviderSettings,
   type AiProviderTestResult,
-  type ScreeningResultRecord,
+  type ScoringResultRecord,
+  type ScoringTemplateRecord,
   type ScreeningTemplateRecord,
+  type UpsertScoringTemplatePayload,
   type UpsertScreeningTemplatePayload,
   type PipelineEvent,
   type InterviewEvaluationRecord,
   type InterviewFeedbackRecord,
   type HiringDecisionRecord,
   type InterviewKitRecord,
+  type CreateScoringTemplatePayload,
   type CreateScreeningTemplatePayload,
   type SearchHit,
   type SetCandidateQualificationPayload,
+  type SetJobScoringTemplatePayload,
   type SetJobScreeningTemplatePayload,
   type TaskRuntimeSettings,
   type UpdateCandidatePayload,
   type UpdateJobPayload,
+  type UpdateScoringTemplatePayload,
   type UpdateScreeningTemplatePayload,
   finalizeHiringDecision as finalizeHiringDecisionApi,
   generateInterviewKit as generateInterviewKitApi,
@@ -278,6 +283,67 @@ function parseCandidatesTaskPayload(task: CrawlTaskRecord): CrawlCandidatesTaskP
   };
 }
 
+function defaultScoringTemplateConfig() {
+  return {
+    weights: { t0: 50, t1: 30, t2: 10, t3: 10 },
+    t0: {
+      items: [
+        { key: "required_skills_match", label: "岗位技能匹配", description: "", weight: 50 },
+        { key: "years_experience_match", label: "经验年限匹配", description: "", weight: 30 },
+        { key: "resume_completeness", label: "简历信息完整度", description: "", weight: 20 },
+      ],
+    },
+    t1: { items: [] as Array<{ key: string; label: string; description: string; weight: number }> },
+    t2: {
+      items: [
+        { key: "core_skill_bonus", label: "核心技能加分", description: "", weight: 40 },
+        { key: "project_impact_bonus", label: "项目影响力加分", description: "", weight: 30 },
+        { key: "rare_stack_bonus", label: "稀缺技术栈加分", description: "", weight: 30 },
+      ],
+    },
+    t3: {
+      items: [
+        { key: "salary_risk", label: "薪资风险", description: "", weight: 35 },
+        { key: "stability_risk", label: "稳定性风险", description: "", weight: 35 },
+        { key: "info_completeness_risk", label: "信息缺失风险", description: "", weight: 30 },
+      ],
+    },
+  };
+}
+
+function normalizeScoringTemplateRecord(
+  template: ScoringTemplateRecord | ScreeningTemplateRecord,
+): ScoringTemplateRecord {
+  if ("config" in template && template.config) {
+    return template;
+  }
+
+  const legacy = template as ScreeningTemplateRecord;
+  const config = defaultScoringTemplateConfig();
+  if (legacy.dimensions.length > 0) {
+    config.t1.items = legacy.dimensions.map((dimension) => ({
+      key: dimension.key,
+      label: dimension.label,
+      description: "",
+      weight: dimension.weight,
+    }));
+  } else {
+    config.t1.items = [
+      { key: "goal_orientation", label: "目标导向", description: "", weight: 100 },
+    ];
+  }
+
+  return {
+    id: legacy.id,
+    scope: legacy.scope,
+    name: legacy.name,
+    job_id: legacy.job_id,
+    config,
+    created_at: legacy.created_at,
+    updated_at: legacy.updated_at,
+  };
+}
+
 export const useRecruitingStore = defineStore("recruiting", () => {
   const SIDECAR_HEALTH_REFRESH_INTERVAL_MS = 15_000;
   const loading = ref(false);
@@ -293,7 +359,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
   const sidecarError = ref<string | null>(null);
 
   const analyses = ref<Record<number, UiAnalysisRecord[]>>({});
-  const screeningResults = ref<Record<number, ScreeningResultRecord[]>>({});
+  const scoringResults = ref<Record<number, ScoringResultRecord[]>>({});
   const interviewKits = ref<Record<number, InterviewKitRecord | null>>({});
   const interviewFeedback = ref<Record<number, InterviewFeedbackRecord[]>>({});
   const interviewEvaluations = ref<Record<number, InterviewEvaluationRecord[]>>({});
@@ -308,8 +374,8 @@ export const useRecruitingStore = defineStore("recruiting", () => {
   });
   const candidateImportConflicts = ref<CandidateImportConflict[]>([]);
   const lastCandidateImportReport = ref<CandidateImportQualityReport | null>(null);
-  const activeScreeningTemplate = ref<ScreeningTemplateRecord | null>(null);
-  const screeningTemplates = ref<ScreeningTemplateRecord[]>([]);
+  const activeScoringTemplate = ref<ScoringTemplateRecord | null>(null);
+  const scoringTemplates = ref<ScoringTemplateRecord[]>([]);
 
   const hasBootstrapped = ref(false);
   const stageSummary = computed(() => metrics.value?.stage_stats ?? []);
@@ -703,9 +769,9 @@ export const useRecruitingStore = defineStore("recruiting", () => {
               job_id: candidate.job_id ?? undefined,
             });
           } catch (error) {
-            const screeningErrorMessage = resolveErrorMessage(error, "resume_screening_failed");
-            if (screeningErrorMessage !== "Resume required before screening") {
-              throw new Error(screeningErrorMessage);
+            const scoringErrorMessage = resolveErrorMessage(error, "candidate_scoring_failed");
+            if (scoringErrorMessage !== "Resume required before scoring") {
+              throw new Error(scoringErrorMessage);
             }
           }
           syncOutcomesByDedupe.set(pending.dedupe_key, {
@@ -987,7 +1053,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     await deleteCandidateApi(candidateId);
     candidates.value = candidates.value.filter((item) => item.id !== candidateId);
     delete analyses.value[candidateId];
-    delete screeningResults.value[candidateId];
+    delete scoringResults.value[candidateId];
     delete interviewKits.value[candidateId];
     delete interviewFeedback.value[candidateId];
     delete interviewEvaluations.value[candidateId];
@@ -1081,19 +1147,19 @@ export const useRecruitingStore = defineStore("recruiting", () => {
 
   const analysisContext = createAnalysisContextModule({
     analyses,
-    screeningResults,
+    scoringResults,
     interviewKits,
     interviewFeedback,
     interviewEvaluations,
     hiringDecisions,
     pipelineEvents,
     mapAnalysis: mapBackendAnalysisRecord,
-    runCandidateAnalysis,
+    runCandidateScoring: runCandidateAnalysis,
     listAnalysis,
     listHiringDecisions,
     listInterviewEvaluations,
     listPipelineEvents,
-    listScreeningResults,
+    listScoringResults: listScreeningResults,
     runResumeScreening,
     upsertResume,
     refreshMetrics,
@@ -1156,71 +1222,75 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     return aiSettings.value;
   }
 
-  async function loadScreeningTemplate(jobId?: number) {
-    activeScreeningTemplate.value = await getScreeningTemplate(jobId);
-    return activeScreeningTemplate.value;
+  async function loadScoringTemplate(jobId?: number) {
+    activeScoringTemplate.value = normalizeScoringTemplateRecord(await getScreeningTemplate(jobId));
+    return activeScoringTemplate.value;
   }
 
-  async function saveScreeningTemplate(input: UpsertScreeningTemplatePayload) {
-    activeScreeningTemplate.value = await upsertScreeningTemplate(input);
-    return activeScreeningTemplate.value;
+  async function saveScoringTemplate(input: UpsertScoringTemplatePayload | UpsertScreeningTemplatePayload) {
+    activeScoringTemplate.value = normalizeScoringTemplateRecord(await upsertScreeningTemplate(input));
+    return activeScoringTemplate.value;
   }
 
-  async function loadScreeningTemplates() {
-    screeningTemplates.value = await listScreeningTemplates();
-    return screeningTemplates.value;
+  async function loadScoringTemplates() {
+    scoringTemplates.value = (await listScreeningTemplates()).map(normalizeScoringTemplateRecord);
+    return scoringTemplates.value;
   }
 
-  async function createScreeningTemplate(input: CreateScreeningTemplatePayload) {
-    const created = await createScreeningTemplateApi(input);
-    screeningTemplates.value = [created, ...screeningTemplates.value.filter((item) => item.id !== created.id)];
+  async function createScoringTemplate(input: CreateScoringTemplatePayload | CreateScreeningTemplatePayload) {
+    const created = normalizeScoringTemplateRecord(
+      await createScoringTemplateApi(input as CreateScoringTemplatePayload),
+    );
+    scoringTemplates.value = [created, ...scoringTemplates.value.filter((item) => item.id !== created.id)];
     return created;
   }
 
-  async function updateScreeningTemplate(input: UpdateScreeningTemplatePayload) {
-    const updated = await updateScreeningTemplateApi(input);
-    const index = screeningTemplates.value.findIndex((item) => item.id === updated.id);
+  async function updateScoringTemplate(input: UpdateScoringTemplatePayload | UpdateScreeningTemplatePayload) {
+    const updated = normalizeScoringTemplateRecord(
+      await updateScoringTemplateApi(input as UpdateScoringTemplatePayload),
+    );
+    const index = scoringTemplates.value.findIndex((item) => item.id === updated.id);
     if (index >= 0) {
-      screeningTemplates.value.splice(index, 1, updated);
+      scoringTemplates.value.splice(index, 1, updated);
     } else {
-      screeningTemplates.value.unshift(updated);
+      scoringTemplates.value.unshift(updated);
     }
-    if (activeScreeningTemplate.value?.id === updated.id) {
-      activeScreeningTemplate.value = updated;
+    if (activeScoringTemplate.value?.id === updated.id) {
+      activeScoringTemplate.value = updated;
     }
     jobs.value = jobs.value.map((job) =>
-      job.screening_template_id === updated.id
+      job.scoring_template_id === updated.id
         ? {
             ...job,
-            screening_template_name: updated.name,
+            scoring_template_name: updated.name,
           }
         : job,
     );
     return updated;
   }
 
-  async function deleteScreeningTemplate(templateId: number) {
-    screeningTemplates.value = await deleteScreeningTemplateApi(templateId);
+  async function deleteScoringTemplate(templateId: number) {
+    scoringTemplates.value = (await deleteScoringTemplateApi(templateId)).map(normalizeScoringTemplateRecord);
     if (
-      activeScreeningTemplate.value
-      && !screeningTemplates.value.some((item) => item.id === activeScreeningTemplate.value?.id)
+      activeScoringTemplate.value
+      && !scoringTemplates.value.some((item) => item.id === activeScoringTemplate.value?.id)
     ) {
-      activeScreeningTemplate.value = null;
+      activeScoringTemplate.value = null;
     }
     jobs.value = jobs.value.map((job) =>
-      job.screening_template_id === templateId
+      job.scoring_template_id === templateId
         ? {
             ...job,
-            screening_template_id: null,
-            screening_template_name: null,
+            scoring_template_id: null,
+            scoring_template_name: null,
           }
         : job,
     );
-    return screeningTemplates.value;
+    return scoringTemplates.value;
   }
 
-  async function setJobScreeningTemplate(input: SetJobScreeningTemplatePayload) {
-    const job = await setJobScreeningTemplateApi(input);
+  async function setJobScoringTemplate(input: SetJobScoringTemplatePayload | SetJobScreeningTemplatePayload) {
+    const job = await setJobScoringTemplateApi(input as SetJobScoringTemplatePayload);
     upsertJobInList(job);
     return job;
   }
@@ -1385,7 +1455,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     sidecarHealthy,
     sidecarError,
     analyses,
-    screeningResults,
+    scoringResults,
     interviewKits,
     interviewFeedback,
     interviewEvaluations,
@@ -1393,8 +1463,10 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     pipelineEvents,
     searchResults,
     aiSettings,
-    activeScreeningTemplate,
-    screeningTemplates,
+    activeScoringTemplate,
+    activeScreeningTemplate: activeScoringTemplate,
+    scoringTemplates,
+    screeningTemplates: scoringTemplates,
     taskSettings,
     candidateImportConflicts,
     lastCandidateImportReport,
@@ -1430,13 +1502,20 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     search,
     importResumeFile: analysisContext.importResumeFile,
     importResumeFileAndAnalyze: analysisContext.importResumeFileAndAnalyze,
-    loadScreeningTemplate,
-    saveScreeningTemplate,
-    loadScreeningTemplates,
-    createScreeningTemplate,
-    updateScreeningTemplate,
-    deleteScreeningTemplate,
-    setJobScreeningTemplate,
+    loadScoringTemplate,
+    loadScreeningTemplate: loadScoringTemplate,
+    saveScoringTemplate,
+    saveScreeningTemplate: saveScoringTemplate,
+    loadScoringTemplates,
+    loadScreeningTemplates: loadScoringTemplates,
+    createScoringTemplate,
+    createScreeningTemplate: createScoringTemplate,
+    updateScoringTemplate,
+    updateScreeningTemplate: updateScoringTemplate,
+    deleteScoringTemplate,
+    deleteScreeningTemplate: deleteScoringTemplate,
+    setJobScoringTemplate,
+    setJobScreeningTemplate: setJobScoringTemplate,
     runScreening: analysisContext.runScreening,
     rerunAiAnalysis: analysisContext.rerunAiAnalysis,
     generateInterviewKit: analysisContext.generateInterviewKit,

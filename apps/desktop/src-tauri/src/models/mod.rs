@@ -6,4 +6,5 @@ pub(crate) mod hiring;
 pub(crate) mod interview;
 pub(crate) mod job;
 pub(crate) mod metrics;
+pub(crate) mod scoring;
 pub(crate) mod screening;

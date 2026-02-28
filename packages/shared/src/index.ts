@@ -77,7 +77,7 @@ export interface JobContext {
 }
 
 export interface DimensionScore {
-  key: "skill_match" | "experience" | "compensation" | "stability";
+  key: string;
   score: number;
   reason: string;
 }
@@ -102,41 +102,56 @@ export interface AnalysisResult {
   };
 }
 
-export type ScreeningRecommendation = "PASS" | "REVIEW" | "REJECT";
-export type ScreeningRiskLevel = "LOW" | "MEDIUM" | "HIGH";
+export type ScoringRecommendation = "PASS" | "REVIEW" | "REJECT";
+export type ScoringRiskLevel = "LOW" | "MEDIUM" | "HIGH";
 
-export interface ScreeningDimension {
+export interface ScoringItemConfig {
   key: string;
   label: string;
+  description: string;
   weight: number;
 }
 
-export interface ScreeningTemplate {
+export interface ScoringSectionConfig {
+  items: ScoringItemConfig[];
+}
+
+export interface ScoringTemplateConfig {
+  weights: {
+    t0: number;
+    t1: number;
+    t2: number;
+    t3: number;
+  };
+  t0: ScoringSectionConfig;
+  t1: ScoringSectionConfig;
+  t2: ScoringSectionConfig;
+  t3: ScoringSectionConfig;
+}
+
+export interface ScoringTemplate {
   id: number;
   scope: "global" | "job";
   name: string;
   job_id?: number | null;
-  dimensions: ScreeningDimension[];
-  risk_rules: Record<string, unknown>;
+  config: ScoringTemplateConfig;
   created_at: string;
   updated_at: string;
 }
 
-export interface ScreeningResult {
+export interface ScoringResult {
   id: number;
   candidate_id: number;
   job_id?: number | null;
   template_id?: number | null;
-  t0_score: number;
-  t1_score: number;
-  fine_score: number;
-  bonus_score: number;
-  risk_penalty: number;
+  overall_score_5: number;
+  t0_score_5: number;
+  t1_score_5: number;
+  t2_score_5: number;
+  t3_score_5: number;
   overall_score: number;
-  recommendation: ScreeningRecommendation;
-  risk_level: ScreeningRiskLevel;
-  evidence: string[];
-  verification_points: string[];
+  recommendation: ScoringRecommendation;
+  risk_level: ScoringRiskLevel;
   structured_result: Record<string, unknown>;
   created_at: string;
 }
@@ -211,6 +226,8 @@ export interface JobRecord {
   salary_k?: string | null;
   description?: string | null;
   status?: JobStatus;
+  scoring_template_id?: number | null;
+  scoring_template_name?: string | null;
   screening_template_id?: number | null;
   screening_template_name?: string | null;
   created_at: string;
