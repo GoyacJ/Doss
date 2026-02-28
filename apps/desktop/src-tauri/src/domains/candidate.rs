@@ -1,14 +1,17 @@
 use base64::prelude::*;
 use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
+use serde::Serialize;
 use serde_json::Value;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::core::cipher::FieldCipher;
 use crate::core::error::AppError;
 use crate::core::pii::{hash_value, mask_email, mask_phone, normalize_phone};
 use crate::core::state::AppState;
 use crate::core::time::now_iso;
-use crate::domains::ai_runtime::{invoke_cloud_provider, resolve_ai_settings};
+use crate::domains::ai_runtime::{
+    invoke_cloud_provider, resolve_ai_settings, AiInvokeProgressEvent,
+};
 use crate::domains::screening::{
     build_structured_resume_fields, clamp_score, extract_file_extension,
     extract_text_from_docx_bytes, extract_text_from_pdf_bytes, extract_text_from_plain_bytes,
@@ -31,6 +34,74 @@ use crate::models::candidate::{
 use crate::models::common::{
     is_valid_transition, resolve_qualification_stage, PageResult, PipelineStage, SourceType,
 };
+
+const ANALYSIS_PROGRESS_EVENT: &str = "candidate-analysis-progress";
+
+#[derive(Debug, Clone)]
+struct AnalysisProgressUpdate {
+    phase: &'static str,
+    status: &'static str,
+    kind: &'static str,
+    message: String,
+    meta: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CandidateAnalysisProgressPayload {
+    run_id: String,
+    candidate_id: i64,
+    phase: String,
+    status: String,
+    kind: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meta: Option<Value>,
+    at: String,
+}
+
+fn analysis_progress_update(
+    phase: &'static str,
+    status: &'static str,
+    kind: &'static str,
+    message: impl Into<String>,
+    meta: Option<Value>,
+) -> AnalysisProgressUpdate {
+    AnalysisProgressUpdate {
+        phase,
+        status,
+        kind,
+        message: message.into(),
+        meta,
+    }
+}
+
+fn to_analysis_progress_payload(
+    run_id: &str,
+    candidate_id: i64,
+    update: AnalysisProgressUpdate,
+) -> CandidateAnalysisProgressPayload {
+    CandidateAnalysisProgressPayload {
+        run_id: run_id.to_string(),
+        candidate_id,
+        phase: update.phase.to_string(),
+        status: update.status.to_string(),
+        kind: update.kind.to_string(),
+        message: update.message,
+        meta: update.meta,
+        at: now_iso(),
+    }
+}
+
+fn emit_analysis_progress(
+    app_handle: &AppHandle,
+    run_id: &str,
+    candidate_id: i64,
+    update: AnalysisProgressUpdate,
+) {
+    let payload = to_analysis_progress_payload(run_id, candidate_id, update);
+    let _ = app_handle.emit(ANALYSIS_PROGRESS_EVENT, payload);
+}
 
 pub(crate) fn merge_candidate_tags(existing: &[String], incoming: &[String]) -> Vec<String> {
     let mut dedup = std::collections::BTreeMap::<String, String>::new();
@@ -1777,11 +1848,23 @@ pub(crate) fn parse_resume_file(
     })
 }
 
-#[tauri::command]
-pub(crate) fn run_candidate_analysis(
-    state: State<'_, AppState>,
+fn run_candidate_analysis_blocking<F>(
+    state: &AppState,
     input: RunAnalysisInput,
-) -> Result<AnalysisRecord, String> {
+    on_progress: F,
+) -> Result<AnalysisRecord, String>
+where
+    F: FnMut(AnalysisProgressUpdate),
+{
+    let mut on_progress = on_progress;
+    on_progress(analysis_progress_update(
+        "prepare",
+        "running",
+        "start",
+        "开始读取候选人与简历上下文",
+        None,
+    ));
+
     let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
 
     let candidate = conn
@@ -1863,6 +1946,16 @@ pub(crate) fn run_candidate_analysis(
 
     let skills = parse_skills(&resume_row.1);
     let normalized_skills: Vec<String> = skills.iter().map(|skill| skill.to_lowercase()).collect();
+    on_progress(analysis_progress_update(
+        "prepare",
+        "running",
+        "progress",
+        "已提取候选人技能与岗位关键词",
+        Some(serde_json::json!({
+            "skillCount": skills.len(),
+            "requiredKeywordCount": required_skills.len(),
+        })),
+    ));
 
     let matched = required_skills
         .iter()
@@ -2001,8 +2094,66 @@ pub(crate) fn run_candidate_analysis(
         resolve_ai_settings(&conn, &state.cipher).map_err(|error| error.to_string())?;
     let provider_name = ai_settings.provider.as_db().to_string();
     let model_name = ai_settings.model.clone();
+    on_progress(analysis_progress_update(
+        "ai",
+        "running",
+        "start",
+        format!("开始调用模型 {} / {}", provider_name, model_name),
+        Some(serde_json::json!({
+            "provider": provider_name,
+            "model": model_name,
+        })),
+    ));
 
-    let cloud_result = invoke_cloud_provider(&ai_settings, &prompt_context, &local_payload);
+    let cloud_result = {
+        let mut ai_hook = |event: AiInvokeProgressEvent| match event {
+            AiInvokeProgressEvent::AttemptStart { attempt, total } => {
+                on_progress(analysis_progress_update(
+                    "ai",
+                    "running",
+                    "progress",
+                    format!("模型调用进行中（第 {attempt}/{total} 次）"),
+                    Some(serde_json::json!({
+                        "attempt": attempt,
+                        "total": total,
+                    })),
+                ));
+            }
+            AiInvokeProgressEvent::AttemptFailure {
+                attempt,
+                total,
+                error,
+            } => {
+                on_progress(analysis_progress_update(
+                    "ai",
+                    "running",
+                    "retry",
+                    format!("第 {attempt}/{total} 次调用失败，准备重试：{error}"),
+                    Some(serde_json::json!({
+                        "attempt": attempt,
+                        "total": total,
+                    })),
+                ));
+            }
+            AiInvokeProgressEvent::Parsed { confidence } => {
+                on_progress(analysis_progress_update(
+                    "ai",
+                    "running",
+                    "progress",
+                    "模型响应已解析，正在整理可解释摘要",
+                    Some(serde_json::json!({
+                        "confidence": confidence,
+                    })),
+                ));
+            }
+        };
+        invoke_cloud_provider(
+            &ai_settings,
+            &prompt_context,
+            &local_payload,
+            Some(&mut ai_hook),
+        )
+    };
     let (final_payload, model_info) = match cloud_result {
         Ok(payload) => (
             payload.clone(),
@@ -2025,6 +2176,47 @@ pub(crate) fn run_candidate_analysis(
             }),
         ),
     };
+    on_progress(analysis_progress_update(
+        "ai",
+        "running",
+        "summary",
+        format!("综合评分 {} 分", final_payload.overall_score),
+        None,
+    ));
+    for item in final_payload.dimension_scores.iter().take(2) {
+        on_progress(analysis_progress_update(
+            "ai",
+            "running",
+            "summary",
+            format!("{}：{}", item.key, item.reason),
+            None,
+        ));
+    }
+    if let Some(highlight) = final_payload.highlights.first() {
+        on_progress(analysis_progress_update(
+            "ai",
+            "running",
+            "summary",
+            format!("亮点：{}", highlight),
+            None,
+        ));
+    }
+    if let Some(risk) = final_payload.risks.first() {
+        on_progress(analysis_progress_update(
+            "ai",
+            "running",
+            "summary",
+            format!("风险：{}", risk),
+            None,
+        ));
+    }
+    on_progress(analysis_progress_update(
+        "persist",
+        "running",
+        "start",
+        "正在写入分析结果并刷新视图",
+        None,
+    ));
 
     let created_at = now_iso();
     conn.execute(
@@ -2051,6 +2243,13 @@ pub(crate) fn run_candidate_analysis(
         ],
     )
     .map_err(|error| error.to_string())?;
+    on_progress(analysis_progress_update(
+        "persist",
+        "running",
+        "progress",
+        "分析结果已写入，正在记录审计日志",
+        None,
+    ));
 
     let id = conn.last_insert_rowid();
 
@@ -2078,6 +2277,86 @@ pub(crate) fn run_candidate_analysis(
     .map_err(|error| error.to_string())?;
 
     Ok(result)
+}
+
+#[tauri::command]
+pub(crate) async fn run_candidate_analysis(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    input: RunAnalysisInput,
+) -> Result<AnalysisRecord, String> {
+    let run_id = input
+        .run_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("analysis-{}-{}", input.candidate_id, now_iso()));
+    let candidate_id = input.candidate_id;
+    let app_state = state.inner().clone();
+    let app_handle_for_task = app_handle.clone();
+    let run_id_for_task = run_id.clone();
+    let input_for_task = input.clone();
+
+    let task_result = tauri::async_runtime::spawn_blocking(move || {
+        let mut last_phase = "prepare".to_string();
+        let result = run_candidate_analysis_blocking(&app_state, input_for_task, |update| {
+            last_phase = update.phase.to_string();
+            emit_analysis_progress(
+                &app_handle_for_task,
+                &run_id_for_task,
+                candidate_id,
+                update,
+            );
+        });
+        (result, last_phase)
+    })
+        .await
+        .map_err(|error| {
+            let message = format!("analysis_task_join_error: {error}");
+            emit_analysis_progress(
+                &app_handle,
+                &run_id,
+                candidate_id,
+                analysis_progress_update("persist", "failed", "end", message.clone(), None),
+            );
+            message
+        })?;
+
+    let (result, last_phase) = task_result;
+    match result {
+        Ok(record) => {
+            emit_analysis_progress(
+                &app_handle,
+                &run_id,
+                candidate_id,
+                analysis_progress_update(
+                    "persist",
+                    "completed",
+                    "end",
+                    "分析完成并已刷新结果",
+                    None,
+                ),
+            );
+            Ok(record)
+        }
+        Err(error) => {
+            let phase = if last_phase == "ai" {
+                "ai"
+            } else if last_phase == "persist" {
+                "persist"
+            } else {
+                "prepare"
+            };
+            emit_analysis_progress(
+                &app_handle,
+                &run_id,
+                candidate_id,
+                analysis_progress_update(phase, "failed", "end", error.clone(), None),
+            );
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]

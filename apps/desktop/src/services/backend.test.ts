@@ -196,6 +196,7 @@ describe("backend AI profile commands", () => {
     await runCandidateAnalysis({
       candidate_id: 106,
       job_id: 12,
+      run_id: "run-106",
     });
 
     expect(invokeMock).toHaveBeenCalledWith("list_pipeline_events", {
@@ -217,6 +218,7 @@ describe("backend AI profile commands", () => {
       input: {
         candidate_id: 106,
         job_id: 12,
+        run_id: "run-106",
       },
     });
   });

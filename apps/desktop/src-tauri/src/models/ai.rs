@@ -220,6 +220,7 @@ pub(crate) struct AnalysisRecord {
 pub(crate) struct RunAnalysisInput {
     pub(crate) candidate_id: i64,
     pub(crate) job_id: Option<i64>,
+    pub(crate) run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

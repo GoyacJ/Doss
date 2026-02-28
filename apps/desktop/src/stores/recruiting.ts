@@ -1428,6 +1428,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
       action: ConflictResolutionAction;
     }) => taskOrchestrator.resolveCandidateImportConflict(payload),
     search,
+    importResumeFile: analysisContext.importResumeFile,
     importResumeFileAndAnalyze: analysisContext.importResumeFileAndAnalyze,
     loadScreeningTemplate,
     saveScreeningTemplate,
@@ -1437,6 +1438,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     deleteScreeningTemplate,
     setJobScreeningTemplate,
     runScreening: analysisContext.runScreening,
+    rerunAiAnalysis: analysisContext.rerunAiAnalysis,
     generateInterviewKit: analysisContext.generateInterviewKit,
     saveInterviewKit: analysisContext.saveInterviewKit,
     submitInterviewFeedback: analysisContext.submitInterviewFeedback,

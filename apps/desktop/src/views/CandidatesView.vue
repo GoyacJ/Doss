@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import type { CandidateGender, CandidateRecord, PipelineStage, SortRule } from "@doss/shared";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useRoute, useRouter } from "vue-router";
 import UiBadge from "../components/UiBadge.vue";
 import UiButton from "../components/UiButton.vue";
 import UiField from "../components/UiField.vue";
-import UiInfoRow from "../components/UiInfoRow.vue";
 import UiPanel from "../components/UiPanel.vue";
 import UiSelect from "../components/UiSelect.vue";
 import UiTableFilterPanel from "../components/UiTableFilterPanel.vue";
@@ -14,8 +14,23 @@ import UiTablePagination from "../components/UiTablePagination.vue";
 import UiTableToolbar from "../components/UiTableToolbar.vue";
 import UiTd from "../components/UiTd.vue";
 import UiTh from "../components/UiTh.vue";
+import {
+  ANALYSIS_PROGRESS_EVENT,
+  appendAnalysisTrace,
+  buildFallbackAnalysisMessage,
+  resolveAnalysisStepIndex,
+  shouldAcceptAnalysisProgressEvent,
+  type AnalysisProgressEventPayload,
+  type AnalysisProgressPhase,
+  type AnalysisTraceItem,
+} from "../lib/analysis-progress";
 import { buildCandidateManualPayload } from "../lib/candidate-form";
 import { formatStageLabel } from "../lib/pipeline";
+import {
+  resolveStructuredScreeningViewModel,
+  riskSeverityTone,
+} from "../lib/screening-structured";
+import { resolveScreeningRerunFeedback } from "../lib/screening-rerun-feedback";
 import { stageTone } from "../lib/status";
 import { normalizeSortRules } from "../lib/table-sort";
 import { listCandidatesPage } from "../services/backend";
@@ -93,8 +108,64 @@ const deletingCandidateId = ref<number | null>(null);
 const deleteConfirmCandidate = ref<CandidateRecord | null>(null);
 const createModalOpen = ref(false);
 const creatingCandidate = ref(false);
+const savingDetail = ref(false);
 const createResumeFile = ref<File | null>(null);
 const createResumeInput = ref<HTMLInputElement | null>(null);
+const analysisProgressVisible = ref(false);
+const analysisProgressMinimized = ref(false);
+const analysisProgressStepIndex = ref(0);
+const analysisProgressStartedAt = ref(0);
+const analysisProgressElapsedSeconds = ref(0);
+const analysisRunId = ref("");
+const analysisCurrentPhase = ref<AnalysisProgressPhase>("prepare");
+const analysisTraceItems = ref<AnalysisTraceItem[]>([]);
+const analysisUnlisten = ref<UnlistenFn | null>(null);
+const analysisLastProgressEventAt = ref(0);
+const analysisTraceListRef = ref<HTMLUListElement | null>(null);
+
+const analysisProgressSteps = [
+  {
+    key: "prepare",
+    label: "准备候选人资料",
+    description: "读取候选人上下文并构建分析输入。",
+  },
+  {
+    key: "ai",
+    label: "调用AI模型分析",
+    description: "正在执行模型分析，请稍候。",
+  },
+  {
+    key: "persist",
+    label: "写入并刷新结果",
+    description: "保存分析结果并刷新页面数据。",
+  },
+] as const;
+
+const currentAnalysisStep = computed(() => {
+  return analysisProgressSteps[Math.min(
+    analysisProgressStepIndex.value,
+    analysisProgressSteps.length - 1,
+  )];
+});
+
+const latestAnalysisTraceMessage = computed(() => {
+  if (!analysisTraceItems.value.length) {
+    return "";
+  }
+  return analysisTraceItems.value[analysisTraceItems.value.length - 1]?.message ?? "";
+});
+
+const analysisTracePanelTitle = computed(() => {
+  if (!analysisTraceItems.value.length) {
+    return "正在准备分析过程...";
+  }
+  return `当前阶段：${currentAnalysisStep.value.label}`;
+});
+
+let analysisElapsedTimer: ReturnType<typeof setInterval> | null = null;
+let analysisCloseTimer: ReturnType<typeof setTimeout> | null = null;
+let analysisFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+let analysisFallbackInterval: ReturnType<typeof setInterval> | null = null;
 
 const createForm = reactive({
   name: "",
@@ -109,6 +180,20 @@ const createForm = reactive({
   email: "",
   tagsText: "",
   enableOcr: false,
+});
+
+const detailForm = reactive({
+  name: "",
+  currentCompany: "",
+  jobId: 0,
+  yearsOfExperience: "0",
+  score: "",
+  age: "",
+  gender: "" as CandidateGender | "",
+  address: "",
+  phone: "",
+  email: "",
+  tagsText: "",
 });
 
 const selectedCandidate = computed(() => {
@@ -134,20 +219,9 @@ const selectedEvents = computed(() => {
   return store.pipelineEvents[selectedCandidateId.value] ?? [];
 });
 
-const selectedStructuredMeta = computed(() => {
-  const structured = asRecord(selectedScreening.value[0]?.structured_result);
-  const weights = asRecord(structured?.weights);
-  const t0 = asRecord(weights?.t0);
-  const t1 = asRecord(weights?.t1);
-  const t2 = asRecord(weights?.t2);
-  return {
-    overallComment: asString(structured?.overall_comment) || "-",
-    riskAlerts: asStringList(structured?.risk_alerts),
-    t0Rule: asString(t0?.rule) || "-",
-    t1Template: asString(t1?.template) || "-",
-    t2Bonus: asNumber(t2?.bonus),
-  };
-});
+const selectedStructuredAssessment = computed(() =>
+  resolveStructuredScreeningViewModel(selectedScreening.value[0]),
+);
 
 const stageOptions = [
   { value: "", label: "全部阶段" },
@@ -179,35 +253,31 @@ const genderOptions = [
 const resumeAccept = ".pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.bmp,.tif,.tiff";
 const selectedResumeFileName = computed(() => createResumeFile.value?.name || "");
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return null;
+function formatScore5(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "-";
   }
-  return value as Record<string, unknown>;
+  return Number(value).toFixed(2);
 }
 
-function asString(value: unknown): string | null {
-  if (typeof value === "string" && value.trim()) {
-    return value.trim();
+function screeningRecommendationLabel(recommendation: "PASS" | "REVIEW" | "REJECT"): string {
+  if (recommendation === "PASS") {
+    return "通过";
   }
-  return null;
+  if (recommendation === "REVIEW") {
+    return "建议复核";
+  }
+  return "不通过";
 }
 
-function asNumber(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
+function screeningRiskLabel(level: "LOW" | "MEDIUM" | "HIGH"): string {
+  if (level === "HIGH") {
+    return "高风险";
   }
-  return null;
-}
-
-function asStringList(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
+  if (level === "MEDIUM") {
+    return "中风险";
   }
-  return value
-    .filter((item): item is string => typeof item === "string")
-    .map((item) => item.trim())
-    .filter(Boolean);
+  return "低风险";
 }
 
 function resolveErrorMessage(error: unknown, fallback: string): string {
@@ -218,6 +288,16 @@ function resolveErrorMessage(error: unknown, fallback: string): string {
     return error;
   }
   return fallback;
+}
+
+function formatTraceTime(value: string): string {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) {
+    return value;
+  }
+  return new Date(parsed).toLocaleTimeString("zh-CN", {
+    hour12: false,
+  });
 }
 
 async function loadRows() {
@@ -289,6 +369,188 @@ function clearCreateResume() {
   }
 }
 
+function fillDetailForm(candidate: CandidateRecord) {
+  detailForm.name = candidate.name;
+  detailForm.currentCompany = candidate.current_company || "";
+  detailForm.jobId = candidate.job_id ?? 0;
+  detailForm.yearsOfExperience = String(candidate.years_of_experience ?? 0);
+  detailForm.score = candidate.score === null || candidate.score === undefined ? "" : String(candidate.score);
+  detailForm.age = candidate.age === null || candidate.age === undefined ? "" : String(candidate.age);
+  detailForm.gender = candidate.gender ?? "";
+  detailForm.address = candidate.address || "";
+  detailForm.phone = "";
+  detailForm.email = "";
+  detailForm.tagsText = candidate.tags.join(", ");
+}
+
+function cleanupAnalysisProgressTimers() {
+  if (analysisElapsedTimer) {
+    clearInterval(analysisElapsedTimer);
+    analysisElapsedTimer = null;
+  }
+  if (analysisCloseTimer) {
+    clearTimeout(analysisCloseTimer);
+    analysisCloseTimer = null;
+  }
+  if (analysisFallbackTimer) {
+    clearTimeout(analysisFallbackTimer);
+    analysisFallbackTimer = null;
+  }
+  if (analysisFallbackInterval) {
+    clearInterval(analysisFallbackInterval);
+    analysisFallbackInterval = null;
+  }
+}
+
+function teardownAnalysisProgressListener() {
+  if (analysisUnlisten.value) {
+    analysisUnlisten.value();
+    analysisUnlisten.value = null;
+  }
+}
+
+function addAnalysisTrace(payload: AnalysisProgressEventPayload) {
+  analysisTraceItems.value = appendAnalysisTrace(analysisTraceItems.value, payload, 30);
+  void scrollAnalysisTraceToBottom();
+}
+
+async function scrollAnalysisTraceToBottom() {
+  await nextTick();
+  requestAnimationFrame(() => {
+    const container = analysisTraceListRef.value;
+    if (!container) {
+      return;
+    }
+    container.scrollTop = container.scrollHeight;
+  });
+}
+
+function scheduleAnalysisFallbackProgress() {
+  if (!analysisProgressVisible.value) {
+    return;
+  }
+  analysisFallbackTimer = setTimeout(() => {
+    analysisFallbackInterval = setInterval(() => {
+      if (!analysisProgressVisible.value) {
+        return;
+      }
+      if (Date.now() - analysisLastProgressEventAt.value <= 1500) {
+        return;
+      }
+      const phase = analysisCurrentPhase.value;
+      addAnalysisTrace({
+        runId: analysisRunId.value,
+        candidateId: selectedCandidate.value?.id ?? 0,
+        phase,
+        status: "running",
+        kind: "progress",
+        message: buildFallbackAnalysisMessage(phase),
+        at: new Date().toISOString(),
+      });
+    }, 1300);
+  }, 1500);
+}
+
+async function setupAnalysisProgressListener(runId: string, candidateId: number) {
+  teardownAnalysisProgressListener();
+  analysisUnlisten.value = await listen<AnalysisProgressEventPayload>(
+    ANALYSIS_PROGRESS_EVENT,
+    (event) => {
+      const payload = event.payload;
+      if (!shouldAcceptAnalysisProgressEvent(payload, runId, candidateId)) {
+        return;
+      }
+      analysisLastProgressEventAt.value = Date.now();
+      analysisCurrentPhase.value = payload.phase;
+      analysisProgressStepIndex.value = resolveAnalysisStepIndex(
+        analysisProgressStepIndex.value,
+        payload.phase,
+        payload.status,
+      );
+      addAnalysisTrace(payload);
+    },
+  );
+}
+
+function closeAnalysisProgress() {
+  cleanupAnalysisProgressTimers();
+  teardownAnalysisProgressListener();
+  analysisProgressVisible.value = false;
+  analysisProgressMinimized.value = false;
+  analysisProgressStepIndex.value = 0;
+  analysisProgressElapsedSeconds.value = 0;
+  analysisProgressStartedAt.value = 0;
+  analysisCurrentPhase.value = "prepare";
+  analysisTraceItems.value = [];
+  analysisLastProgressEventAt.value = 0;
+  analysisRunId.value = "";
+}
+
+function startAnalysisProgress(runId: string, candidateId: number) {
+  closeAnalysisProgress();
+  analysisProgressVisible.value = true;
+  analysisRunId.value = runId;
+  analysisProgressStartedAt.value = Date.now();
+  analysisProgressStepIndex.value = 0;
+  analysisProgressElapsedSeconds.value = 0;
+  analysisCurrentPhase.value = "prepare";
+  analysisLastProgressEventAt.value = Date.now();
+  addAnalysisTrace({
+    runId,
+    candidateId,
+    phase: "prepare",
+    status: "running",
+    kind: "start",
+    message: "已开始重新分析，正在准备候选人资料",
+    at: new Date().toISOString(),
+  });
+
+  analysisElapsedTimer = setInterval(() => {
+    if (!analysisProgressStartedAt.value) {
+      return;
+    }
+    const elapsed = Math.max(0, Math.floor((Date.now() - analysisProgressStartedAt.value) / 1000));
+    analysisProgressElapsedSeconds.value = elapsed;
+  }, 1000);
+  scheduleAnalysisFallbackProgress();
+}
+
+function finishAnalysisProgress(status: "completed" | "failed", message: string) {
+  cleanupAnalysisProgressTimers();
+  analysisProgressStepIndex.value = resolveAnalysisStepIndex(
+    analysisProgressStepIndex.value,
+    status === "completed" ? "persist" : analysisCurrentPhase.value,
+    status,
+  );
+  addAnalysisTrace({
+    runId: analysisRunId.value,
+    candidateId: selectedCandidate.value?.id ?? 0,
+    phase: status === "completed" ? "persist" : analysisCurrentPhase.value,
+    status,
+    kind: "end",
+    message,
+    at: new Date().toISOString(),
+  });
+  analysisCloseTimer = setTimeout(() => {
+    closeAnalysisProgress();
+  }, status === "completed" ? 300 : 800);
+}
+
+function minimizeAnalysisProgress() {
+  if (!analysisProgressVisible.value) {
+    return;
+  }
+  analysisProgressMinimized.value = true;
+}
+
+function restoreAnalysisProgress() {
+  if (!analysisProgressVisible.value) {
+    return;
+  }
+  analysisProgressMinimized.value = false;
+  void scrollAnalysisTraceToBottom();
+}
+
 async function saveCandidate() {
   if (creatingCandidate.value) {
     return;
@@ -321,7 +583,7 @@ async function saveCandidate() {
 
     if (resumeFile) {
       try {
-        await store.importResumeFileAndAnalyze({
+        await store.importResumeFile({
           candidateId: created.id,
           file: resumeFile,
           enableOcr: createForm.enableOcr,
@@ -341,7 +603,7 @@ async function saveCandidate() {
       return;
     }
 
-    toast.success(resumeFile ? "候选人和简历已保存" : "候选人已创建");
+    toast.success(resumeFile ? "候选人和简历已保存（未自动分析）" : "候选人已创建");
   } catch (error) {
     toast.danger(resolveErrorMessage(error, "创建候选人失败"));
   } finally {
@@ -351,6 +613,7 @@ async function saveCandidate() {
 
 async function openDrawer(candidate: CandidateRecord) {
   selectedCandidateId.value = candidate.id;
+  fillDetailForm(candidate);
   drawerOpen.value = true;
   drawerLoading.value = true;
   try {
@@ -404,17 +667,97 @@ async function removeCandidate() {
   }
 }
 
+async function saveCandidateDetail() {
+  if (!selectedCandidate.value || savingDetail.value) {
+    return;
+  }
+  const candidateId = selectedCandidate.value.id;
+
+  const built = buildCandidateManualPayload({
+    name: detailForm.name,
+    currentCompany: detailForm.currentCompany,
+    jobId: detailForm.jobId,
+    yearsOfExperience: detailForm.yearsOfExperience,
+    score: detailForm.score,
+    age: detailForm.age,
+    gender: detailForm.gender,
+    address: detailForm.address,
+    phone: detailForm.phone,
+    email: detailForm.email,
+    tagsText: detailForm.tagsText,
+  });
+  if (!built.ok) {
+    toast.warning(built.error);
+    return;
+  }
+
+  savingDetail.value = true;
+  try {
+    await store.updateCandidate({
+      candidate_id: candidateId,
+      ...built.payload,
+      job_id: detailForm.jobId > 0 ? detailForm.jobId : null,
+    });
+    await Promise.all([loadRows(), store.loadCandidateContext(candidateId)]);
+    const refreshed = rows.value.find((item) => item.id === candidateId)
+      ?? store.candidates.find((item) => item.id === candidateId);
+    if (refreshed) {
+      fillDetailForm(refreshed);
+    }
+    toast.success("候选人信息已更新");
+  } catch (error) {
+    toast.danger(resolveErrorMessage(error, "保存候选人信息失败"));
+  } finally {
+    savingDetail.value = false;
+  }
+}
+
 async function rerunScreening() {
   if (!selectedCandidate.value || actionLoading.value) {
     return;
   }
+  const candidateId = selectedCandidate.value.id;
+  const jobId = selectedCandidate.value.job_id ?? undefined;
+  const runId = `${candidateId}-${Date.now()}`;
   actionLoading.value = true;
+  startAnalysisProgress(runId, candidateId);
   try {
-    await store.runScreening(selectedCandidate.value.id, selectedCandidate.value.job_id ?? undefined);
-    await store.loadCandidateContext(selectedCandidate.value.id);
-    toast.success("初筛结果已更新");
+    addAnalysisTrace({
+      runId,
+      candidateId,
+      phase: "prepare",
+      status: "running",
+      kind: "progress",
+      message: "正在重新执行结构化初筛",
+      at: new Date().toISOString(),
+    });
+    await store.runScreening(candidateId, jobId);
+    addAnalysisTrace({
+      runId,
+      candidateId,
+      phase: "prepare",
+      status: "running",
+      kind: "progress",
+      message: "结构化初筛完成，正在继续AI分析",
+      at: new Date().toISOString(),
+    });
+    await setupAnalysisProgressListener(runId, candidateId);
+    await nextTick();
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => resolve());
+    });
+    await store.analyzeCandidate(candidateId, jobId, runId);
+    await store.loadCandidateContext(candidateId);
+    finishAnalysisProgress("completed", "分析完成并已刷新结果");
+    toast.success("初筛与AI分析结果已更新");
   } catch (error) {
-    toast.danger(resolveErrorMessage(error, "重新分析失败"));
+    const feedback = resolveScreeningRerunFeedback(error, "重新分析失败");
+    finishAnalysisProgress("failed", feedback.message);
+    if (feedback.tone === "warning") {
+      toast.warning(feedback.message);
+      return;
+    }
+    toast.danger(feedback.message);
   } finally {
     actionLoading.value = false;
   }
@@ -463,6 +806,14 @@ function screeningTone(recommendation: "PASS" | "REVIEW" | "REJECT") {
   return "danger";
 }
 
+function isAnalysisStepCompleted(index: number) {
+  return analysisProgressStepIndex.value > index;
+}
+
+function isAnalysisStepActive(index: number) {
+  return analysisProgressStepIndex.value === index;
+}
+
 watch(page, () => {
   void loadRows();
 });
@@ -498,16 +849,26 @@ onMounted(async () => {
     }
   }
 });
+
+onUnmounted(() => {
+  closeAnalysisProgress();
+});
 </script>
 
 <template>
   <section class="flex flex-col gap-4">
-    <header class="flex items-center justify-between gap-3">
+    <header class="flex items-center gap-3">
       <h2 class="text-2xl font-700">候选人池</h2>
-      <UiButton @click="openCreateCandidateModal">创建候选人</UiButton>
     </header>
 
-    <UiPanel title="候选人列表">
+    <UiPanel>
+      <template #header>
+        <div class="mb-1 flex items-center justify-between gap-3 flex-wrap">
+          <h3 class="m-0 text-lg font-700">候选人列表</h3>
+          <UiButton :disabled="loading" @click="openCreateCandidateModal">创建候选人</UiButton>
+        </div>
+      </template>
+
       <UiTableToolbar
         v-model:quick-keyword="filters.nameLike"
         v-model:advanced-open="advancedFilterOpen"
@@ -541,7 +902,7 @@ onMounted(async () => {
         </thead>
         <tbody>
           <tr v-for="candidate in rows" :key="candidate.id">
-            <UiTd>#{{ candidate.id }} {{ candidate.name }}</UiTd>
+            <UiTd>{{ candidate.name }}</UiTd>
             <UiTd>{{ candidate.current_company || "-" }}</UiTd>
             <UiTd>{{ candidate.job_title || (candidate.job_id ? `职位 #${candidate.job_id}` : "-") }}</UiTd>
             <UiTd>{{ candidate.score ?? "-" }}</UiTd>
@@ -670,45 +1031,202 @@ onMounted(async () => {
           </template>
 
           <div class="grid grid-cols-2 gap-2.5 lt-lg:grid-cols-1">
-            <UiInfoRow label="当前公司" :value="selectedCandidate.current_company || '-'" />
-            <UiInfoRow label="职位" :value="selectedCandidate.job_title || (selectedCandidate.job_id ? `职位 #${selectedCandidate.job_id}` : '-')" />
-            <UiInfoRow label="评分" :value="selectedCandidate.score ?? '-'" />
-            <UiInfoRow label="年龄" :value="selectedCandidate.age ?? '-'" />
-            <UiInfoRow label="电话" :value="selectedCandidate.phone_masked || '-'" />
-            <UiInfoRow label="邮箱" :value="selectedCandidate.email_masked || '-'" />
-            <UiInfoRow label="候选人简历" :value="selectedStructuredMeta.overallComment" />
+            <UiField label="姓名">
+              <input v-model="detailForm.name" :disabled="savingDetail" placeholder="例如：张三" />
+            </UiField>
+            <UiField label="绑定职位">
+              <UiSelect
+                v-model="detailForm.jobId"
+                :disabled="savingDetail"
+                :options="createJobOptions"
+                value-type="number"
+              />
+            </UiField>
+            <UiField label="当前公司">
+              <input v-model="detailForm.currentCompany" :disabled="savingDetail" placeholder="当前任职公司" />
+            </UiField>
+            <UiField label="工作年限（年）">
+              <input
+                v-model="detailForm.yearsOfExperience"
+                :disabled="savingDetail"
+                type="number"
+                min="0"
+                step="0.5"
+                placeholder="例如：5"
+              />
+            </UiField>
+            <UiField label="评分（0-100）">
+              <input
+                v-model="detailForm.score"
+                :disabled="savingDetail"
+                type="number"
+                min="0"
+                max="100"
+                step="0.1"
+                placeholder="可选"
+              />
+            </UiField>
+            <UiField label="年龄">
+              <input
+                v-model="detailForm.age"
+                :disabled="savingDetail"
+                type="number"
+                min="0"
+                step="1"
+                placeholder="可选"
+              />
+            </UiField>
+            <UiField label="性别">
+              <UiSelect v-model="detailForm.gender" :disabled="savingDetail" :options="genderOptions" />
+            </UiField>
+            <UiField label="地址">
+              <input v-model="detailForm.address" :disabled="savingDetail" placeholder="可选" />
+            </UiField>
+            <UiField label="电话" help="留空则保持原值">
+              <input
+                v-model="detailForm.phone"
+                :disabled="savingDetail"
+                :placeholder="selectedCandidate.phone_masked || '输入新手机号'"
+              />
+            </UiField>
+            <UiField label="邮箱" help="留空则保持原值">
+              <input
+                v-model="detailForm.email"
+                :disabled="savingDetail"
+                :placeholder="selectedCandidate.email_masked || '输入新邮箱'"
+              />
+            </UiField>
+            <UiField class="col-span-2 lt-lg:col-span-1" label="标签" help="多个标签可用英文逗号、中文逗号或换行分隔">
+              <input v-model="detailForm.tagsText" :disabled="savingDetail" placeholder="例如：Vue, TypeScript, 稳定" />
+            </UiField>
           </div>
 
           <div class="mt-3 flex flex-wrap gap-2">
-            <UiButton :disabled="actionLoading" @click="rerunScreening">重新分析</UiButton>
-            <UiButton variant="secondary" :disabled="actionLoading" @click="goInterview">邀约面试</UiButton>
-            <UiButton variant="ghost" :disabled="actionLoading" @click="rejectCandidate">遗憾</UiButton>
+            <UiButton :disabled="savingDetail || actionLoading" @click="saveCandidateDetail">
+              {{ savingDetail ? "保存中..." : "保存修改" }}
+            </UiButton>
+            <UiButton :disabled="savingDetail || actionLoading" @click="rerunScreening">重新分析</UiButton>
+            <UiButton variant="secondary" :disabled="savingDetail || actionLoading" @click="goInterview">邀约面试</UiButton>
+            <UiButton variant="ghost" :disabled="savingDetail || actionLoading" @click="rejectCandidate">遗憾</UiButton>
           </div>
         </UiPanel>
 
-        <UiPanel v-if="selectedScreening.length" class="mt-3" title="结构化 AI 评估">
+        <UiPanel v-if="selectedScreening.length && selectedStructuredAssessment" class="mt-3" title="结构化 AI 评估">
           <div class="flex items-center gap-2 mb-2 flex-wrap">
-            <UiBadge :tone="screeningTone(selectedScreening[0].recommendation)">{{ selectedScreening[0].recommendation }}</UiBadge>
+            <UiBadge :tone="screeningTone(selectedScreening[0].recommendation)">
+              {{ screeningRecommendationLabel(selectedScreening[0].recommendation) }}
+            </UiBadge>
             <UiBadge :tone="selectedScreening[0].risk_level === 'HIGH' ? 'danger' : selectedScreening[0].risk_level === 'MEDIUM' ? 'warning' : 'info'">
-              风险 {{ selectedScreening[0].risk_level }}
+              {{ screeningRiskLabel(selectedScreening[0].risk_level) }}
             </UiBadge>
           </div>
 
-          <div class="grid grid-cols-2 gap-2 lt-lg:grid-cols-1">
-            <UiInfoRow label="T0" :value="selectedScreening[0].t0_score" />
-            <UiInfoRow label="T1" :value="selectedScreening[0].t1_score" />
-            <UiInfoRow label="精筛" :value="selectedScreening[0].fine_score" />
-            <UiInfoRow label="总分" :value="selectedScreening[0].overall_score" />
-            <UiInfoRow label="T0 规则" :value="selectedStructuredMeta.t0Rule" />
-            <UiInfoRow label="T1 模板" :value="selectedStructuredMeta.t1Template" />
-            <UiInfoRow label="T2 加分" :value="selectedStructuredMeta.t2Bonus ?? '-'" />
-            <UiInfoRow label="总评" :value="selectedStructuredMeta.overallComment" />
+          <div class="rounded-xl border border-line bg-card/70 p-3">
+            <div class="flex items-start justify-between gap-3 flex-wrap">
+              <div>
+                <p class="m-0 text-sm text-muted">整体评分（5分制）</p>
+                <p class="m-0 mt-1 text-2xl font-700">
+                  {{ formatScore5(selectedStructuredAssessment.overallScore5) }}
+                  <span class="text-base font-500 text-muted">/ 5.00</span>
+                </p>
+                <p class="m-0 mt-1 text-xs text-muted">
+                  T0 {{ selectedStructuredAssessment.weights.t0 }}% ·
+                  T1 {{ selectedStructuredAssessment.weights.t1 }}% ·
+                  T2 {{ selectedStructuredAssessment.weights.t2 }}% ·
+                  T3 {{ selectedStructuredAssessment.weights.t3 }}%
+                </p>
+              </div>
+              <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-sm min-w-[280px] lt-sm:min-w-0">
+                <p class="m-0">T0：{{ formatScore5(selectedStructuredAssessment.subscores.t0) }}</p>
+                <p class="m-0">T1：{{ formatScore5(selectedStructuredAssessment.subscores.t1) }}</p>
+                <p class="m-0">T2：{{ formatScore5(selectedStructuredAssessment.subscores.t2) }}</p>
+                <p class="m-0">T3：{{ formatScore5(selectedStructuredAssessment.subscores.t3) }}</p>
+              </div>
+            </div>
+            <p class="m-0 mt-2 text-sm leading-6">{{ selectedStructuredAssessment.overallComment }}</p>
           </div>
 
-          <div v-if="selectedStructuredMeta.riskAlerts.length" class="mt-2">
-            <p class="m-0 mb-1 font-600">风险提示</p>
-            <ul class="mt-1 pl-4.5">
-              <li v-for="item in selectedStructuredMeta.riskAlerts" :key="item">{{ item }}</li>
+          <div class="mt-3 rounded-xl border border-line bg-card/70 p-3">
+            <div class="mb-2 flex items-center justify-between gap-2 flex-wrap">
+              <p class="m-0 text-sm font-700">模板维度评分</p>
+              <p class="m-0 text-xs text-muted">{{ selectedStructuredAssessment.templateName }}</p>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="w-full border-collapse text-sm">
+                <thead>
+                  <tr class="text-left text-muted">
+                    <th class="px-2 py-1.5 font-600">指标 + 权重</th>
+                    <th class="px-2 py-1.5 font-600">候选人得分</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="item in selectedStructuredAssessment.templateItems"
+                    :key="item.key"
+                    class="border-t border-line align-top"
+                  >
+                    <td class="px-2 py-2">
+                      <p class="m-0 font-600">{{ item.label }}（{{ item.weight }}%）</p>
+                      <p class="m-0 mt-1 text-xs text-muted leading-5">{{ item.comment }}</p>
+                    </td>
+                    <td class="px-2 py-2 whitespace-nowrap">
+                      <p class="m-0">
+                        {{ formatScore5(item.score5) }} / 5
+                      </p>
+                      <p class="m-0 mt-1 text-xs text-muted">
+                        {{ item.score100 ?? "-" }} / 100
+                      </p>
+                    </td>
+                  </tr>
+                  <tr v-if="selectedStructuredAssessment.templateItems.length === 0">
+                    <td colspan="2" class="px-2 py-3 text-center text-muted">暂无模板维度结果</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="mt-3 rounded-xl border border-line bg-card/70 p-3">
+            <div class="flex items-center justify-between gap-2 flex-wrap">
+              <p class="m-0 text-sm font-700">加分项评估</p>
+              <p class="m-0 text-xs text-muted">加分项评分 {{ formatScore5(selectedStructuredAssessment.bonusScore5) }} / 5</p>
+            </div>
+            <ul class="m-0 mt-2 list-disc pl-4 text-sm leading-6">
+              <li v-for="item in selectedStructuredAssessment.bonusItems" :key="item.title">
+                <span class="font-600">{{ item.title }}</span>
+                <span v-if="item.score5 !== null">（{{ formatScore5(item.score5) }} / 5）</span>
+                <span class="text-muted"> - {{ item.comment }}</span>
+              </li>
+              <li v-if="selectedStructuredAssessment.bonusItems.length === 0" class="text-muted">暂无明显加分项</li>
+            </ul>
+            <p class="m-0 mt-2 text-sm text-muted leading-6">{{ selectedStructuredAssessment.bonusComment }}</p>
+          </div>
+
+          <div class="mt-3 rounded-xl border border-line bg-card/70 p-3">
+            <div class="flex items-center justify-between gap-2 flex-wrap">
+              <p class="m-0 text-sm font-700">风险评估</p>
+              <div class="flex items-center gap-2">
+                <UiBadge :tone="selectedScreening[0].risk_level === 'HIGH' ? 'danger' : selectedScreening[0].risk_level === 'MEDIUM' ? 'warning' : 'info'">
+                  {{ screeningRiskLabel(selectedScreening[0].risk_level) }}
+                </UiBadge>
+                <span class="text-xs text-muted">风险分 {{ formatScore5(selectedStructuredAssessment.riskScore5) }} / 5</span>
+              </div>
+            </div>
+            <ul class="m-0 mt-2 list-disc pl-4 text-sm leading-6">
+              <li v-for="(item, index) in selectedStructuredAssessment.riskItems" :key="`${item.title}-${index}`">
+                <span class="font-600">{{ item.title }}</span>
+                <UiBadge class="ml-1" :tone="riskSeverityTone(item.severity)">{{ item.severity }}</UiBadge>
+                <span class="text-muted"> - {{ item.comment }}</span>
+              </li>
+              <li v-if="selectedStructuredAssessment.riskItems.length === 0" class="text-muted">暂无显著风险项</li>
+            </ul>
+            <p class="m-0 mt-2 text-sm text-muted leading-6">{{ selectedStructuredAssessment.riskComment }}</p>
+          </div>
+
+          <div v-if="selectedStructuredAssessment.riskAlerts.length" class="mt-3 rounded-xl border border-line p-3">
+            <p class="m-0 text-sm font-700">风险提示</p>
+            <ul class="m-0 mt-1 list-disc pl-4 text-sm text-muted leading-6">
+              <li v-for="item in selectedStructuredAssessment.riskAlerts" :key="item">{{ item }}</li>
             </ul>
           </div>
         </UiPanel>
@@ -733,6 +1251,102 @@ onMounted(async () => {
 
         <p v-if="drawerLoading" class="m-0 mt-3 text-sm text-muted">正在加载候选人上下文...</p>
       </aside>
+    </div>
+  </Teleport>
+
+  <Teleport to="body">
+    <div
+      v-if="analysisProgressVisible && !analysisProgressMinimized"
+      class="fixed inset-0 z-[87] flex items-center justify-center bg-black/35 p-4"
+    >
+      <div class="w-full max-w-3xl">
+        <UiPanel title="AI分析中">
+          <div class="mt-1 flex items-center gap-2 overflow-x-auto pb-1">
+            <template v-for="(step, index) in analysisProgressSteps" :key="step.key">
+              <div class="flex min-w-[180px] items-center gap-2">
+                <span
+                  class="inline-flex h-6 w-6 items-center justify-center rounded-full border text-xs font-700"
+                  :class="isAnalysisStepActive(index)
+                    ? 'border-brand bg-brand/14 text-fg'
+                    : isAnalysisStepCompleted(index)
+                      ? 'border-brand/50 bg-brand/12 text-fg'
+                      : 'border-line bg-card text-muted'"
+                >
+                  {{ index + 1 }}
+                </span>
+                <div class="min-w-0">
+                  <p class="m-0 text-sm font-600">{{ step.label }}</p>
+                  <p class="m-0 text-xs text-muted">
+                    {{ isAnalysisStepActive(index) ? "进行中" : isAnalysisStepCompleted(index) ? "已完成" : "待处理" }}
+                  </p>
+                </div>
+              </div>
+              <div
+                v-if="index < analysisProgressSteps.length - 1"
+                class="h-[2px] min-w-8 flex-1 rounded-full"
+                :class="isAnalysisStepCompleted(index) ? 'bg-brand/45' : 'bg-line'"
+              />
+            </template>
+          </div>
+
+          <div class="mt-3 flex items-center gap-2.5">
+            <span class="h-4 w-4 rounded-full border-2 border-brand/28 border-t-brand animate-spin" />
+            <p class="m-0 text-sm font-600">{{ currentAnalysisStep.label }}</p>
+          </div>
+          <p class="m-0 mt-1 text-xs text-muted">预计需数秒，请勿关闭页面</p>
+
+          <div class="mt-3 rounded-xl border border-line bg-card/70 px-3 py-2.5">
+            <p class="m-0 text-sm font-600">{{ analysisTracePanelTitle }}</p>
+            <ul
+              ref="analysisTraceListRef"
+              class="m-0 mt-2 max-h-44 list-none overflow-y-auto p-0 flex flex-col gap-1.5"
+            >
+              <li
+                v-for="item in analysisTraceItems"
+                :key="item.id"
+                class="rounded-lg border px-2 py-1.5"
+                :class="item.status === 'failed'
+                  ? 'border-danger/38 bg-danger/10'
+                  : item.status === 'completed'
+                    ? 'border-brand/36 bg-brand/10'
+                    : 'border-line bg-card'"
+              >
+                <p class="m-0 text-[0.82rem] leading-5">{{ item.message }}</p>
+                <p class="m-0 mt-0.5 text-[0.72rem] text-muted">
+                  {{ formatTraceTime(item.at) }} · {{ item.phase }}
+                </p>
+              </li>
+            </ul>
+          </div>
+
+          <div class="mt-3 flex items-center justify-between gap-2">
+            <span class="text-xs text-muted">已耗时 {{ analysisProgressElapsedSeconds }}s</span>
+            <UiButton variant="ghost" :disabled="!analysisProgressVisible" @click="minimizeAnalysisProgress">最小化</UiButton>
+          </div>
+        </UiPanel>
+      </div>
+    </div>
+  </Teleport>
+
+  <Teleport to="body">
+    <div
+      v-if="analysisProgressVisible && analysisProgressMinimized"
+      class="fixed right-4 bottom-4 z-[87] w-[320px] max-w-[calc(100vw-2rem)]"
+    >
+      <UiPanel>
+        <div class="flex items-start justify-between gap-2">
+          <div class="min-w-0">
+            <p class="m-0 text-sm font-600">AI分析进行中</p>
+            <p class="m-0 mt-1 text-xs text-muted truncate">
+              {{ currentAnalysisStep.label }} · {{ latestAnalysisTraceMessage || `${analysisProgressElapsedSeconds}s` }}
+            </p>
+          </div>
+          <span class="mt-0.5 h-3.5 w-3.5 rounded-full border-2 border-brand/28 border-t-brand animate-spin" />
+        </div>
+        <div class="mt-2 flex justify-end">
+          <UiButton variant="ghost" @click="restoreAnalysisProgress">展开</UiButton>
+        </div>
+      </UiPanel>
     </div>
   </Teleport>
 

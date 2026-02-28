@@ -22,7 +22,7 @@ export interface AnalysisContextDeps {
   hiringDecisions: Ref<Record<number, HiringDecisionRecord[]>>;
   pipelineEvents: Ref<Record<number, PipelineEvent[]>>;
   mapAnalysis: (record: BackendAnalysisRecord) => UiAnalysisRecord;
-  runCandidateAnalysis: (input: { candidate_id: number; job_id?: number }) => Promise<unknown>;
+  runCandidateAnalysis: (input: { candidate_id: number; job_id?: number; run_id?: string }) => Promise<unknown>;
   listAnalysis: (candidateId: number) => Promise<BackendAnalysisRecord[]>;
   listPipelineEvents: (candidateId: number) => Promise<PipelineEvent[]>;
   listScreeningResults: (candidateId: number) => Promise<ScreeningResultRecord[]>;
@@ -134,10 +134,11 @@ export function createAnalysisContextModule(deps: AnalysisContextDeps) {
     deps.screeningResults.value[payload.candidate_id] = latestScreeningResults;
   }
 
-  async function analyzeCandidate(candidateId: number, jobId?: number) {
+  async function analyzeCandidate(candidateId: number, jobId?: number, runId?: string) {
     await deps.runCandidateAnalysis({
       candidate_id: candidateId,
       job_id: jobId,
+      ...(runId ? { run_id: runId } : {}),
     });
     deps.analyses.value[candidateId] = (await deps.listAnalysis(candidateId)).map(deps.mapAnalysis);
   }
@@ -166,6 +167,16 @@ export function createAnalysisContextModule(deps: AnalysisContextDeps) {
     return deps.screeningResults.value[candidateId];
   }
 
+  async function rerunAiAnalysis(candidateId: number, jobId?: number, runId?: string) {
+    await deps.runCandidateAnalysis({
+      candidate_id: candidateId,
+      job_id: jobId,
+      ...(runId ? { run_id: runId } : {}),
+    });
+    await loadCandidateContext(candidateId);
+    return deps.analyses.value[candidateId] ?? [];
+  }
+
   async function importResumeFileAndAnalyze(payload: {
     candidateId: number;
     file: File;
@@ -187,6 +198,30 @@ export function createAnalysisContextModule(deps: AnalysisContextDeps) {
     });
     await analyzeCandidate(payload.candidateId, payload.jobId);
     await loadCandidateContext(payload.candidateId);
+
+    return parsedFile;
+  }
+
+  async function importResumeFile(payload: {
+    candidateId: number;
+    file: File;
+    enableOcr?: boolean;
+    jobId?: number;
+  }): Promise<ParsedResumeFile> {
+    const contentBase64 = await fileToBase64(payload.file);
+    const parsedFile = await deps.parseResumeFile({
+      file_name: payload.file.name,
+      content_base64: contentBase64,
+      enable_ocr: payload.enableOcr,
+    });
+
+    await deps.upsertResume({
+      candidate_id: payload.candidateId,
+      raw_text: parsedFile.raw_text,
+      parsed: parsedFile.parsed,
+      source: "manual",
+    });
+    await deps.refreshMetrics();
 
     return parsedFile;
   }
@@ -239,7 +274,9 @@ export function createAnalysisContextModule(deps: AnalysisContextDeps) {
     analyzeCandidate,
     loadCandidateContext,
     runScreening,
+    rerunAiAnalysis,
     importResumeFileAndAnalyze,
+    importResumeFile,
     generateInterviewKit,
     saveInterviewKit,
     submitInterviewFeedback,

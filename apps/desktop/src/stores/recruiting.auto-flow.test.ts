@@ -779,6 +779,49 @@ describe("recruiting store auto workflow", () => {
     expect(backend.loadDashboardMetrics).toHaveBeenCalledTimes(2);
   });
 
+  it("imports resume file without triggering screening or analysis", async () => {
+    const store = useRecruitingStore();
+    await store.bootstrap();
+
+    const file = new File(["resume content"], "resume.pdf", { type: "application/pdf" });
+    await store.importResumeFile({
+      candidateId: 11,
+      file,
+      enableOcr: true,
+    });
+
+    expect(backend.parseResumeFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        file_name: "resume.pdf",
+        enable_ocr: true,
+      }),
+    );
+    expect(backend.upsertResume).toHaveBeenCalledWith(
+      expect.objectContaining({
+        candidate_id: 11,
+        source: "manual",
+        raw_text: "候选人简历文本",
+      }),
+    );
+    expect(backend.runResumeScreening).not.toHaveBeenCalled();
+    expect(backend.runCandidateAnalysis).not.toHaveBeenCalled();
+    expect(backend.loadDashboardMetrics).toHaveBeenCalledTimes(2);
+  });
+
+  it("reruns AI analysis without triggering screening", async () => {
+    const store = useRecruitingStore();
+    await store.bootstrap();
+
+    await store.rerunAiAnalysis(11, 101);
+
+    expect(backend.runCandidateAnalysis).toHaveBeenCalledWith({
+      candidate_id: 11,
+      job_id: 101,
+    });
+    expect(backend.runResumeScreening).not.toHaveBeenCalled();
+    expect(backend.listAnalysis).toHaveBeenCalledWith(11);
+  });
+
   it("falls back cleanly when search query causes backend error", async () => {
     backend.searchCandidates
       .mockResolvedValueOnce([

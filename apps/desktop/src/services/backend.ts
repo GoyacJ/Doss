@@ -626,6 +626,7 @@ export async function parseResumeFile(input: ParseResumeFilePayload): Promise<Pa
 export async function runCandidateAnalysis(input: {
   candidate_id: number;
   job_id?: number;
+  run_id?: string;
 }): Promise<BackendAnalysisRecord> {
   return invoke<BackendAnalysisRecord>(
     "run_candidate_analysis",

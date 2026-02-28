@@ -12,7 +12,9 @@ use zip::ZipArchive;
 
 use crate::core::state::AppState;
 use crate::core::time::now_iso;
-use crate::domains::ai_runtime::trim_resume_excerpt;
+use crate::domains::ai_runtime::{
+    invoke_text_generation, parse_json_from_text, resolve_ai_settings, trim_resume_excerpt,
+};
 use crate::domains::jobs::read_job_by_id;
 use crate::infra::audit::write_audit;
 use crate::infra::db::open_connection;
@@ -582,6 +584,239 @@ pub(crate) fn parse_job_salary_max(salary_text: &str) -> Option<f64> {
         .split(|item| item == '-' || item == '~' || item == '到')
         .filter_map(|item| item.trim().parse::<f64>().ok())
         .max_by(|left, right| left.total_cmp(right))
+}
+
+const OVERALL_COMMENT_MAX_CHARS: usize = 500;
+const SECTION_COMMENT_MAX_CHARS: usize = 200;
+
+#[derive(Debug, Clone)]
+struct StructuredTemplateItem {
+    key: String,
+    label: String,
+    weight: i32,
+    score_100: i32,
+    score_5: f64,
+    comment: String,
+}
+
+#[derive(Debug, Clone)]
+struct StructuredBonusItem {
+    title: String,
+    score_5: f64,
+    comment: String,
+}
+
+#[derive(Debug, Clone)]
+struct StructuredRiskItem {
+    title: String,
+    severity: String,
+    comment: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ScreeningAiCommentBundle {
+    overall_comment: String,
+    template_comments: BTreeMap<String, String>,
+    bonus_comment: String,
+    risk_comment: String,
+}
+
+fn round_two_decimals(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
+
+fn truncate_chars(text: &str, limit: usize) -> String {
+    text.chars().take(limit).collect::<String>()
+}
+
+pub(crate) fn normalize_screening_comment(text: &str, fallback: &str, limit: usize) -> String {
+    let compact = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+    if compact.is_empty() {
+        return truncate_chars(fallback, limit);
+    }
+    truncate_chars(&compact, limit)
+}
+
+fn risk_level_to_score_5(level: &str) -> f64 {
+    match level {
+        "HIGH" => 1.0,
+        "MEDIUM" => 3.0,
+        _ => 5.0,
+    }
+}
+
+pub(crate) fn calculate_screening_overall_score_5(
+    t0_score: f64,
+    t1_score_100: i32,
+    bonus_score: i32,
+    risk_level: &str,
+) -> f64 {
+    let t1_score_5 = round_one_decimal((t1_score_100 as f64 / 20.0).clamp(0.0, 5.0));
+    let t2_score_5 = bonus_score_to_score_5(bonus_score);
+    let t3_score_5 = risk_level_to_score_5(risk_level);
+    round_two_decimals(t0_score * 0.5 + t1_score_5 * 0.3 + t2_score_5 * 0.1 + t3_score_5 * 0.1)
+}
+
+pub(crate) fn calculate_screening_overall_score_100(overall_score_5: f64) -> i32 {
+    clamp_score((overall_score_5 * 20.0).round() as i32)
+}
+
+fn bonus_score_to_score_5(bonus_score: i32) -> f64 {
+    round_one_decimal(((bonus_score as f64) / 15.0 * 5.0).clamp(0.0, 5.0))
+}
+
+fn build_default_overall_comment(
+    recommendation: &str,
+    overall_score_5: f64,
+    t0_score: f64,
+    t1_score_5: f64,
+    t2_score_5: f64,
+    t3_score_5: f64,
+) -> String {
+    let recommendation_text = match recommendation {
+        "PASS" => "建议通过初筛，进入后续面试环节。",
+        "REVIEW" => "建议复核关键证据后再决定是否推进。",
+        _ => "当前匹配度偏低，建议谨慎推进。",
+    };
+    format!(
+        "综合评分 {:.2}/5（T0 {:.1}，T1 {:.1}，T2 {:.1}，T3 {:.1}）。{}",
+        overall_score_5, t0_score, t1_score_5, t2_score_5, t3_score_5, recommendation_text
+    )
+}
+
+fn build_default_bonus_comment(bonus_score_5: f64, bonus_items: &[StructuredBonusItem]) -> String {
+    if bonus_items.is_empty() || bonus_score_5 <= 0.0 {
+        return "当前未识别到明显加分项，建议重点验证岗位核心能力。".to_string();
+    }
+    format!(
+        "候选人加分项评分 {:.1}/5，主要来自{}。",
+        bonus_score_5,
+        bonus_items
+            .iter()
+            .map(|item| item.title.clone())
+            .collect::<Vec<_>>()
+            .join("、")
+    )
+}
+
+fn build_default_risk_comment(
+    risk_level: &str,
+    risk_score_5: f64,
+    risk_items: &[StructuredRiskItem],
+) -> String {
+    if risk_items.is_empty() {
+        return format!("风险等级 {}，风险评分 {:.1}/5，当前未发现显著风险。", risk_level, risk_score_5);
+    }
+    format!(
+        "风险等级 {}，风险评分 {:.1}/5。重点关注：{}。",
+        risk_level,
+        risk_score_5,
+        risk_items
+            .iter()
+            .map(|item| item.title.clone())
+            .collect::<Vec<_>>()
+            .join("、")
+    )
+}
+
+fn build_screening_explanation_prompts(payload: &Value) -> (String, String) {
+    let system_prompt = r#"你是招聘评估解释助手。请仅输出 JSON，不要 markdown，不要额外说明。
+JSON 结构:
+{
+  "overall_comment": "500字以内",
+  "template_comments": [{"key":"维度key","comment":"200字以内"}],
+  "bonus_comment": "200字以内",
+  "risk_comment": "200字以内"
+}
+要求:
+1) 只基于输入信息，不得编造。
+2) 语言简洁客观，适合招聘场景。
+3) 如果某项信息不足，可给出谨慎说明。"#;
+    (system_prompt.to_string(), payload.to_string())
+}
+
+fn parse_screening_ai_comment_bundle(value: &Value) -> ScreeningAiCommentBundle {
+    let overall_comment = value
+        .get("overall_comment")
+        .or_else(|| value.get("overallComment"))
+        .and_then(|item| item.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let bonus_comment = value
+        .get("bonus_comment")
+        .or_else(|| value.get("bonusComment"))
+        .and_then(|item| item.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let risk_comment = value
+        .get("risk_comment")
+        .or_else(|| value.get("riskComment"))
+        .and_then(|item| item.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let mut template_comments = BTreeMap::<String, String>::new();
+    if let Some(items) = value
+        .get("template_comments")
+        .or_else(|| value.get("templateComments"))
+        .and_then(|item| item.as_array())
+    {
+        for item in items {
+            let key = item
+                .get("key")
+                .and_then(|field| field.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            let comment = item
+                .get("comment")
+                .and_then(|field| field.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !key.is_empty() && !comment.is_empty() {
+                template_comments.insert(key, comment);
+            }
+        }
+    }
+
+    ScreeningAiCommentBundle {
+        overall_comment,
+        template_comments,
+        bonus_comment,
+        risk_comment,
+    }
+}
+
+fn generate_screening_ai_comment_bundle(
+    conn: &Connection,
+    state: &AppState,
+    payload: &Value,
+) -> Option<ScreeningAiCommentBundle> {
+    let settings = resolve_ai_settings(conn, state.cipher.as_ref()).ok()?;
+    if settings.api_key.is_none() {
+        return None;
+    }
+
+    let (system_prompt, user_prompt) = build_screening_explanation_prompts(payload);
+    let content = invoke_text_generation(&settings, &system_prompt, &user_prompt).ok()?;
+    let parsed = parse_json_from_text(&content).ok()?;
+    let bundle = parse_screening_ai_comment_bundle(&parsed);
+    if bundle.overall_comment.trim().is_empty()
+        && bundle.bonus_comment.trim().is_empty()
+        && bundle.risk_comment.trim().is_empty()
+        && bundle.template_comments.is_empty()
+    {
+        return None;
+    }
+    Some(bundle)
 }
 
 pub(crate) fn normalize_interview_questions(
@@ -1731,18 +1966,21 @@ pub(crate) fn run_resume_screening(
     t0_score = round_one_decimal(t0_score.clamp(1.0, 5.0));
 
     let mut t1_acc = 0.0_f64;
-    let mut t1_items = Vec::<Value>::new();
+    let mut template_items = Vec::<StructuredTemplateItem>::new();
     for dimension in &template.dimensions {
         let signal = dimension_signal_score(&dimension.key, &resume_lower, candidate_years);
         let weighted = (signal / 5.0) * dimension.weight as f64;
         t1_acc += weighted;
-        t1_items.push(serde_json::json!({
-            "key": dimension.key,
-            "label": dimension.label,
-            "weight": dimension.weight,
-            "score": clamp_score(((signal / 5.0) * 100.0).round() as i32),
-            "reason": format!("{} 维度信号评分 {:.1}/5.0", dimension.label, round_one_decimal(signal)),
-        }));
+        let score_100 = clamp_score(((signal / 5.0) * 100.0).round() as i32);
+        let score_5 = round_one_decimal((score_100 as f64 / 20.0).clamp(0.0, 5.0));
+        template_items.push(StructuredTemplateItem {
+            key: dimension.key.clone(),
+            label: dimension.label.clone(),
+            weight: dimension.weight,
+            score_100,
+            score_5,
+            comment: format!("{} 维度信号评分 {:.1}/5.0", dimension.label, round_one_decimal(signal)),
+        });
     }
     let t1_score = clamp_score(t1_acc.round() as i32);
 
@@ -1798,23 +2036,45 @@ pub(crate) fn run_resume_screening(
         .unwrap_or(0);
 
     let mut bonus_score = 0_i32;
+    let mut bonus_items = Vec::<StructuredBonusItem>::new();
     if project_mentions >= 3 {
         bonus_score += 4;
+        bonus_items.push(StructuredBonusItem {
+            title: "项目经历完整".to_string(),
+            score_5: round_one_decimal((4.0_f64 / 15.0 * 5.0).clamp(0.0, 5.0)),
+            comment: "项目数量与描述完整度较高，可支撑能力判断。".to_string(),
+        });
     } else if project_mentions >= 1 {
         bonus_score += 2;
+        bonus_items.push(StructuredBonusItem {
+            title: "存在项目证据".to_string(),
+            score_5: round_one_decimal((2.0_f64 / 15.0 * 5.0).clamp(0.0, 5.0)),
+            comment: "具备可追溯项目经历，建议在面试中进一步深挖。".to_string(),
+        });
     }
     if !required_skills.is_empty() && matched_skill_count == required_skills.len() {
         bonus_score += 4;
+        bonus_items.push(StructuredBonusItem {
+            title: "岗位技能全命中".to_string(),
+            score_5: round_one_decimal((4.0_f64 / 15.0 * 5.0).clamp(0.0, 5.0)),
+            comment: "简历中核心技能与岗位要求覆盖度高。".to_string(),
+        });
     }
     if normalized_skills
         .iter()
         .any(|skill| skill.contains("playwright") || skill.contains("rust") || skill.contains("go"))
     {
         bonus_score += 3;
+        bonus_items.push(StructuredBonusItem {
+            title: "稀缺技术栈覆盖".to_string(),
+            score_5: round_one_decimal((3.0_f64 / 15.0 * 5.0).clamp(0.0, 5.0)),
+            comment: "包含岗位稀缺或高价值技术关键词。".to_string(),
+        });
     }
     bonus_score = bonus_score.clamp(0, 15);
 
     let mut risk_penalty = 0_i32;
+    let mut risk_items = Vec::<StructuredRiskItem>::new();
     let mut evidence = vec![
         format!("模板: {}", template.name),
         format!(
@@ -1828,20 +2088,44 @@ pub(crate) fn run_resume_screening(
 
     if t0_score < 3.0 {
         risk_penalty += 12;
-        verification_points.push("T0 硬性条件未达标，建议人工二次核验。".to_string());
+        let comment = "T0 硬性条件未达标，建议人工二次核验。".to_string();
+        verification_points.push(comment.clone());
+        risk_items.push(StructuredRiskItem {
+            title: "硬性条件未达标".to_string(),
+            severity: "HIGH".to_string(),
+            comment,
+        });
     }
     if !required_skills.is_empty() && skill_coverage < 0.35 {
         risk_penalty += 10;
-        verification_points.push("核心技能覆盖偏低，需在技术面重点核验。".to_string());
+        let comment = "核心技能覆盖偏低，需在技术面重点核验。".to_string();
+        verification_points.push(comment.clone());
+        risk_items.push(StructuredRiskItem {
+            title: "核心技能覆盖偏低".to_string(),
+            severity: "HIGH".to_string(),
+            comment,
+        });
     }
     if resume_raw_text.chars().count() < 120 {
         risk_penalty += 8;
-        verification_points.push("简历信息较少，建议补充项目证据。".to_string());
+        let comment = "简历信息较少，建议补充项目证据。".to_string();
+        verification_points.push(comment.clone());
+        risk_items.push(StructuredRiskItem {
+            title: "简历信息不足".to_string(),
+            severity: "MEDIUM".to_string(),
+            comment,
+        });
     }
     if let (Some(expected), Some(max)) = (expected_salary, max_salary) {
         if expected > max + 8.0 {
             risk_penalty += 10;
-            verification_points.push("薪资预期显著高于岗位预算，需先沟通薪资边界。".to_string());
+            let comment = "薪资预期显著高于岗位预算，需先沟通薪资边界。".to_string();
+            verification_points.push(comment.clone());
+            risk_items.push(StructuredRiskItem {
+                title: "薪资预期偏高".to_string(),
+                severity: "HIGH".to_string(),
+                comment,
+            });
         }
     }
 
@@ -1854,11 +2138,12 @@ pub(crate) fn run_resume_screening(
     }
     .to_string();
 
-    let overall_score = clamp_score(
-        (t1_score as f64 * 0.65 + fine_score as f64 * 0.35 + bonus_score as f64
-            - risk_penalty as f64 * 0.8)
-            .round() as i32,
-    );
+    let t1_score_5 = round_one_decimal((t1_score as f64 / 20.0).clamp(0.0, 5.0));
+    let t2_score_5 = bonus_score_to_score_5(bonus_score);
+    let t3_score_5 = risk_level_to_score_5(&risk_level);
+    let overall_score_5 =
+        calculate_screening_overall_score_5(t0_score, t1_score, bonus_score, &risk_level);
+    let overall_score = calculate_screening_overall_score_100(overall_score_5);
 
     let recommendation = derive_screening_recommendation(t0_score, overall_score, &risk_level);
 
@@ -1866,11 +2151,221 @@ pub(crate) fn run_resume_screening(
         verification_points.push("可进入面试验证岗位关键能力与价值观匹配度。".to_string());
     }
     evidence.push(format!(
-        "综合得分: {} (T1={}, 精筛={}, 加分={}, 风险扣减={})",
-        overall_score, t1_score, fine_score, bonus_score, risk_penalty
+        "综合得分: {:.2}/5 (T0={:.1}, T1={:.1}, T2={:.1}, T3={:.1})",
+        overall_score_5, t0_score, t1_score_5, t2_score_5, t3_score_5
+    ));
+    evidence.push(format!(
+        "兼容分: {} (精筛={}, 加分原值={}, 风险扣减={})",
+        overall_score, fine_score, bonus_score, risk_penalty
     ));
 
+    for item in &mut template_items {
+        item.comment = normalize_screening_comment(
+            &item.comment,
+            &item.comment,
+            SECTION_COMMENT_MAX_CHARS,
+        );
+    }
+    for item in &mut bonus_items {
+        item.comment = normalize_screening_comment(
+            &item.comment,
+            &item.comment,
+            SECTION_COMMENT_MAX_CHARS,
+        );
+    }
+    for item in &mut risk_items {
+        item.comment = normalize_screening_comment(
+            &item.comment,
+            &item.comment,
+            SECTION_COMMENT_MAX_CHARS,
+        );
+    }
+
+    let default_overall_comment = build_default_overall_comment(
+        &recommendation,
+        overall_score_5,
+        t0_score,
+        t1_score_5,
+        t2_score_5,
+        t3_score_5,
+    );
+    let default_bonus_comment = build_default_bonus_comment(t2_score_5, &bonus_items);
+    let default_risk_comment = build_default_risk_comment(&risk_level, t3_score_5, &risk_items);
+
+    let ai_comment_payload = serde_json::json!({
+        "candidate": {
+            "years": candidate_years,
+            "skills": extracted_skills,
+            "requiredSkillCount": required_skills.len(),
+            "matchedSkillCount": matched_skill_count,
+            "educationLevel": education_level,
+            "projectMentions": project_mentions,
+            "expectedSalaryK": expected_salary,
+        },
+        "job": {
+            "requiredSkills": required_skills,
+            "maxSalaryK": max_salary,
+            "templateName": template.name.clone(),
+        },
+        "scoreCard": {
+            "weights": {"t0": 50, "t1": 30, "t2": 10, "t3": 10},
+            "subscores": {"t0": t0_score, "t1": t1_score_5, "t2": t2_score_5, "t3": t3_score_5},
+            "overallScore5": overall_score_5,
+            "overallScore100": overall_score,
+            "recommendation": recommendation.clone(),
+            "riskLevel": risk_level.clone(),
+        },
+        "templateItems": template_items
+            .iter()
+            .map(|item| serde_json::json!({
+                "key": item.key,
+                "label": item.label,
+                "weight": item.weight,
+                "score5": item.score_5,
+                "score100": item.score_100,
+                "comment": item.comment,
+            }))
+            .collect::<Vec<_>>(),
+        "bonusItems": bonus_items
+            .iter()
+            .map(|item| serde_json::json!({
+                "title": item.title,
+                "score5": item.score_5,
+                "comment": item.comment,
+            }))
+            .collect::<Vec<_>>(),
+        "riskItems": risk_items
+            .iter()
+            .map(|item| serde_json::json!({
+                "title": item.title,
+                "severity": item.severity,
+                "comment": item.comment,
+            }))
+            .collect::<Vec<_>>(),
+        "resumeExcerpt": trim_resume_excerpt(&resume_raw_text, 1200),
+    });
+
+    let ai_comments = generate_screening_ai_comment_bundle(&conn, state.inner(), &ai_comment_payload);
+    let mut overall_comment = normalize_screening_comment(
+        &default_overall_comment,
+        &default_overall_comment,
+        OVERALL_COMMENT_MAX_CHARS,
+    );
+    let mut bonus_comment = normalize_screening_comment(
+        &default_bonus_comment,
+        &default_bonus_comment,
+        SECTION_COMMENT_MAX_CHARS,
+    );
+    let mut risk_comment = normalize_screening_comment(
+        &default_risk_comment,
+        &default_risk_comment,
+        SECTION_COMMENT_MAX_CHARS,
+    );
+    if let Some(bundle) = ai_comments {
+        overall_comment = normalize_screening_comment(
+            &bundle.overall_comment,
+            &overall_comment,
+            OVERALL_COMMENT_MAX_CHARS,
+        );
+        bonus_comment = normalize_screening_comment(
+            &bundle.bonus_comment,
+            &bonus_comment,
+            SECTION_COMMENT_MAX_CHARS,
+        );
+        risk_comment = normalize_screening_comment(
+            &bundle.risk_comment,
+            &risk_comment,
+            SECTION_COMMENT_MAX_CHARS,
+        );
+
+        for item in &mut template_items {
+            if let Some(comment) = bundle.template_comments.get(&item.key.to_lowercase()) {
+                item.comment = normalize_screening_comment(
+                    comment,
+                    &item.comment,
+                    SECTION_COMMENT_MAX_CHARS,
+                );
+            }
+        }
+    }
+
+    let template_items_json = template_items
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "key": item.key,
+                "label": item.label,
+                "weight": item.weight,
+                "score_5": item.score_5,
+                "score_100": item.score_100,
+                "comment": item.comment,
+            })
+        })
+        .collect::<Vec<_>>();
+    let bonus_items_json = bonus_items
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "title": item.title,
+                "score_5": item.score_5,
+                "comment": item.comment,
+            })
+        })
+        .collect::<Vec<_>>();
+    let risk_items_json = risk_items
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "title": item.title,
+                "severity": item.severity,
+                "comment": item.comment,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut risk_alerts = Vec::<String>::new();
+    if risk_penalty > 0 {
+        risk_alerts.push(format!("风险扣减 {}", risk_penalty));
+    }
+    risk_alerts.extend(risk_items.iter().map(|item| item.title.clone()));
+
+    let legacy_t1_items = template_items
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "key": item.key,
+                "label": item.label,
+                "weight": item.weight,
+                "score": item.score_100,
+                "reason": item.comment,
+            })
+        })
+        .collect::<Vec<_>>();
+
     let structured_result = serde_json::json!({
+        "version": 2,
+        "summary": {
+            "overall_score_5": overall_score_5,
+            "overall_score_100": overall_score,
+            "weights": {"t0": 50, "t1": 30, "t2": 10, "t3": 10},
+            "subscores": {"t0": t0_score, "t1": t1_score_5, "t2": t2_score_5, "t3": t3_score_5},
+            "overall_comment": overall_comment.clone(),
+        },
+        "template_assessment": {
+            "template": template.name.clone(),
+            "items": template_items_json,
+        },
+        "bonus_assessment": {
+            "score_5": t2_score_5,
+            "items": bonus_items_json,
+            "comment": bonus_comment,
+        },
+        "risk_assessment": {
+            "level": risk_level.clone(),
+            "score_5": t3_score_5,
+            "items": risk_items_json,
+            "comment": risk_comment,
+        },
         "weights": {
             "t0": {
                 "score": t0_score,
@@ -1879,17 +2374,17 @@ pub(crate) fn run_resume_screening(
                 "details": evidence.clone(),
             },
             "t1": {
-                "template": template.name,
-                "items": t1_items,
+                "template": template.name.clone(),
+                "items": legacy_t1_items,
             },
             "t2": {
                 "bonus": bonus_score,
-                "items": verification_points.clone(),
+                "items": bonus_items.iter().map(|item| item.title.clone()).collect::<Vec<_>>(),
             }
         },
-        "risk_alerts": if risk_penalty > 0 { vec![format!("风险扣减 {}", risk_penalty)] } else { Vec::<String>::new() },
+        "risk_alerts": risk_alerts,
         "overall_score": overall_score,
-        "overall_comment": recommendation,
+        "overall_comment": overall_comment,
     });
 
     let created_at = now_iso();

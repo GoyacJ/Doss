@@ -11,9 +11,10 @@ use crate::domains::candidate::build_order_by_from_rules;
 use crate::domains::jobs::count_active_crawl_tasks_for_job;
 use crate::domains::screening::{
     build_structured_resume_fields, count_jobs_using_screening_template,
+    calculate_screening_overall_score_100, calculate_screening_overall_score_5,
     create_global_screening_template_internal, delete_global_screening_template_internal,
     derive_screening_recommendation, evaluate_interview_feedback_payload, extract_docx_xml_text,
-    normalize_screening_dimensions, resolve_screening_template,
+    normalize_screening_comment, normalize_screening_dimensions, resolve_screening_template,
 };
 use crate::domains::search::build_fts_match_query;
 use crate::domains::sidecar_runtime::{sidecar_base_url, sidecar_port_candidates};
@@ -254,6 +255,35 @@ fn screening_recommendation_respects_t0_boundaries() {
     assert_eq!(derive_screening_recommendation(3.0, 82, "LOW"), "PASS");
     assert_eq!(derive_screening_recommendation(3.9, 70, "LOW"), "REVIEW");
     assert_eq!(derive_screening_recommendation(4.0, 60, "LOW"), "REJECT");
+}
+
+#[test]
+fn screening_weighted_formula_matches_expected_ratio() {
+    let overall_5 = calculate_screening_overall_score_5(4.0, 80, 6, "MEDIUM");
+    let overall_100 = calculate_screening_overall_score_100(overall_5);
+
+    assert!((overall_5 - 3.7).abs() < 0.001);
+    assert_eq!(overall_100, 74);
+}
+
+#[test]
+fn screening_t3_risk_mapping_affects_overall_score() {
+    let high_risk = calculate_screening_overall_score_5(4.0, 80, 6, "HIGH");
+    let medium_risk = calculate_screening_overall_score_5(4.0, 80, 6, "MEDIUM");
+    let low_risk = calculate_screening_overall_score_5(4.0, 80, 6, "LOW");
+
+    assert!(high_risk < medium_risk);
+    assert!(medium_risk < low_risk);
+}
+
+#[test]
+fn normalize_screening_comment_applies_fallback_and_limit() {
+    let fallback_result = normalize_screening_comment("", "默认说明", 4);
+    assert_eq!(fallback_result, "默认说明".chars().take(4).collect::<String>());
+
+    let long_text = "这是一个很长的说明文本，用于验证长度截断是否生效。".repeat(20);
+    let normalized = normalize_screening_comment(&long_text, "默认", 200);
+    assert_eq!(normalized.chars().count(), 200);
 }
 
 #[test]

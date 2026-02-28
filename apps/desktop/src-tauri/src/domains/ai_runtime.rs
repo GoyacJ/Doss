@@ -1056,10 +1056,27 @@ pub(crate) fn probe_provider_connectivity(
     Ok((response, latency_ms))
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum AiInvokeProgressEvent {
+    AttemptStart {
+        attempt: i32,
+        total: i32,
+    },
+    AttemptFailure {
+        attempt: i32,
+        total: i32,
+        error: String,
+    },
+    Parsed {
+        confidence: Option<f64>,
+    },
+}
+
 pub(crate) fn invoke_cloud_provider(
     settings: &ResolvedAiProviderSettings,
     context: &AiPromptContext,
     fallback: &AiAnalysisPayload,
+    mut on_progress: Option<&mut dyn FnMut(AiInvokeProgressEvent)>,
 ) -> Result<AiAnalysisPayload, String> {
     if settings.api_key.is_none() {
         return Err(format!("{}_api_key_missing", settings.provider.as_db()));
@@ -1074,6 +1091,13 @@ pub(crate) fn invoke_cloud_provider(
     let attempts = settings.retry_count.max(1);
     let mut last_error = "provider_call_unknown_error".to_string();
     for attempt in 1..=attempts {
+        if let Some(callback) = on_progress.as_mut() {
+            (**callback)(AiInvokeProgressEvent::AttemptStart {
+                attempt,
+                total: attempts,
+            });
+        }
+
         let call_result = match settings.provider {
             AiProvider::Qwen
             | AiProvider::Doubao
@@ -1090,14 +1114,78 @@ pub(crate) fn invoke_cloud_provider(
         match call_result {
             Ok(content) => {
                 let parsed = parse_ai_provider_response(&content)?;
+                if let Some(callback) = on_progress.as_mut() {
+                    (**callback)(AiInvokeProgressEvent::Parsed {
+                        confidence: parsed.confidence,
+                    });
+                }
                 return Ok(ensure_analysis_payload(parsed, fallback));
             }
             Err(error) => {
+                if let Some(callback) = on_progress.as_mut() {
+                    (**callback)(AiInvokeProgressEvent::AttemptFailure {
+                        attempt,
+                        total: attempts,
+                        error: error.clone(),
+                    });
+                }
                 last_error = error;
                 if attempt < attempts {
                     std::thread::sleep(Duration::from_millis(280));
                 }
             }
+        }
+    }
+
+    Err(last_error)
+}
+
+pub(crate) fn invoke_text_generation(
+    settings: &ResolvedAiProviderSettings,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<String, String> {
+    if settings.api_key.is_none() {
+        return Err(format!("{}_api_key_missing", settings.provider.as_db()));
+    }
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(settings.timeout_secs as u64))
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    let attempts = settings.retry_count.max(1);
+    let mut last_error = "provider_call_unknown_error".to_string();
+    for attempt in 1..=attempts {
+        let call_result = match settings.provider {
+            AiProvider::Qwen
+            | AiProvider::Doubao
+            | AiProvider::Deepseek
+            | AiProvider::Glm
+            | AiProvider::OpenApi => {
+                call_openai_compatible_provider(&client, settings, system_prompt, user_prompt)
+            }
+            AiProvider::Minimax => {
+                call_minimax_provider(&client, settings, system_prompt, user_prompt)
+            }
+        };
+
+        match call_result {
+            Ok(content) => {
+                let normalized = content.trim();
+                if normalized.is_empty() {
+                    last_error = "provider_response_content_missing".to_string();
+                } else {
+                    return Ok(normalized.to_string());
+                }
+            }
+            Err(error) => {
+                last_error = error;
+            }
+        }
+
+        if attempt < attempts {
+            std::thread::sleep(Duration::from_millis(280));
         }
     }
 
