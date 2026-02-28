@@ -268,23 +268,40 @@ export interface CrawlTaskRecord {
   updated_at: string;
 }
 
+export type SortDirection = "asc" | "desc";
+
+export interface SortRule<Field extends string = string> {
+  field: Field;
+  direction: SortDirection;
+}
+
 export interface CandidateListQuery extends PageQuery {
   job_id?: number;
   name_like?: string;
   stage?: PipelineStage;
-  sort_by?: "job_title" | "score" | "updated_at" | "created_at";
-  sort_order?: "asc" | "desc";
+  sorts?: SortRule<
+    | "name"
+    | "current_company"
+    | "job_title"
+    | "score"
+    | "stage"
+    | "years_of_experience"
+    | "updated_at"
+    | "created_at"
+  >[];
 }
 
 export interface InterviewListQuery extends PageQuery {
   job_id?: number;
   name_like?: string;
+  sorts?: SortRule<"name" | "job_title" | "stage" | "updated_at" | "created_at">[];
 }
 
 export interface DecisionListQuery extends PageQuery {
   job_id?: number;
   name_like?: string;
   interview_passed?: boolean;
+  sorts?: SortRule<"name" | "job_title" | "stage" | "updated_at" | "created_at">[];
 }
 
 export type CrawlTaskPersonSyncStatus = "UNSYNCED" | "SYNCED" | "FAILED";

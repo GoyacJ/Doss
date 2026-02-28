@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import type {
   CrawlMode,
   CrawlTaskPersonRecord,
@@ -7,6 +7,7 @@ import type {
   CrawlTaskRecord,
   CrawlTaskScheduleType,
   CrawlTaskSource,
+  SortRule,
 } from "@doss/shared";
 import { useRecruitingStore } from "../stores/recruiting";
 import UiBadge from "../components/UiBadge.vue";
@@ -15,10 +16,17 @@ import UiField from "../components/UiField.vue";
 import UiInfoRow from "../components/UiInfoRow.vue";
 import UiPanel from "../components/UiPanel.vue";
 import UiSelect from "../components/UiSelect.vue";
+import UiTableFilterPanel from "../components/UiTableFilterPanel.vue";
 import UiTable from "../components/UiTable.vue";
+import UiTablePagination from "../components/UiTablePagination.vue";
+import UiTableToolbar from "../components/UiTableToolbar.vue";
 import UiTd from "../components/UiTd.vue";
 import UiTh from "../components/UiTh.vue";
 import { useToastStore } from "../stores/toast";
+import { taskStatusLabel, taskStatusTone } from "../lib/status";
+import { includesKeyword } from "../lib/table-filter";
+import { clampPage, paginateRows } from "../lib/table-pagination";
+import { normalizeSortRules, sortRowsByRules, type SortResolver } from "../lib/table-sort";
 
 const store = useRecruitingStore();
 const toast = useToastStore();
@@ -32,6 +40,12 @@ const syncingPeople = ref(false);
 const selectedTaskId = ref<number | null>(null);
 const deleteConfirmTask = ref<CrawlTaskRecord | null>(null);
 const deletingTaskId = ref<number | null>(null);
+const taskAdvancedFilterOpen = ref(false);
+const peopleAdvancedFilterOpen = ref(false);
+const taskPage = ref(1);
+const taskPageSize = ref(10);
+const peoplePage = ref(1);
+const peoplePageSize = ref(10);
 
 const newTaskForm = reactive({
   source: "all" as CrawlTaskSource,
@@ -44,6 +58,22 @@ const newTaskForm = reactive({
   retryCount: 1,
   retryBackoffMs: 450,
   autoSyncToCandidates: true,
+});
+
+const taskTableFilters = reactive({
+  quickKeyword: "",
+  source: "" as "" | CrawlTaskSource,
+  mode: "" as "" | CrawlMode,
+  status: "",
+  localJobTitle: "",
+  autoSync: "" as "" | "yes" | "no",
+});
+
+const peopleTableFilters = reactive({
+  quickKeyword: "",
+  source: "" as "" | CrawlTaskSource,
+  syncStatus: "" as "" | CrawlTaskPersonSyncStatus,
+  syncedToCandidate: "" as "" | "yes" | "no",
 });
 
 const activeJobs = computed(() =>
@@ -89,6 +119,236 @@ const activeJobOptions = computed(() => activeJobs.value.map((job) => ({
   value: job.id,
   label: job.title,
 })));
+
+type TaskSortField
+  = | "source"
+    | "job_title"
+    | "mode"
+    | "batch_size"
+    | "schedule"
+    | "auto_sync"
+    | "status"
+    | "retry_count"
+    | "updated_at";
+type PeopleSortField
+  = | "source"
+    | "name"
+    | "current_company"
+    | "years_of_experience"
+    | "sync_status"
+    | "candidate_id";
+
+const taskSortOptions: { label: string; value: TaskSortField }[] = [
+  { label: "来源", value: "source" },
+  { label: "职位", value: "job_title" },
+  { label: "模式", value: "mode" },
+  { label: "每批人数", value: "batch_size" },
+  { label: "调度", value: "schedule" },
+  { label: "自动同步", value: "auto_sync" },
+  { label: "状态", value: "status" },
+  { label: "重试次数", value: "retry_count" },
+  { label: "更新时间", value: "updated_at" },
+];
+
+const peopleSortOptions: { label: string; value: PeopleSortField }[] = [
+  { label: "来源", value: "source" },
+  { label: "姓名", value: "name" },
+  { label: "当前公司", value: "current_company" },
+  { label: "年限", value: "years_of_experience" },
+  { label: "同步状态", value: "sync_status" },
+  { label: "是否已同步候选人", value: "candidate_id" },
+];
+
+const taskSorts = ref<SortRule<TaskSortField>[]>([
+  { field: "updated_at", direction: "desc" },
+]);
+const peopleSorts = ref<SortRule<PeopleSortField>[]>([
+  { field: "name", direction: "asc" },
+]);
+
+const effectiveTaskSorts = computed(() =>
+  normalizeSortRules(
+    taskSorts.value,
+    taskSortOptions.map((item) => item.value),
+  ),
+);
+
+const effectivePeopleSorts = computed(() =>
+  normalizeSortRules(
+    peopleSorts.value,
+    peopleSortOptions.map((item) => item.value),
+  ),
+);
+
+function sortTaskByColumn(payload: { field: string; direction: "asc" | "desc" }) {
+  const field = payload.field as TaskSortField;
+  if (!taskSortOptions.some((item) => item.value === field)) {
+    return;
+  }
+  const next = [
+    { field, direction: payload.direction },
+    ...effectiveTaskSorts.value.filter((rule) => rule.field !== field),
+  ];
+  taskSorts.value = normalizeSortRules(next, taskSortOptions.map((item) => item.value));
+}
+
+function sortPeopleByColumn(payload: { field: string; direction: "asc" | "desc" }) {
+  const field = payload.field as PeopleSortField;
+  if (!peopleSortOptions.some((item) => item.value === field)) {
+    return;
+  }
+  const next = [
+    { field, direction: payload.direction },
+    ...effectivePeopleSorts.value.filter((rule) => rule.field !== field),
+  ];
+  peopleSorts.value = normalizeSortRules(next, peopleSortOptions.map((item) => item.value));
+}
+
+const taskSourceFilterOptions = [
+  { value: "", label: "全部来源" },
+  ...sourceOptions.filter((item) => item.value !== "all").map((item) => ({
+    value: item.value,
+    label: item.label,
+  })),
+];
+
+const taskModeFilterOptions = [
+  { value: "", label: "全部模式" },
+  ...modeOptions.map((item) => ({
+    value: item.value,
+    label: item.label,
+  })),
+];
+
+const taskStatusFilterOptions = [
+  { value: "", label: "全部状态" },
+  { value: "PENDING", label: "待执行" },
+  { value: "RUNNING", label: "执行中" },
+  { value: "PAUSED", label: "暂停" },
+  { value: "CANCELED", label: "已取消" },
+  { value: "SUCCEEDED", label: "成功" },
+  { value: "FAILED", label: "失败" },
+];
+
+const yesNoFilterOptions = [
+  { value: "", label: "全部" },
+  { value: "yes", label: "是" },
+  { value: "no", label: "否" },
+];
+
+const taskRows = computed(() =>
+  store.tasks.filter((task) => {
+    const payload = parseTaskPayload(task);
+    if (!includesKeyword(
+      taskTableFilters.quickKeyword,
+      task.source,
+      payload.localJobTitle,
+      payload.localJobCity,
+      task.status,
+      task.updated_at,
+    )) {
+      return false;
+    }
+
+    if (taskTableFilters.source && task.source !== taskTableFilters.source) {
+      return false;
+    }
+    if (taskTableFilters.mode && task.mode !== taskTableFilters.mode) {
+      return false;
+    }
+    if (taskTableFilters.status && task.status !== taskTableFilters.status) {
+      return false;
+    }
+    if (!includesKeyword(taskTableFilters.localJobTitle, payload.localJobTitle)) {
+      return false;
+    }
+    if (taskTableFilters.autoSync === "yes" && !payload.autoSyncToCandidates) {
+      return false;
+    }
+    if (taskTableFilters.autoSync === "no" && payload.autoSyncToCandidates) {
+      return false;
+    }
+
+    return true;
+  }),
+);
+
+const taskSortResolver: SortResolver<CrawlTaskRecord, TaskSortField> = {
+  source: (row) => row.source,
+  job_title: (row) => parseTaskPayload(row).localJobTitle,
+  mode: (row) => modeLabel(row.mode),
+  batch_size: (row) => parseTaskPayload(row).batchSize,
+  schedule: (row) => parseTaskPayload(row).scheduleLabel,
+  auto_sync: (row) => parseTaskPayload(row).autoSyncToCandidates,
+  status: (row) => row.status,
+  retry_count: (row) => row.retry_count,
+  updated_at: (row) => row.updated_at,
+};
+
+const displayTaskRows = computed(() =>
+  sortRowsByRules(taskRows.value, effectiveTaskSorts.value, taskSortResolver),
+);
+const pagedTaskRows = computed(() =>
+  paginateRows(displayTaskRows.value, taskPage.value, taskPageSize.value),
+);
+
+const peopleSourceFilterOptions = [
+  { value: "", label: "全部来源" },
+  { value: "boss", label: "Boss" },
+  { value: "zhilian", label: "智联" },
+  { value: "wuba", label: "58" },
+  { value: "lagou", label: "拉勾" },
+];
+
+const syncStatusFilterOptions = [
+  { value: "", label: "全部同步状态" },
+  { value: "UNSYNCED", label: "未同步" },
+  { value: "SYNCED", label: "已同步" },
+  { value: "FAILED", label: "同步失败" },
+];
+
+const peopleRows = computed(() =>
+  selectedTaskPeople.value.filter((person) => {
+    if (!includesKeyword(
+      peopleTableFilters.quickKeyword,
+      person.name,
+      person.external_id,
+      person.current_company,
+      person.sync_error_message,
+    )) {
+      return false;
+    }
+    if (peopleTableFilters.source && person.source !== peopleTableFilters.source) {
+      return false;
+    }
+    if (peopleTableFilters.syncStatus && person.sync_status !== peopleTableFilters.syncStatus) {
+      return false;
+    }
+    if (peopleTableFilters.syncedToCandidate === "yes" && person.sync_status !== "SYNCED") {
+      return false;
+    }
+    if (peopleTableFilters.syncedToCandidate === "no" && person.sync_status === "SYNCED") {
+      return false;
+    }
+    return true;
+  }),
+);
+
+const peopleSortResolver: SortResolver<CrawlTaskPersonRecord, PeopleSortField> = {
+  source: (row) => row.source,
+  name: (row) => row.name,
+  current_company: (row) => row.current_company,
+  years_of_experience: (row) => row.years_of_experience,
+  sync_status: (row) => row.sync_status,
+  candidate_id: (row) => row.candidate_id,
+};
+
+const displayPeopleRows = computed(() =>
+  sortRowsByRules(peopleRows.value, effectivePeopleSorts.value, peopleSortResolver),
+);
+const pagedPeopleRows = computed(() =>
+  paginateRows(displayPeopleRows.value, peoplePage.value, peoplePageSize.value),
+);
 
 function resolveErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim()) {
@@ -159,14 +419,6 @@ function syncStatusTone(status: CrawlTaskPersonSyncStatus): "success" | "warning
 
 function toggleTaskLabel(task: CrawlTaskRecord): string {
   return task.status === "RUNNING" ? "停止" : "启动";
-}
-
-function runStatusLabel(status: CrawlTaskRecord["status"]): string {
-  return status === "RUNNING" ? "正在运行" : "待执行";
-}
-
-function runStatusTone(status: CrawlTaskRecord["status"]): "success" | "info" {
-  return status === "RUNNING" ? "success" : "info";
 }
 
 function modeLabel(mode: CrawlMode): string {
@@ -322,6 +574,59 @@ async function confirmDeleteTask() {
   }
 }
 
+watch(
+  () => [
+    taskTableFilters.quickKeyword,
+    taskTableFilters.source,
+    taskTableFilters.mode,
+    taskTableFilters.status,
+    taskTableFilters.localJobTitle,
+    taskTableFilters.autoSync,
+    JSON.stringify(effectiveTaskSorts.value),
+  ],
+  () => {
+    taskPage.value = 1;
+  },
+);
+
+watch(taskPageSize, () => {
+  taskPage.value = 1;
+});
+
+watch(
+  () => displayTaskRows.value.length,
+  (total) => {
+    taskPage.value = clampPage(taskPage.value, total, taskPageSize.value);
+  },
+  { immediate: true },
+);
+
+watch(
+  () => [
+    selectedTaskId.value,
+    peopleTableFilters.quickKeyword,
+    peopleTableFilters.source,
+    peopleTableFilters.syncStatus,
+    peopleTableFilters.syncedToCandidate,
+    JSON.stringify(effectivePeopleSorts.value),
+  ],
+  () => {
+    peoplePage.value = 1;
+  },
+);
+
+watch(peoplePageSize, () => {
+  peoplePage.value = 1;
+});
+
+watch(
+  () => displayPeopleRows.value.length,
+  (total) => {
+    peoplePage.value = clampPage(peoplePage.value, total, peoplePageSize.value);
+  },
+  { immediate: true },
+);
+
 onMounted(async () => {
   if (activeJobs.value.length && !newTaskForm.localJobId) {
     newTaskForm.localJobId = activeJobs.value[0]!.id;
@@ -345,24 +650,52 @@ onMounted(async () => {
     </header>
 
     <UiPanel title="任务列表">
+      <UiTableToolbar
+        v-model:quick-keyword="taskTableFilters.quickKeyword"
+        v-model:advanced-open="taskAdvancedFilterOpen"
+        quick-placeholder="输入来源/职位/状态关键词"
+        :show-refresh="false"
+        :show-apply="false"
+      />
+
+      <UiTableFilterPanel v-model:open="taskAdvancedFilterOpen">
+        <div class="grid grid-cols-3 gap-2.5 lt-lg:grid-cols-2 lt-sm:grid-cols-1">
+          <UiField label="来源">
+            <UiSelect v-model="taskTableFilters.source" :options="taskSourceFilterOptions" />
+          </UiField>
+          <UiField label="模式">
+            <UiSelect v-model="taskTableFilters.mode" :options="taskModeFilterOptions" />
+          </UiField>
+          <UiField label="状态">
+            <UiSelect v-model="taskTableFilters.status" :options="taskStatusFilterOptions" />
+          </UiField>
+          <UiField label="职位">
+            <input v-model="taskTableFilters.localJobTitle" placeholder="职位关键词" />
+          </UiField>
+          <UiField label="自动同步">
+            <UiSelect v-model="taskTableFilters.autoSync" :options="yesNoFilterOptions" />
+          </UiField>
+        </div>
+      </UiTableFilterPanel>
+
       <UiTable>
         <thead>
           <tr>
-            <UiTh>来源</UiTh>
-            <UiTh>职位</UiTh>
-            <UiTh>模式</UiTh>
-            <UiTh>每批人数</UiTh>
-            <UiTh>调度</UiTh>
+            <UiTh sort-field="source" :sorts="effectiveTaskSorts" @sort="sortTaskByColumn">来源</UiTh>
+            <UiTh sort-field="job_title" :sorts="effectiveTaskSorts" @sort="sortTaskByColumn">职位</UiTh>
+            <UiTh sort-field="mode" :sorts="effectiveTaskSorts" @sort="sortTaskByColumn">模式</UiTh>
+            <UiTh sort-field="batch_size" :sorts="effectiveTaskSorts" @sort="sortTaskByColumn">每批人数</UiTh>
+            <UiTh sort-field="schedule" :sorts="effectiveTaskSorts" @sort="sortTaskByColumn">调度</UiTh>
             <UiTh>重试参数</UiTh>
-            <UiTh>自动同步</UiTh>
-            <UiTh>状态</UiTh>
-            <UiTh>重试</UiTh>
-            <UiTh>更新时间</UiTh>
+            <UiTh sort-field="auto_sync" :sorts="effectiveTaskSorts" @sort="sortTaskByColumn">自动同步</UiTh>
+            <UiTh sort-field="status" :sorts="effectiveTaskSorts" @sort="sortTaskByColumn">状态</UiTh>
+            <UiTh sort-field="retry_count" :sorts="effectiveTaskSorts" @sort="sortTaskByColumn">重试</UiTh>
+            <UiTh sort-field="updated_at" :sorts="effectiveTaskSorts" @sort="sortTaskByColumn">更新时间</UiTh>
             <UiTh>控制</UiTh>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="task in store.tasks" :key="task.id">
+          <tr v-for="task in pagedTaskRows" :key="task.id">
             <UiTd>{{ task.source }}</UiTd>
             <UiTd>
               {{ parseTaskPayload(task).localJobTitle }}
@@ -375,15 +708,16 @@ onMounted(async () => {
             </UiTd>
             <UiTd>{{ parseTaskPayload(task).autoSyncToCandidates ? "是" : "否" }}</UiTd>
             <UiTd>
-              <UiBadge :tone="runStatusTone(task.status)">{{ runStatusLabel(task.status) }}</UiBadge>
+              <UiBadge :tone="taskStatusTone(task.status)">{{ taskStatusLabel(task.status) }}</UiBadge>
             </UiTd>
             <UiTd>{{ task.retry_count }}</UiTd>
             <UiTd no-wrap>{{ task.updated_at }}</UiTd>
             <UiTd>
-              <div class="flex items-center gap-2 flex-wrap">
-                <UiButton variant="ghost" @click="openTaskDetail(task.id)">查看</UiButton>
+              <div class="flex items-center justify-center gap-2 flex-wrap">
+                <UiButton variant="ghost" size="sm" @click="openTaskDetail(task.id)">查看</UiButton>
                 <UiButton
                   variant="ghost"
+                  size="sm"
                   :disabled="toggleTaskDisabled(task)"
                   @click="toggleTask(task)"
                 >
@@ -391,6 +725,7 @@ onMounted(async () => {
                 </UiButton>
                 <UiButton
                   variant="ghost"
+                  size="sm"
                   :disabled="deletingTaskId === task.id"
                   @click="askDeleteTask(task)"
                 >
@@ -399,8 +734,16 @@ onMounted(async () => {
               </div>
             </UiTd>
           </tr>
+          <tr v-if="pagedTaskRows.length === 0">
+            <UiTd colspan="11" class="text-center text-muted py-6">暂无采集任务</UiTd>
+          </tr>
         </tbody>
       </UiTable>
+      <UiTablePagination
+        v-model:page="taskPage"
+        v-model:page-size="taskPageSize"
+        :total="displayTaskRows.length"
+      />
     </UiPanel>
   </section>
 
@@ -483,8 +826,9 @@ onMounted(async () => {
             <UiInfoRow label="来源" :value="selectedTask.source" />
             <UiInfoRow label="模式" :value="modeLabel(selectedTask.mode)" />
             <UiInfoRow label="状态">
-              <UiBadge :tone="runStatusTone(selectedTask.status)">{{ runStatusLabel(selectedTask.status) }}</UiBadge>
+              <UiBadge :tone="taskStatusTone(selectedTask.status)">{{ taskStatusLabel(selectedTask.status) }}</UiBadge>
             </UiInfoRow>
+            <UiInfoRow label="错误码" :value="selectedTask.error_code || '-'" />
             <UiInfoRow label="更新时间" :value="selectedTask.updated_at" />
           </div>
         </UiPanel>
@@ -538,20 +882,42 @@ onMounted(async () => {
           </div>
         </template>
 
+        <UiTableToolbar
+          v-model:quick-keyword="peopleTableFilters.quickKeyword"
+          v-model:advanced-open="peopleAdvancedFilterOpen"
+          quick-placeholder="输入姓名/公司/失败原因关键词"
+          :show-refresh="false"
+          :show-apply="false"
+        />
+
+        <UiTableFilterPanel v-model:open="peopleAdvancedFilterOpen">
+          <div class="grid grid-cols-3 gap-2.5 lt-lg:grid-cols-2 lt-sm:grid-cols-1">
+            <UiField label="来源">
+              <UiSelect v-model="peopleTableFilters.source" :options="peopleSourceFilterOptions" />
+            </UiField>
+            <UiField label="同步状态">
+              <UiSelect v-model="peopleTableFilters.syncStatus" :options="syncStatusFilterOptions" />
+            </UiField>
+            <UiField label="是否已同步候选人">
+              <UiSelect v-model="peopleTableFilters.syncedToCandidate" :options="yesNoFilterOptions" />
+            </UiField>
+          </div>
+        </UiTableFilterPanel>
+
         <UiTable>
           <thead>
             <tr>
-              <UiTh>来源</UiTh>
-              <UiTh>姓名</UiTh>
-              <UiTh>当前公司</UiTh>
-              <UiTh>年限</UiTh>
-              <UiTh>同步状态</UiTh>
-              <UiTh>是否已同步到候选人</UiTh>
+              <UiTh sort-field="source" :sorts="effectivePeopleSorts" @sort="sortPeopleByColumn">来源</UiTh>
+              <UiTh sort-field="name" :sorts="effectivePeopleSorts" @sort="sortPeopleByColumn">姓名</UiTh>
+              <UiTh sort-field="current_company" :sorts="effectivePeopleSorts" @sort="sortPeopleByColumn">当前公司</UiTh>
+              <UiTh sort-field="years_of_experience" :sorts="effectivePeopleSorts" @sort="sortPeopleByColumn">年限</UiTh>
+              <UiTh sort-field="sync_status" :sorts="effectivePeopleSorts" @sort="sortPeopleByColumn">同步状态</UiTh>
+              <UiTh sort-field="candidate_id" :sorts="effectivePeopleSorts" @sort="sortPeopleByColumn">是否已同步到候选人</UiTh>
               <UiTh>失败原因</UiTh>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="person in selectedTaskPeople" :key="person.id">
+            <tr v-for="person in pagedPeopleRows" :key="person.id">
               <UiTd>{{ person.source }}</UiTd>
               <UiTd>
                 <div class="flex flex-col gap-0.5">
@@ -567,11 +933,16 @@ onMounted(async () => {
               <UiTd>{{ person.sync_status === "SYNCED" ? "是" : "否" }}</UiTd>
               <UiTd>{{ person.sync_error_message || '-' }}</UiTd>
             </tr>
-            <tr v-if="selectedTaskPeople.length === 0">
+            <tr v-if="pagedPeopleRows.length === 0">
               <UiTd colspan="7" class="text-center text-muted py-6">暂无抓取人员</UiTd>
             </tr>
           </tbody>
         </UiTable>
+        <UiTablePagination
+          v-model:page="peoplePage"
+          v-model:page-size="peoplePageSize"
+          :total="displayPeopleRows.length"
+        />
       </UiPanel>
     </div>
   </Teleport>

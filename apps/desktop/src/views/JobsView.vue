@@ -1,17 +1,24 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
-import type { JobRecord } from "@doss/shared";
+import type { JobRecord, SortRule } from "@doss/shared";
 import type { ScreeningDimension, ScreeningTemplateRecord } from "../services/backend";
 import { jobStatusLabel, jobStatusTone } from "../lib/status";
-import { resolveOverrideTemplateOptions } from "../lib/screening-template-options";
+import { resolveOverrideTemplateOptions, resolveResidentDefaultTemplate } from "../lib/screening-template-options";
 import { useRecruitingStore } from "../stores/recruiting";
 import UiBadge from "../components/UiBadge.vue";
 import UiButton from "../components/UiButton.vue";
 import UiField from "../components/UiField.vue";
 import UiPanel from "../components/UiPanel.vue";
+import UiSelect from "../components/UiSelect.vue";
+import UiTableFilterPanel from "../components/UiTableFilterPanel.vue";
 import UiTable from "../components/UiTable.vue";
+import UiTablePagination from "../components/UiTablePagination.vue";
+import UiTableToolbar from "../components/UiTableToolbar.vue";
 import UiTd from "../components/UiTd.vue";
 import UiTh from "../components/UiTh.vue";
+import { includesKeyword } from "../lib/table-filter";
+import { clampPage, paginateRows } from "../lib/table-pagination";
+import { normalizeSortRules, sortRowsByRules, type SortResolver } from "../lib/table-sort";
 import { useToastStore } from "../stores/toast";
 
 const store = useRecruitingStore();
@@ -31,6 +38,7 @@ const templateEditorMode = ref<"create" | "edit">("create");
 const savingTemplate = ref(false);
 const deletingTemplateId = ref<number | null>(null);
 const deleteConfirmTemplate = ref<ScreeningTemplateRecord | null>(null);
+const jobsAdvancedFilterOpen = ref(false);
 
 const jobForm = reactive({
   title: "",
@@ -53,12 +61,177 @@ const templateForm = reactive<{
   risk_rules_text: "{}",
 });
 
+const jobTableFilters = reactive({
+  quickKeyword: "",
+  company: "",
+  city: "",
+  status: "" as "" | "ACTIVE" | "STOPPED",
+});
+
+const templateTableFilters = reactive({
+  quickKeyword: "",
+});
+const jobPage = ref(1);
+const jobPageSize = ref(10);
+const templatePage = ref(1);
+const templatePageSize = ref(10);
+
 const templateWeightTotal = computed(() =>
   templateForm.dimensions.reduce((sum, item) => sum + Number(item.weight || 0), 0),
 );
+const residentDefaultTemplate = computed(() => resolveResidentDefaultTemplate(store.screeningTemplates));
 const overrideTemplateOptions = computed(() =>
   resolveOverrideTemplateOptions(store.screeningTemplates),
 );
+const residentDefaultTemplateId = computed(() => residentDefaultTemplate.value?.id ?? null);
+const isEditingResidentDefaultTemplate = computed(() =>
+  templateEditorMode.value === "edit"
+  && templateForm.template_id > 0
+  && residentDefaultTemplateId.value === templateForm.template_id,
+);
+
+type JobSortField
+  = | "title"
+    | "company"
+    | "city"
+    | "salary_k"
+    | "status"
+    | "template_name"
+    | "updated_at";
+type TemplateSortField = "name" | "dimension_count" | "updated_at";
+
+const jobSortOptions: { label: string; value: JobSortField }[] = [
+  { label: "职位", value: "title" },
+  { label: "公司", value: "company" },
+  { label: "城市", value: "city" },
+  { label: "薪资", value: "salary_k" },
+  { label: "状态", value: "status" },
+  { label: "评分模板", value: "template_name" },
+  { label: "更新时间", value: "updated_at" },
+];
+
+const templateSortOptions: { label: string; value: TemplateSortField }[] = [
+  { label: "模板名称", value: "name" },
+  { label: "维度数", value: "dimension_count" },
+  { label: "更新时间", value: "updated_at" },
+];
+
+const jobSorts = ref<SortRule<JobSortField>[]>([
+  { field: "updated_at", direction: "desc" },
+]);
+const templateSorts = ref<SortRule<TemplateSortField>[]>([
+  { field: "updated_at", direction: "desc" },
+]);
+
+const effectiveJobSorts = computed(() =>
+  normalizeSortRules(
+    jobSorts.value,
+    jobSortOptions.map((item) => item.value),
+  ),
+);
+
+const effectiveTemplateSorts = computed(() =>
+  normalizeSortRules(
+    templateSorts.value,
+    templateSortOptions.map((item) => item.value),
+  ),
+);
+
+const jobStatusOptions = [
+  { value: "", label: "全部状态" },
+  { value: "ACTIVE", label: "进行中" },
+  { value: "STOPPED", label: "已停止" },
+];
+
+const filteredJobs = computed(() =>
+  store.jobs.filter((job) => {
+    if (!includesKeyword(
+      jobTableFilters.quickKeyword,
+      job.id,
+      job.title,
+      job.company,
+      job.city,
+      job.salary_k,
+      job.screening_template_name,
+    )) {
+      return false;
+    }
+    if (!includesKeyword(jobTableFilters.company, job.company)) {
+      return false;
+    }
+    if (!includesKeyword(jobTableFilters.city, job.city)) {
+      return false;
+    }
+    if (jobTableFilters.status && (job.status ?? "ACTIVE") !== jobTableFilters.status) {
+      return false;
+    }
+    return true;
+  }),
+);
+
+const jobSortResolver: SortResolver<JobRecord, JobSortField> = {
+  title: (row) => row.title,
+  company: (row) => row.company,
+  city: (row) => row.city,
+  salary_k: (row) => row.salary_k,
+  status: (row) => row.status ?? "ACTIVE",
+  template_name: (row) => row.screening_template_name ?? residentDefaultTemplate.value?.name ?? "默认筛选模板",
+  updated_at: (row) => row.updated_at,
+};
+
+const displayJobs = computed(() =>
+  sortRowsByRules(filteredJobs.value, effectiveJobSorts.value, jobSortResolver),
+);
+const pagedJobs = computed(() =>
+  paginateRows(displayJobs.value, jobPage.value, jobPageSize.value),
+);
+
+const filteredTemplates = computed(() =>
+  store.screeningTemplates.filter((template) =>
+    includesKeyword(
+      templateTableFilters.quickKeyword,
+      template.name,
+      template.id,
+      template.updated_at,
+    )),
+);
+
+const templateSortResolver: SortResolver<ScreeningTemplateRecord, TemplateSortField> = {
+  name: (row) => row.name,
+  dimension_count: (row) => row.dimensions.length,
+  updated_at: (row) => row.updated_at,
+};
+
+const displayTemplates = computed(() =>
+  sortRowsByRules(filteredTemplates.value, effectiveTemplateSorts.value, templateSortResolver),
+);
+const pagedTemplates = computed(() =>
+  paginateRows(displayTemplates.value, templatePage.value, templatePageSize.value),
+);
+
+function sortJobsByColumn(payload: { field: string; direction: "asc" | "desc" }) {
+  const field = payload.field as JobSortField;
+  if (!jobSortOptions.some((item) => item.value === field)) {
+    return;
+  }
+  const next = [
+    { field, direction: payload.direction },
+    ...effectiveJobSorts.value.filter((rule) => rule.field !== field),
+  ];
+  jobSorts.value = normalizeSortRules(next, jobSortOptions.map((item) => item.value));
+}
+
+function sortTemplatesByColumn(payload: { field: string; direction: "asc" | "desc" }) {
+  const field = payload.field as TemplateSortField;
+  if (!templateSortOptions.some((item) => item.value === field)) {
+    return;
+  }
+  const next = [
+    { field, direction: payload.direction },
+    ...effectiveTemplateSorts.value.filter((rule) => rule.field !== field),
+  ];
+  templateSorts.value = normalizeSortRules(next, templateSortOptions.map((item) => item.value));
+}
 
 function resolveErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error) {
@@ -113,6 +286,10 @@ function normalizeJobTemplateId(templateId: number | null | undefined): number {
   return overrideTemplateOptions.value.some((item) => item.id === templateId)
     ? templateId
     : 0;
+}
+
+function isResidentDefaultTemplate(template: ScreeningTemplateRecord): boolean {
+  return residentDefaultTemplateId.value === template.id;
 }
 
 function openCreateJobModal() {
@@ -375,6 +552,10 @@ async function saveTemplate() {
 }
 
 function askRemoveTemplate(template: ScreeningTemplateRecord) {
+  if (isResidentDefaultTemplate(template)) {
+    toast.warning("默认筛选模板不可删除，可直接编辑");
+    return;
+  }
   deleteConfirmTemplate.value = template;
 }
 
@@ -417,6 +598,50 @@ watch(
   { deep: true },
 );
 
+watch(
+  () => [
+    jobTableFilters.quickKeyword,
+    jobTableFilters.company,
+    jobTableFilters.city,
+    jobTableFilters.status,
+    JSON.stringify(effectiveJobSorts.value),
+  ],
+  () => {
+    jobPage.value = 1;
+  },
+);
+
+watch(
+  () => [templateTableFilters.quickKeyword, JSON.stringify(effectiveTemplateSorts.value)],
+  () => {
+    templatePage.value = 1;
+  },
+);
+
+watch(jobPageSize, () => {
+  jobPage.value = 1;
+});
+
+watch(templatePageSize, () => {
+  templatePage.value = 1;
+});
+
+watch(
+  () => displayJobs.value.length,
+  (total) => {
+    jobPage.value = clampPage(jobPage.value, total, jobPageSize.value);
+  },
+  { immediate: true },
+);
+
+watch(
+  () => displayTemplates.value.length,
+  (total) => {
+    templatePage.value = clampPage(templatePage.value, total, templatePageSize.value);
+  },
+  { immediate: true },
+);
+
 onMounted(async () => {
   try {
     await store.loadScreeningTemplates();
@@ -428,30 +653,54 @@ onMounted(async () => {
 
 <template>
   <section class="flex flex-col gap-4">
-    <header class="flex items-center justify-between gap-3">
+    <header class="flex items-center gap-3">
       <h2 class="text-2xl font-700">职位池</h2>
-      <div class="flex items-center gap-2">
-        <UiButton @click="openCreateJobModal">创建职位</UiButton>
-        <UiButton variant="secondary" @click="openTemplateListModal">评分模板</UiButton>
-      </div>
     </header>
 
-    <UiPanel title="已创建职位">
-      <UiTable>
+    <UiPanel>
+      <template #header>
+        <div class="mb-1 flex items-center justify-between gap-3 flex-wrap">
+          <input
+            v-model="jobTableFilters.quickKeyword"
+            class="jobs-header-input w-full max-w-80 lt-sm:max-w-full"
+            placeholder="输入职位/公司/城市关键词"
+          />
+          <div class="flex items-center gap-2">
+            <UiButton @click="openCreateJobModal">创建职位</UiButton>
+            <UiButton variant="secondary" @click="openTemplateListModal">评分模板</UiButton>
+          </div>
+        </div>
+      </template>
+
+      <UiTableFilterPanel v-model:open="jobsAdvancedFilterOpen">
+        <div class="grid grid-cols-3 gap-2.5 lt-lg:grid-cols-1">
+          <UiField label="公司">
+            <input v-model="jobTableFilters.company" placeholder="按公司筛选" />
+          </UiField>
+          <UiField label="城市">
+            <input v-model="jobTableFilters.city" placeholder="按城市筛选" />
+          </UiField>
+          <UiField label="状态">
+            <UiSelect v-model="jobTableFilters.status" :options="jobStatusOptions" />
+          </UiField>
+        </div>
+      </UiTableFilterPanel>
+
+      <UiTable spacing="comfortable">
         <thead>
           <tr>
-            <UiTh>职位</UiTh>
-            <UiTh>公司</UiTh>
-            <UiTh>城市</UiTh>
-            <UiTh>薪资</UiTh>
-            <UiTh>状态</UiTh>
-            <UiTh>评分模板</UiTh>
-            <UiTh>更新时间</UiTh>
-            <UiTh align="right">操作</UiTh>
+            <UiTh sort-field="title" :sorts="effectiveJobSorts" @sort="sortJobsByColumn">职位</UiTh>
+            <UiTh sort-field="company" :sorts="effectiveJobSorts" @sort="sortJobsByColumn">公司</UiTh>
+            <UiTh sort-field="city" :sorts="effectiveJobSorts" @sort="sortJobsByColumn">城市</UiTh>
+            <UiTh sort-field="salary_k" :sorts="effectiveJobSorts" @sort="sortJobsByColumn">薪资</UiTh>
+            <UiTh sort-field="status" :sorts="effectiveJobSorts" @sort="sortJobsByColumn">状态</UiTh>
+            <UiTh sort-field="template_name" :sorts="effectiveJobSorts" @sort="sortJobsByColumn">评分模板</UiTh>
+            <UiTh sort-field="updated_at" :sorts="effectiveJobSorts" @sort="sortJobsByColumn">更新时间</UiTh>
+            <UiTh>操作</UiTh>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="job in store.jobs" :key="job.id">
+          <tr v-for="job in pagedJobs" :key="job.id">
             <UiTd>{{ job.title }}</UiTd>
             <UiTd>{{ job.company }}</UiTd>
             <UiTd>{{ job.city || "-" }}</UiTd>
@@ -459,13 +708,14 @@ onMounted(async () => {
             <UiTd>
               <UiBadge :tone="jobStatusTone(job.status)">{{ jobStatusLabel(job.status) }}</UiBadge>
             </UiTd>
-            <UiTd>{{ job.screening_template_name || "默认筛选模板" }}</UiTd>
+            <UiTd>{{ job.screening_template_name || residentDefaultTemplate?.name || "默认筛选模板" }}</UiTd>
             <UiTd no-wrap>{{ job.updated_at }}</UiTd>
-            <UiTd align="right" no-wrap>
-              <div class="flex justify-end gap-2">
-                <UiButton variant="ghost" @click="openEditJobModal(job)">编辑</UiButton>
+            <UiTd no-wrap>
+              <div class="flex justify-center gap-2 flex-wrap">
+                <UiButton variant="ghost" size="sm" @click="openEditJobModal(job)">编辑</UiButton>
                 <UiButton
                   variant="ghost"
+                  size="sm"
                   :disabled="job.status === 'STOPPED' || stoppingJobId === job.id"
                   @click="stopJob(job)"
                 >
@@ -473,6 +723,7 @@ onMounted(async () => {
                 </UiButton>
                 <UiButton
                   variant="ghost"
+                  size="sm"
                   :disabled="deletingJobId === job.id"
                   @click="askRemoveJob(job)"
                 >
@@ -481,8 +732,16 @@ onMounted(async () => {
               </div>
             </UiTd>
           </tr>
+          <tr v-if="pagedJobs.length === 0">
+            <UiTd colspan="8" class="text-center text-muted py-6">暂无职位</UiTd>
+          </tr>
         </tbody>
       </UiTable>
+      <UiTablePagination
+        v-model:page="jobPage"
+        v-model:page-size="jobPageSize"
+        :total="displayJobs.length"
+      />
     </UiPanel>
 
     <div
@@ -508,7 +767,7 @@ onMounted(async () => {
           </div>
           <UiField class="mt-2.5" label="评分模板">
             <select v-model.number="jobForm.template_id">
-              <option :value="0">默认筛选模板</option>
+              <option :value="0">{{ residentDefaultTemplate?.name || "默认筛选模板" }}</option>
               <option v-for="template in overrideTemplateOptions" :key="template.id" :value="template.id">
                 {{ template.name }}
               </option>
@@ -564,41 +823,64 @@ onMounted(async () => {
           </template>
 
           <div v-if="!templateEditorOpen" class="min-h-0 flex-1 overflow-auto">
-            <UiTable>
+            <UiTableToolbar
+              v-model:quick-keyword="templateTableFilters.quickKeyword"
+              :show-advanced-toggle="false"
+              :show-refresh="false"
+              :show-apply="false"
+              quick-placeholder="输入模板关键词"
+            />
+
+            <UiTable spacing="comfortable">
               <thead>
                 <tr>
-                  <UiTh>模板名称</UiTh>
-                  <UiTh>维度数</UiTh>
-                  <UiTh>更新时间</UiTh>
-                  <UiTh align="right">操作</UiTh>
+                  <UiTh sort-field="name" :sorts="effectiveTemplateSorts" @sort="sortTemplatesByColumn">模板名称</UiTh>
+                  <UiTh sort-field="dimension_count" :sorts="effectiveTemplateSorts" @sort="sortTemplatesByColumn">维度数</UiTh>
+                  <UiTh sort-field="updated_at" :sorts="effectiveTemplateSorts" @sort="sortTemplatesByColumn">更新时间</UiTh>
+                  <UiTh>操作</UiTh>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="template in store.screeningTemplates" :key="template.id">
-                  <UiTd>{{ template.name }}</UiTd>
+                <tr v-for="template in pagedTemplates" :key="template.id">
+                  <UiTd>
+                    {{ template.name }}
+                    <span v-if="isResidentDefaultTemplate(template)" class="ml-1 text-xs text-muted">(默认)</span>
+                  </UiTd>
                   <UiTd>{{ template.dimensions.length }}</UiTd>
                   <UiTd no-wrap>{{ template.updated_at }}</UiTd>
-                  <UiTd align="right" no-wrap>
-                    <div class="flex justify-end gap-2">
-                      <UiButton variant="ghost" @click="openEditTemplateEditor(template)">编辑</UiButton>
+                  <UiTd no-wrap>
+                    <div class="flex justify-center gap-2 flex-wrap">
+                      <UiButton variant="ghost" size="sm" @click="openEditTemplateEditor(template)">编辑</UiButton>
                       <UiButton
                         variant="ghost"
-                        :disabled="deletingTemplateId === template.id"
+                        size="sm"
+                        :disabled="isResidentDefaultTemplate(template) || deletingTemplateId === template.id"
                         @click="askRemoveTemplate(template)"
                       >
-                        {{ deletingTemplateId === template.id ? "删除中..." : "删除" }}
+                        {{ isResidentDefaultTemplate(template) ? "不可删" : (deletingTemplateId === template.id ? "删除中..." : "删除") }}
                       </UiButton>
                     </div>
                   </UiTd>
                 </tr>
+                <tr v-if="pagedTemplates.length === 0">
+                  <UiTd colspan="4" class="text-center text-muted py-6">暂无评分模板</UiTd>
+                </tr>
               </tbody>
             </UiTable>
+            <UiTablePagination
+              v-model:page="templatePage"
+              v-model:page-size="templatePageSize"
+              :total="displayTemplates.length"
+            />
           </div>
 
           <div v-else class="min-h-0 flex-1 overflow-y-auto pr-1">
             <UiField label="模板名称">
               <input v-model="templateForm.name" placeholder="例如：前端工程师模板" />
             </UiField>
+            <p v-if="isEditingResidentDefaultTemplate" class="mt-1 text-sm text-muted">
+              当前为系统默认筛选模板，常驻不可删除，可直接编辑维度与风险规则。
+            </p>
 
             <div class="mt-3 mb-2 flex items-center gap-2">
               <UiButton variant="secondary" @click="addTemplateDimension">新增维度</UiButton>
@@ -702,3 +984,11 @@ onMounted(async () => {
     </div>
   </section>
 </template>
+
+<style scoped>
+.jobs-header-input {
+  min-height: 40px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+</style>

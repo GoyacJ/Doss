@@ -2,22 +2,32 @@
 import { computed, useAttrs } from "vue";
 
 type ButtonVariant = "primary" | "secondary" | "ghost";
+type ButtonSize = "md" | "sm";
 
 const props = withDefaults(
   defineProps<{
     variant?: ButtonVariant;
+    size?: ButtonSize;
     disabled?: boolean;
   }>(),
   {
     variant: "primary",
+    size: "md",
     disabled: false,
   },
 );
 
 const attrs = useAttrs();
 
-const baseClass =
-  "rounded-xl px-3.5 py-2.5 text-text cursor-pointer transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-60 border";
+const baseClass
+  = "text-text cursor-pointer transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-60 border inline-flex items-center justify-center";
+
+const sizeClass = computed(() => {
+  if (props.size === "sm") {
+    return "h-7 rounded-lg px-2.5 text-[0.82rem] leading-none";
+  }
+  return "min-h-10 rounded-xl px-3.5 py-2.5 text-[0.95rem] leading-none";
+});
 
 const variantClass = computed(() => {
   if (props.variant === "secondary") {
@@ -34,7 +44,7 @@ const variantClass = computed(() => {
   <button
     v-bind="attrs"
     :disabled="props.disabled"
-    :class="[baseClass, variantClass]"
+    :class="[baseClass, sizeClass, variantClass]"
   >
     <slot />
   </button>

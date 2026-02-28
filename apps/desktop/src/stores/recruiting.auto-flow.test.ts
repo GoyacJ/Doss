@@ -50,6 +50,8 @@ const backend = vi.hoisted(() => ({
   updateScreeningTemplate: vi.fn(),
   upsertAiProviderSettings: vi.fn(),
   setCandidateQualification: vi.fn(),
+  upsertPendingCandidates: vi.fn(),
+  syncPendingCandidateToCandidate: vi.fn(),
   upsertScreeningTemplate: vi.fn(),
   upsertTaskRuntimeSettings: vi.fn(),
   upsertCrawlTaskPeople: vi.fn(),
@@ -82,6 +84,21 @@ describe("recruiting store auto workflow", () => {
     backend.listCrawlTaskPeople.mockResolvedValue([]);
     backend.upsertCrawlTaskPeople.mockResolvedValue([]);
     backend.updateCrawlTaskPeopleSync.mockResolvedValue([]);
+    backend.upsertPendingCandidates.mockResolvedValue([]);
+    backend.syncPendingCandidateToCandidate.mockResolvedValue({
+      id: 11,
+      source: "boss",
+      external_id: "boss-existing-11",
+      name: "张三",
+      current_company: "示例科技",
+      job_id: 101,
+      job_title: "前端工程师",
+      years_of_experience: 5,
+      stage: "NEW",
+      tags: ["safe"],
+      created_at: "2026-02-26T00:00:00Z",
+      updated_at: "2026-02-26T00:00:00Z",
+    });
     backend.deleteCrawlTask.mockResolvedValue(true);
     backend.loadDashboardMetrics.mockResolvedValue({
       total_jobs: 1,
@@ -965,16 +982,250 @@ describe("recruiting store auto workflow", () => {
       task_id: 301,
       status: "RUNNING",
     }));
+    await vi.waitFor(() => {
+      expect(backend.updateCrawlTask).toHaveBeenCalledWith(expect.objectContaining({
+        task_id: 301,
+        status: "RUNNING",
+        snapshot: expect.objectContaining({
+          fetchedPeople: 1,
+        }),
+      }));
+      expect(backend.upsertCrawlTaskPeople).toHaveBeenCalledWith(expect.objectContaining({
+        task_id: 301,
+      }));
+      expect(backend.upsertPendingCandidates).toHaveBeenCalledWith(expect.objectContaining({
+        items: [expect.objectContaining({
+          source: "boss",
+          external_id: "boss-candidate-301",
+          name: "赵六",
+          job_id: 101,
+        })],
+      }));
+    });
+  });
+
+  it("does not block start action when crawl cycle is slow", async () => {
+    const store = useRecruitingStore();
+    await store.bootstrap();
+
+    store.tasks = [
+      {
+        id: 304,
+        source: "boss",
+        mode: "compliant",
+        task_type: "crawl_candidates",
+        status: "PENDING",
+        retry_count: 0,
+        payload: {
+          localJobId: 101,
+          localJobTitle: "前端工程师",
+          localJobCity: "杭州",
+          batchSize: 1,
+          crawlIntervalSeconds: 300,
+          retryCount: 0,
+          retryBackoffMs: 200,
+          autoSyncToCandidates: false,
+        },
+        created_at: "2026-02-26T00:00:00Z",
+        updated_at: "2026-02-26T00:00:00Z",
+      },
+    ];
+
+    backend.listCrawlTasks.mockResolvedValueOnce([
+      {
+        ...store.tasks[0],
+        status: "RUNNING",
+      },
+    ]);
+    backend.triggerSidecarCrawlJobs.mockImplementation(
+      () =>
+        new Promise(() => {
+          // Keep pending to simulate a slow sidecar request.
+        }),
+    );
+
+    const startPromise = store.toggleTaskRunState(304);
+    const result = await Promise.race([
+      startPromise.then(() => "resolved"),
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 30)),
+    ]);
+
+    expect(result).toBe("resolved");
     expect(backend.updateCrawlTask).toHaveBeenCalledWith(expect.objectContaining({
-      task_id: 301,
+      task_id: 304,
       status: "RUNNING",
-      snapshot: expect.objectContaining({
-        fetchedPeople: 1,
-      }),
     }));
-    expect(backend.upsertCrawlTaskPeople).toHaveBeenCalledWith(expect.objectContaining({
-      task_id: 301,
-    }));
+  });
+
+  it("inserts pending candidates first and syncs candidates when auto sync is enabled", async () => {
+    const store = useRecruitingStore();
+    await store.bootstrap();
+
+    store.tasks = [
+      {
+        id: 303,
+        source: "boss",
+        mode: "compliant",
+        task_type: "crawl_candidates",
+        status: "PENDING",
+        retry_count: 0,
+        payload: {
+          localJobId: 101,
+          localJobTitle: "前端工程师",
+          localJobCity: "杭州",
+          batchSize: 1,
+          crawlIntervalSeconds: 300,
+          retryCount: 0,
+          retryBackoffMs: 200,
+          autoSyncToCandidates: true,
+        },
+        created_at: "2026-02-26T00:00:00Z",
+        updated_at: "2026-02-26T00:00:00Z",
+      },
+    ];
+
+    backend.listCrawlTasks
+      .mockResolvedValueOnce([
+        {
+          ...store.tasks[0],
+          status: "RUNNING",
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          ...store.tasks[0],
+          status: "PAUSED",
+        },
+      ]);
+    backend.triggerSidecarCrawlJobs.mockResolvedValue({
+      id: "sidecar-job-task",
+      source: "boss",
+      mode: "compliant",
+      status: "SUCCEEDED",
+      attempts: 1,
+      output: [{
+        externalId: "job-1",
+        title: "前端工程师",
+        company: "示例科技",
+        city: "杭州",
+      }],
+    });
+    backend.triggerSidecarCrawlCandidates.mockResolvedValue({
+      id: "sidecar-candidate-task",
+      source: "boss",
+      mode: "compliant",
+      status: "SUCCEEDED",
+      attempts: 1,
+      output: [{
+        externalId: "boss-candidate-303",
+        name: "钱七",
+        currentCompany: "示例科技",
+        years: 4,
+        age: 28,
+        address: "上海",
+        tag: "safe",
+      }],
+    });
+    backend.upsertCrawlTaskPeople.mockResolvedValue([
+      {
+        id: 2,
+        task_id: 303,
+        source: "boss",
+        external_id: "boss-candidate-303",
+        name: "钱七",
+        current_company: "示例科技",
+        years_of_experience: 4,
+        sync_status: "UNSYNCED",
+        sync_error_code: null,
+        sync_error_message: null,
+        candidate_id: null,
+        created_at: "2026-02-26T00:00:00Z",
+        updated_at: "2026-02-26T00:00:00Z",
+      },
+    ]);
+    backend.upsertPendingCandidates.mockResolvedValue([
+      {
+        id: 801,
+        source: "boss",
+        external_id: "boss-candidate-303",
+        name: "钱七",
+        current_company: "示例科技",
+        job_id: 101,
+        job_title: "前端工程师",
+        age: 28,
+        years_of_experience: 4,
+        address: "上海",
+        tags: ["safe"],
+        dedupe_key: "钱七|28|上海",
+        sync_status: "UNSYNCED",
+        candidate_id: null,
+        resume_parsed: {},
+        created_at: "2026-02-26T00:00:00Z",
+        updated_at: "2026-02-26T00:00:00Z",
+      },
+    ]);
+    backend.syncPendingCandidateToCandidate.mockResolvedValue({
+      id: 11,
+      source: "boss",
+      external_id: "boss-candidate-303",
+      name: "钱七",
+      current_company: "示例科技",
+      job_id: 101,
+      job_title: "前端工程师",
+      years_of_experience: 4,
+      stage: "NEW",
+      tags: ["safe"],
+      created_at: "2026-02-26T00:00:00Z",
+      updated_at: "2026-02-26T00:00:00Z",
+    });
+    backend.updateCrawlTaskPeopleSync.mockResolvedValue([
+      {
+        id: 2,
+        task_id: 303,
+        source: "boss",
+        external_id: "boss-candidate-303",
+        name: "钱七",
+        current_company: "示例科技",
+        years_of_experience: 4,
+        sync_status: "SYNCED",
+        sync_error_code: null,
+        sync_error_message: null,
+        candidate_id: 11,
+        created_at: "2026-02-26T00:00:00Z",
+        updated_at: "2026-02-26T00:00:00Z",
+      },
+    ]);
+
+    await store.toggleTaskRunState(303);
+
+    await vi.waitFor(() => {
+      expect(backend.upsertPendingCandidates).toHaveBeenCalledWith({
+        items: [expect.objectContaining({
+          source: "boss",
+          external_id: "boss-candidate-303",
+          name: "钱七",
+          age: 28,
+          address: "上海",
+          job_id: 101,
+        })],
+      });
+      expect(backend.syncPendingCandidateToCandidate).toHaveBeenCalledWith({
+        pending_candidate_id: 801,
+        run_screening: true,
+      });
+      expect(backend.updateCrawlTaskPeopleSync).toHaveBeenCalledWith({
+        task_id: 303,
+        updates: [expect.objectContaining({
+          person_id: 2,
+          sync_status: "SYNCED",
+          candidate_id: 11,
+        })],
+      });
+      expect(backend.runResumeScreening).toHaveBeenCalledWith({
+        candidate_id: 11,
+        job_id: 101,
+      });
+    });
   });
 
   it("marks task failed when cycle still fails after retries", async () => {

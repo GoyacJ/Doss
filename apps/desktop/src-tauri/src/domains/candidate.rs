@@ -24,7 +24,7 @@ use crate::models::ai::{
 use crate::models::candidate::{
     Candidate, CandidateListQuery, DecisionListQuery, InterviewListQuery,
     MergeCandidateImportInput, MoveStageInput, NewCandidateInput, ParseResumeFileInput,
-    ParseResumeFileOutput, PendingCandidate, PendingCandidateListQuery, PipelineEvent,
+    ParseResumeFileOutput, PendingCandidate, PendingCandidateListQuery, PipelineEvent, SortRule,
     ResumeRecord, SetCandidateQualificationInput, SyncPendingCandidateInput, UpdateCandidateInput,
     UpsertPendingCandidatesInput, UpsertResumeInput,
 };
@@ -721,14 +721,50 @@ fn read_candidates_page(
     })
 }
 
-fn normalize_sort_order(order: Option<&str>) -> &'static str {
-    match order
-        .map(|value| value.trim().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("asc") => "ASC",
-        _ => "DESC",
+fn normalize_sort_direction(direction: &str) -> &'static str {
+    if direction.trim().eq_ignore_ascii_case("asc") {
+        return "ASC";
     }
+    "DESC"
+}
+
+pub(crate) fn build_order_by_from_rules(
+    sorts: Option<&Vec<SortRule>>,
+    allowed_columns: &[(&str, &str)],
+    default_order_by: &str,
+) -> String {
+    let Some(sort_rules) = sorts else {
+        return default_order_by.to_string();
+    };
+
+    let mut order_parts = Vec::<String>::new();
+    let mut seen_fields = std::collections::BTreeSet::<String>::new();
+
+    for rule in sort_rules.iter().take(3) {
+        let field_key = rule.field.trim().to_ascii_lowercase();
+        if field_key.is_empty() || seen_fields.contains(&field_key) {
+            continue;
+        }
+
+        let Some((_, column)) = allowed_columns
+            .iter()
+            .find(|(field, _)| *field == field_key)
+        else {
+            continue;
+        };
+
+        seen_fields.insert(field_key);
+        let direction = normalize_sort_direction(&rule.direction);
+        order_parts.push(format!("{column} IS NULL ASC"));
+        order_parts.push(format!("{column} {direction}"));
+    }
+
+    if order_parts.is_empty() {
+        return default_order_by.to_string();
+    }
+
+    order_parts.push("id DESC".to_string());
+    order_parts.join(", ")
 }
 
 #[tauri::command]
@@ -745,8 +781,7 @@ pub(crate) fn list_candidates_page(
         job_id: None,
         name_like: None,
         stage: None,
-        sort_by: None,
-        sort_order: None,
+        sorts: None,
     });
 
     let mut where_clauses = Vec::<String>::new();
@@ -770,20 +805,21 @@ pub(crate) fn list_candidates_page(
         params.push(SqlValue::Text(format!("%{name_like}%")));
     }
 
-    let sort_order = normalize_sort_order(query.sort_order.as_deref());
-    let order_by = match query
-        .sort_by
-        .as_deref()
-        .map(str::trim)
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("score") => format!("score {sort_order}, updated_at DESC"),
-        Some("updated_at") => format!("updated_at {sort_order}, id DESC"),
-        Some("created_at") => format!("created_at {sort_order}, id DESC"),
-        Some("job_title") => format!("linked_job_title {sort_order}, score DESC"),
-        _ => "linked_job_title ASC, score DESC, updated_at DESC".to_string(),
-    };
+    let candidate_sort_columns = [
+        ("name", "name"),
+        ("current_company", "current_company"),
+        ("job_title", "linked_job_title"),
+        ("score", "score"),
+        ("stage", "stage"),
+        ("years_of_experience", "years_of_experience"),
+        ("updated_at", "updated_at"),
+        ("created_at", "created_at"),
+    ];
+    let order_by = build_order_by_from_rules(
+        query.sorts.as_ref(),
+        &candidate_sort_columns,
+        "linked_job_title IS NULL ASC, linked_job_title ASC, score IS NULL ASC, score DESC, updated_at DESC, id DESC",
+    );
 
     read_candidates_page(
         &conn,
@@ -809,6 +845,7 @@ pub(crate) fn list_interview_candidates_page(
         },
         job_id: None,
         name_like: None,
+        sorts: None,
     });
 
     let mut where_clauses = vec!["stage = 'INTERVIEW'".to_string()];
@@ -827,12 +864,25 @@ pub(crate) fn list_interview_candidates_page(
         params.push(SqlValue::Text(format!("%{name_like}%")));
     }
 
+    let interview_sort_columns = [
+        ("name", "name"),
+        ("job_title", "linked_job_title"),
+        ("stage", "stage"),
+        ("updated_at", "updated_at"),
+        ("created_at", "created_at"),
+    ];
+    let order_by = build_order_by_from_rules(
+        query.sorts.as_ref(),
+        &interview_sort_columns,
+        "updated_at DESC, id DESC",
+    );
+
     read_candidates_page(
         &conn,
         &state.cipher,
         &where_clauses,
         &params,
-        "updated_at DESC",
+        &order_by,
         query.page.normalized_page(),
         query.page.normalized_page_size(),
     )
@@ -852,6 +902,7 @@ pub(crate) fn list_decision_candidates_page(
         job_id: None,
         name_like: None,
         interview_passed: None,
+        sorts: None,
     });
 
     let mut where_clauses = vec![
@@ -880,12 +931,25 @@ pub(crate) fn list_decision_candidates_page(
         }
     }
 
+    let decision_sort_columns = [
+        ("name", "name"),
+        ("job_title", "linked_job_title"),
+        ("stage", "stage"),
+        ("updated_at", "updated_at"),
+        ("created_at", "created_at"),
+    ];
+    let order_by = build_order_by_from_rules(
+        query.sorts.as_ref(),
+        &decision_sort_columns,
+        "updated_at DESC, id DESC",
+    );
+
     read_candidates_page(
         &conn,
         &state.cipher,
         &where_clauses,
         &params,
-        "updated_at DESC",
+        &order_by,
         query.page.normalized_page(),
         query.page.normalized_page_size(),
     )

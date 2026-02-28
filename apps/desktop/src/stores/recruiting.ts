@@ -49,6 +49,8 @@ import {
   updateCrawlTask,
   updateCrawlTaskPeopleSync as updateCrawlTaskPeopleSyncApi,
   upsertCrawlTaskPeople as upsertCrawlTaskPeopleApi,
+  upsertPendingCandidates,
+  syncPendingCandidateToCandidate,
   type AppHealth,
   type AiProviderId,
   type AiProviderSettings,
@@ -194,6 +196,20 @@ function normalizeScheduleDay(value: unknown, fallback = 1): number {
     return fallback;
   }
   return Math.min(31, Math.max(1, day));
+}
+
+function normalizePendingDedupeText(value: string | null | undefined): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
+function buildPendingDedupeKey(name: string, age?: number, address?: string): string {
+  const normalizedAge = typeof age === "number" && Number.isFinite(age) ? String(Math.trunc(age)) : "";
+  return `${normalizePendingDedupeText(name)}|${normalizedAge}|${normalizePendingDedupeText(address)}`;
+}
+
+function buildTaskPersonLookupKey(name: string, currentCompany?: string | null, years?: number): string {
+  const normalizedYears = typeof years === "number" && Number.isFinite(years) ? String(years) : "";
+  return `${normalizePendingDedupeText(name)}|${normalizePendingDedupeText(currentCompany)}|${normalizedYears}`;
 }
 
 function parseTimeParts(scheduleTime: string): { hours: number; minutes: number } {
@@ -558,7 +574,12 @@ export const useRecruitingStore = defineStore("recruiting", () => {
       external_id?: string;
       name: string;
       current_company?: string;
+      age?: number;
+      address?: string;
       years_of_experience: number;
+      tags: string[];
+      phone?: string;
+      email?: string;
     }> = [];
 
     for (const source of resolveTaskPlatforms(task.source as CrawlTaskSource)) {
@@ -610,7 +631,12 @@ export const useRecruitingStore = defineStore("recruiting", () => {
           external_id: item.external_id,
           name: item.name,
           current_company: item.current_company,
+          age: item.age,
+          address: item.address,
           years_of_experience: item.years_of_experience,
+          tags: item.tags,
+          phone: item.phone,
+          email: item.email,
         });
       }
 
@@ -632,10 +658,123 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     });
     taskPeople.value[task.id] = upserted;
 
+    const pendingItems = mergedPeople.map((person) => ({
+      source: person.source,
+      external_id: person.external_id,
+      name: person.name,
+      current_company: person.current_company,
+      job_id: payload.localJobId > 0 ? payload.localJobId : undefined,
+      age: person.age,
+      years_of_experience: person.years_of_experience,
+      tags: person.tags,
+      phone: person.phone,
+      email: person.email,
+      address: person.address,
+    }));
+    const pendingRecords = pendingItems.length > 0
+      ? await upsertPendingCandidates({ items: pendingItems })
+      : [];
+
     let syncedPeople = 0;
     let failedPeople = 0;
     if (payload.autoSyncToCandidates) {
-      const afterSync = await syncTaskPeople(task.id);
+      const syncOutcomesByDedupe = new Map<string, {
+        sync_status: "SYNCED" | "FAILED";
+        candidate_id?: number;
+        sync_error_message?: string;
+      }>();
+      for (const pending of pendingRecords) {
+        if (pending.sync_status === "SYNCED" && pending.candidate_id) {
+          syncOutcomesByDedupe.set(pending.dedupe_key, {
+            sync_status: "SYNCED",
+            candidate_id: pending.candidate_id,
+          });
+          continue;
+        }
+        try {
+          const candidate = await syncPendingCandidateToCandidate({
+            pending_candidate_id: pending.id,
+            run_screening: true,
+          });
+          upsertCandidateInList(candidate);
+          try {
+            await runResumeScreening({
+              candidate_id: candidate.id,
+              job_id: candidate.job_id ?? undefined,
+            });
+          } catch (error) {
+            const screeningErrorMessage = resolveErrorMessage(error, "resume_screening_failed");
+            if (screeningErrorMessage !== "Resume required before screening") {
+              throw new Error(screeningErrorMessage);
+            }
+          }
+          syncOutcomesByDedupe.set(pending.dedupe_key, {
+            sync_status: "SYNCED",
+            candidate_id: candidate.id,
+          });
+        } catch (error) {
+          syncOutcomesByDedupe.set(pending.dedupe_key, {
+            sync_status: "FAILED",
+            sync_error_message: resolveErrorMessage(error, "candidate_sync_failed"),
+          });
+        }
+      }
+
+      const syncedByExternalId = new Map<string, {
+        sync_status: "SYNCED" | "FAILED";
+        candidate_id?: number;
+        sync_error_message?: string;
+      }>();
+      const syncedByFallbackKey = new Map<string, {
+        sync_status: "SYNCED" | "FAILED";
+        candidate_id?: number;
+        sync_error_message?: string;
+      }>();
+      for (const person of mergedPeople) {
+        const dedupeKey = buildPendingDedupeKey(person.name, person.age, person.address);
+        const outcome = syncOutcomesByDedupe.get(dedupeKey);
+        if (!outcome) {
+          continue;
+        }
+        if (person.external_id && !syncedByExternalId.has(person.external_id)) {
+          syncedByExternalId.set(person.external_id, outcome);
+        }
+        const lookupKey = buildTaskPersonLookupKey(
+          person.name,
+          person.current_company,
+          person.years_of_experience,
+        );
+        if (!syncedByFallbackKey.has(lookupKey)) {
+          syncedByFallbackKey.set(lookupKey, outcome);
+        }
+      }
+
+      const updates = upserted.map((person) => {
+        const outcome = (person.external_id ? syncedByExternalId.get(person.external_id) : undefined)
+          ?? syncedByFallbackKey.get(
+            buildTaskPersonLookupKey(person.name, person.current_company, person.years_of_experience),
+          );
+        if (!outcome) {
+          return {
+            person_id: person.id,
+            sync_status: "FAILED" as const,
+            sync_error_code: "candidate_sync_failed",
+            sync_error_message: "pending_sync_result_not_found",
+          };
+        }
+        return {
+          person_id: person.id,
+          sync_status: outcome.sync_status,
+          sync_error_code: outcome.sync_status === "FAILED" ? "candidate_sync_failed" : undefined,
+          sync_error_message: outcome.sync_error_message,
+          candidate_id: outcome.candidate_id,
+        };
+      });
+      const afterSync = await updateCrawlTaskPeopleSyncApi({
+        task_id: task.id,
+        updates,
+      });
+      taskPeople.value[task.id] = afterSync;
       syncedPeople = afterSync.filter((item) => item.sync_status === "SYNCED").length;
       failedPeople = afterSync.filter((item) => item.sync_status === "FAILED").length;
     }
@@ -1182,7 +1321,9 @@ export const useRecruitingStore = defineStore("recruiting", () => {
       next_run_at: nextRunAt,
     });
     await refreshTasks();
-    await runCrawlTaskOnce(taskId);
+    void runCrawlTaskOnce(taskId).catch((error) => {
+      setError(error);
+    });
   }
 
   async function deleteTask(taskId: number) {

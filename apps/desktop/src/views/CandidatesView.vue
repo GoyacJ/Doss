@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
-import type { CandidateRecord, PipelineStage } from "@doss/shared";
+import type { CandidateGender, CandidateRecord, PipelineStage, SortRule } from "@doss/shared";
 import { useRoute, useRouter } from "vue-router";
 import UiBadge from "../components/UiBadge.vue";
 import UiButton from "../components/UiButton.vue";
@@ -8,11 +8,16 @@ import UiField from "../components/UiField.vue";
 import UiInfoRow from "../components/UiInfoRow.vue";
 import UiPanel from "../components/UiPanel.vue";
 import UiSelect from "../components/UiSelect.vue";
+import UiTableFilterPanel from "../components/UiTableFilterPanel.vue";
 import UiTable from "../components/UiTable.vue";
+import UiTablePagination from "../components/UiTablePagination.vue";
+import UiTableToolbar from "../components/UiTableToolbar.vue";
 import UiTd from "../components/UiTd.vue";
 import UiTh from "../components/UiTh.vue";
+import { buildCandidateManualPayload } from "../lib/candidate-form";
 import { formatStageLabel } from "../lib/pipeline";
 import { stageTone } from "../lib/status";
+import { normalizeSortRules } from "../lib/table-sort";
 import { listCandidatesPage } from "../services/backend";
 import { useRecruitingStore } from "../stores/recruiting";
 import { useToastStore } from "../stores/toast";
@@ -33,11 +38,78 @@ const filters = reactive({
   nameLike: "",
   stage: "" as PipelineStage | "",
 });
+const advancedFilterOpen = ref(false);
+
+type CandidateSortField
+  = | "name"
+    | "current_company"
+    | "job_title"
+    | "score"
+    | "stage"
+    | "years_of_experience"
+    | "updated_at"
+    | "created_at";
+
+const sortOptions: { label: string; value: CandidateSortField }[] = [
+  { label: "姓名", value: "name" },
+  { label: "当前公司", value: "current_company" },
+  { label: "职位", value: "job_title" },
+  { label: "评分", value: "score" },
+  { label: "阶段", value: "stage" },
+  { label: "工作年限", value: "years_of_experience" },
+  { label: "更新时间", value: "updated_at" },
+  { label: "创建时间", value: "created_at" },
+];
+
+const sorts = ref<SortRule<CandidateSortField>[]>([
+  { field: "job_title", direction: "asc" },
+  { field: "score", direction: "desc" },
+  { field: "updated_at", direction: "desc" },
+]);
+const effectiveSorts = computed(() =>
+  normalizeSortRules(
+    sorts.value,
+    sortOptions.map((item) => item.value),
+  ),
+);
+
+function sortByColumn(payload: { field: string; direction: "asc" | "desc" }) {
+  const field = payload.field as CandidateSortField;
+  if (!sortOptions.some((item) => item.value === field)) {
+    return;
+  }
+  const next = [
+    { field, direction: payload.direction },
+    ...effectiveSorts.value.filter((rule) => rule.field !== field),
+  ];
+  sorts.value = normalizeSortRules(next, sortOptions.map((item) => item.value));
+}
 
 const drawerOpen = ref(false);
 const drawerLoading = ref(false);
 const selectedCandidateId = ref<number | null>(null);
 const actionLoading = ref(false);
+const deletingCandidateId = ref<number | null>(null);
+const deleteConfirmCandidate = ref<CandidateRecord | null>(null);
+const createModalOpen = ref(false);
+const creatingCandidate = ref(false);
+const createResumeFile = ref<File | null>(null);
+const createResumeInput = ref<HTMLInputElement | null>(null);
+
+const createForm = reactive({
+  name: "",
+  currentCompany: "",
+  jobId: 0,
+  yearsOfExperience: "0",
+  score: "",
+  age: "",
+  gender: "" as CandidateGender | "",
+  address: "",
+  phone: "",
+  email: "",
+  tagsText: "",
+  enableOcr: false,
+});
 
 const selectedCandidate = computed(() => {
   if (!selectedCandidateId.value) {
@@ -77,10 +149,6 @@ const selectedStructuredMeta = computed(() => {
   };
 });
 
-const hasPrevPage = computed(() => page.value > 1);
-const hasNextPage = computed(() => page.value * pageSize.value < total.value);
-const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)));
-
 const stageOptions = [
   { value: "", label: "全部阶段" },
   { value: "NEW", label: "新候选" },
@@ -95,6 +163,21 @@ const jobOptions = computed(() => [
   { value: 0, label: "全部职位" },
   ...store.jobs.map((job) => ({ value: job.id, label: `${job.title} · ${job.company}` })),
 ]);
+
+const createJobOptions = computed(() => [
+  { value: 0, label: "不绑定职位" },
+  ...store.jobs.map((job) => ({ value: job.id, label: `${job.title} · ${job.company}` })),
+]);
+
+const genderOptions = [
+  { value: "", label: "未设置" },
+  { value: "male", label: "男" },
+  { value: "female", label: "女" },
+  { value: "other", label: "其他" },
+];
+
+const resumeAccept = ".pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.bmp,.tif,.tiff";
+const selectedResumeFileName = computed(() => createResumeFile.value?.name || "");
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -146,8 +229,7 @@ async function loadRows() {
       job_id: filters.jobId > 0 ? filters.jobId : undefined,
       name_like: filters.nameLike.trim() || undefined,
       stage: filters.stage || undefined,
-      sort_by: "job_title",
-      sort_order: "asc",
+      sorts: effectiveSorts.value,
     });
     rows.value = data.items;
     total.value = data.total;
@@ -163,18 +245,108 @@ function applyFilters() {
   void loadRows();
 }
 
-function nextPage() {
-  if (!hasNextPage.value) {
-    return;
+function resetCreateForm() {
+  createForm.name = "";
+  createForm.currentCompany = "";
+  createForm.jobId = 0;
+  createForm.yearsOfExperience = "0";
+  createForm.score = "";
+  createForm.age = "";
+  createForm.gender = "";
+  createForm.address = "";
+  createForm.phone = "";
+  createForm.email = "";
+  createForm.tagsText = "";
+  createForm.enableOcr = false;
+  createResumeFile.value = null;
+  if (createResumeInput.value) {
+    createResumeInput.value.value = "";
   }
-  page.value += 1;
 }
 
-function prevPage() {
-  if (!hasPrevPage.value) {
+function openCreateCandidateModal() {
+  resetCreateForm();
+  createModalOpen.value = true;
+}
+
+function closeCreateCandidateModal(force = false) {
+  if (creatingCandidate.value && !force) {
     return;
   }
-  page.value -= 1;
+  createModalOpen.value = false;
+}
+
+function onCreateResumeChange(event: Event) {
+  const target = event.target as HTMLInputElement | null;
+  const file = target?.files?.[0];
+  createResumeFile.value = file ?? null;
+}
+
+function clearCreateResume() {
+  createResumeFile.value = null;
+  if (createResumeInput.value) {
+    createResumeInput.value.value = "";
+  }
+}
+
+async function saveCandidate() {
+  if (creatingCandidate.value) {
+    return;
+  }
+
+  const built = buildCandidateManualPayload({
+    name: createForm.name,
+    currentCompany: createForm.currentCompany,
+    jobId: createForm.jobId,
+    yearsOfExperience: createForm.yearsOfExperience,
+    score: createForm.score,
+    age: createForm.age,
+    gender: createForm.gender,
+    address: createForm.address,
+    phone: createForm.phone,
+    email: createForm.email,
+    tagsText: createForm.tagsText,
+  });
+  if (!built.ok) {
+    toast.warning(built.error);
+    return;
+  }
+
+  creatingCandidate.value = true;
+  const resumeFile = createResumeFile.value;
+  let resumeErrorMessage: string | null = null;
+
+  try {
+    const created = await store.addCandidate(built.payload);
+
+    if (resumeFile) {
+      try {
+        await store.importResumeFileAndAnalyze({
+          candidateId: created.id,
+          file: resumeFile,
+          enableOcr: createForm.enableOcr,
+          jobId: created.job_id ?? undefined,
+        });
+      } catch (error) {
+        resumeErrorMessage = resolveErrorMessage(error, "简历上传失败");
+      }
+    }
+
+    await loadRows();
+    closeCreateCandidateModal(true);
+    resetCreateForm();
+
+    if (resumeErrorMessage) {
+      toast.warning(`候选人已创建，但简历处理失败：${resumeErrorMessage}`);
+      return;
+    }
+
+    toast.success(resumeFile ? "候选人和简历已保存" : "候选人已创建");
+  } catch (error) {
+    toast.danger(resolveErrorMessage(error, "创建候选人失败"));
+  } finally {
+    creatingCandidate.value = false;
+  }
 }
 
 async function openDrawer(candidate: CandidateRecord) {
@@ -187,6 +359,48 @@ async function openDrawer(candidate: CandidateRecord) {
     toast.warning(resolveErrorMessage(error, "候选人上下文加载失败"));
   } finally {
     drawerLoading.value = false;
+  }
+}
+
+function askRemoveCandidate(candidate: CandidateRecord) {
+  if (deletingCandidateId.value) {
+    return;
+  }
+  deleteConfirmCandidate.value = candidate;
+}
+
+function cancelRemoveCandidate() {
+  if (deletingCandidateId.value) {
+    return;
+  }
+  deleteConfirmCandidate.value = null;
+}
+
+async function removeCandidate() {
+  const candidate = deleteConfirmCandidate.value;
+  if (!candidate) {
+    return;
+  }
+
+  deletingCandidateId.value = candidate.id;
+  try {
+    await store.deleteCandidate(candidate.id);
+    deleteConfirmCandidate.value = null;
+    if (selectedCandidateId.value === candidate.id) {
+      selectedCandidateId.value = null;
+      drawerOpen.value = false;
+    }
+
+    if (rows.value.length <= 1 && page.value > 1) {
+      page.value -= 1;
+    } else {
+      await loadRows();
+    }
+    toast.success("候选人已删除");
+  } catch (error) {
+    toast.danger(resolveErrorMessage(error, "删除候选人失败"));
+  } finally {
+    deletingCandidateId.value = null;
   }
 }
 
@@ -253,6 +467,23 @@ watch(page, () => {
   void loadRows();
 });
 
+watch(pageSize, () => {
+  if (page.value !== 1) {
+    page.value = 1;
+    return;
+  }
+  void loadRows();
+});
+
+watch(
+  sorts,
+  () => {
+    page.value = 1;
+    void loadRows();
+  },
+  { deep: true },
+);
+
 onMounted(async () => {
   await Promise.allSettled([
     store.bootstrap(),
@@ -271,31 +502,40 @@ onMounted(async () => {
 
 <template>
   <section class="flex flex-col gap-4">
+    <header class="flex items-center justify-between gap-3">
+      <h2 class="text-2xl font-700">候选人池</h2>
+      <UiButton @click="openCreateCandidateModal">创建候选人</UiButton>
+    </header>
+
     <UiPanel title="候选人列表">
-      <div class="grid grid-cols-4 gap-2.5 mb-3 lt-lg:grid-cols-2 lt-sm:grid-cols-1">
-        <UiField label="职位筛选">
-          <UiSelect v-model="filters.jobId" :options="jobOptions" value-type="number" />
-        </UiField>
-        <UiField label="姓名关键词">
-          <input v-model="filters.nameLike" placeholder="输入姓名关键词" @keyup.enter="applyFilters" />
-        </UiField>
-        <UiField label="阶段筛选">
-          <UiSelect v-model="filters.stage" :options="stageOptions" />
-        </UiField>
-        <div class="flex items-end gap-2">
-          <UiButton variant="secondary" :disabled="loading" @click="applyFilters">查询</UiButton>
-          <UiButton variant="ghost" :disabled="loading" @click="loadRows">刷新</UiButton>
+      <UiTableToolbar
+        v-model:quick-keyword="filters.nameLike"
+        v-model:advanced-open="advancedFilterOpen"
+        :disabled="loading"
+        quick-placeholder="输入姓名关键词"
+        @apply="applyFilters"
+        @refresh="loadRows"
+      />
+
+      <UiTableFilterPanel v-model:open="advancedFilterOpen">
+        <div class="grid grid-cols-2 gap-2.5 lt-sm:grid-cols-1">
+          <UiField label="职位筛选">
+            <UiSelect v-model="filters.jobId" :options="jobOptions" value-type="number" />
+          </UiField>
+          <UiField label="阶段筛选">
+            <UiSelect v-model="filters.stage" :options="stageOptions" />
+          </UiField>
         </div>
-      </div>
+      </UiTableFilterPanel>
 
       <UiTable>
         <thead>
           <tr>
-            <UiTh>姓名</UiTh>
-            <UiTh>当前公司</UiTh>
-            <UiTh>职位</UiTh>
-            <UiTh>评分</UiTh>
-            <UiTh>阶段</UiTh>
+            <UiTh sort-field="name" :sorts="effectiveSorts" @sort="sortByColumn">姓名</UiTh>
+            <UiTh sort-field="current_company" :sorts="effectiveSorts" @sort="sortByColumn">当前公司</UiTh>
+            <UiTh sort-field="job_title" :sorts="effectiveSorts" @sort="sortByColumn">职位</UiTh>
+            <UiTh sort-field="score" :sorts="effectiveSorts" @sort="sortByColumn">评分</UiTh>
+            <UiTh sort-field="stage" :sorts="effectiveSorts" @sort="sortByColumn">阶段</UiTh>
             <UiTh>操作</UiTh>
           </tr>
         </thead>
@@ -309,7 +549,12 @@ onMounted(async () => {
               <UiBadge :tone="stageTone(candidate.stage)">{{ formatStageLabel(candidate.stage) }}</UiBadge>
             </UiTd>
             <UiTd>
-              <UiButton variant="ghost" @click="openDrawer(candidate)">查看详情</UiButton>
+              <div class="flex items-center justify-center gap-1 flex-wrap">
+                <UiButton variant="ghost" :disabled="deletingCandidateId === candidate.id" @click="openDrawer(candidate)">查看详情</UiButton>
+                <UiButton variant="ghost" :disabled="Boolean(deletingCandidateId)" @click="askRemoveCandidate(candidate)">
+                  {{ deletingCandidateId === candidate.id ? "删除中..." : "删除" }}
+                </UiButton>
+              </div>
             </UiTd>
           </tr>
           <tr v-if="!loading && rows.length === 0">
@@ -318,15 +563,91 @@ onMounted(async () => {
         </tbody>
       </UiTable>
 
-      <div class="mt-3 flex items-center justify-between gap-2 flex-wrap">
-        <span class="text-sm text-muted">第 {{ page }} / {{ totalPages }} 页，共 {{ total }} 条</span>
-        <div class="flex items-center gap-2">
-          <UiButton variant="ghost" :disabled="!hasPrevPage || loading" @click="prevPage">上一页</UiButton>
-          <UiButton variant="ghost" :disabled="!hasNextPage || loading" @click="nextPage">下一页</UiButton>
-        </div>
-      </div>
+      <UiTablePagination
+        v-model:page="page"
+        v-model:page-size="pageSize"
+        :total="total"
+        :disabled="loading"
+      />
     </UiPanel>
   </section>
+
+  <Teleport to="body">
+    <div
+      v-if="createModalOpen"
+      class="fixed inset-0 z-[78] flex items-center justify-center bg-black/35 p-4"
+      @click.self="closeCreateCandidateModal()"
+    >
+      <div class="w-full max-w-4xl">
+        <UiPanel title="创建候选人">
+          <div class="grid grid-cols-2 gap-2.5 lt-lg:grid-cols-1">
+            <UiField label="姓名">
+              <input v-model="createForm.name" placeholder="例如：张三" />
+            </UiField>
+            <UiField label="绑定职位">
+              <UiSelect v-model="createForm.jobId" :options="createJobOptions" value-type="number" />
+            </UiField>
+            <UiField label="当前公司">
+              <input v-model="createForm.currentCompany" placeholder="当前任职公司" />
+            </UiField>
+            <UiField label="工作年限（年）">
+              <input v-model="createForm.yearsOfExperience" type="number" min="0" step="0.5" placeholder="例如：5" />
+            </UiField>
+            <UiField label="评分（0-100）">
+              <input v-model="createForm.score" type="number" min="0" max="100" step="0.1" placeholder="可选" />
+            </UiField>
+            <UiField label="年龄">
+              <input v-model="createForm.age" type="number" min="0" step="1" placeholder="可选" />
+            </UiField>
+            <UiField label="性别">
+              <UiSelect v-model="createForm.gender" :options="genderOptions" />
+            </UiField>
+            <UiField label="电话">
+              <input v-model="createForm.phone" placeholder="可选" />
+            </UiField>
+            <UiField label="邮箱">
+              <input v-model="createForm.email" placeholder="可选" />
+            </UiField>
+            <UiField label="地址">
+              <input v-model="createForm.address" placeholder="可选" />
+            </UiField>
+          </div>
+
+          <UiField class="mt-2.5" label="标签" help="多个标签可用英文逗号、中文逗号或换行分隔">
+            <input v-model="createForm.tagsText" placeholder="例如：Vue, TypeScript, 稳定" />
+          </UiField>
+
+          <UiField class="mt-2.5" label="简历上传" help="支持 .pdf .docx .txt .md 以及图片格式">
+            <input
+              ref="createResumeInput"
+              type="file"
+              :accept="resumeAccept"
+              :disabled="creatingCandidate"
+              @change="onCreateResumeChange"
+            />
+            <div v-if="selectedResumeFileName" class="mt-2 flex items-center justify-between gap-2">
+              <span class="text-sm text-muted truncate">{{ selectedResumeFileName }}</span>
+              <UiButton variant="ghost" :disabled="creatingCandidate" @click="clearCreateResume">移除</UiButton>
+            </div>
+          </UiField>
+
+          <UiField class="mt-2.5" label="简历解析选项">
+            <label class="inline-flex items-center gap-2 text-sm text-muted">
+              <input v-model="createForm.enableOcr" type="checkbox" :disabled="creatingCandidate" />
+              <span>文本为空时启用 OCR（适用于扫描件）</span>
+            </label>
+          </UiField>
+
+          <div class="mt-4 flex flex-wrap justify-end gap-2">
+            <UiButton variant="ghost" :disabled="creatingCandidate" @click="closeCreateCandidateModal()">取消</UiButton>
+            <UiButton :disabled="creatingCandidate" @click="saveCandidate">
+              {{ creatingCandidate ? "保存中..." : "创建候选人" }}
+            </UiButton>
+          </div>
+        </UiPanel>
+      </div>
+    </div>
+  </Teleport>
 
   <Teleport to="body">
     <div
@@ -412,6 +733,37 @@ onMounted(async () => {
 
         <p v-if="drawerLoading" class="m-0 mt-3 text-sm text-muted">正在加载候选人上下文...</p>
       </aside>
+    </div>
+  </Teleport>
+
+  <Teleport to="body">
+    <div
+      v-if="deleteConfirmCandidate"
+      class="fixed inset-0 z-[85] flex items-center justify-center bg-black/35 p-4"
+      @click.self="cancelRemoveCandidate()"
+    >
+      <div class="w-full max-w-md">
+        <UiPanel title="删除候选人">
+          <p class="m-0">
+            确认删除候选人「{{ deleteConfirmCandidate.name }}」吗？此操作不可撤销。
+          </p>
+          <div class="mt-4 flex flex-wrap justify-end gap-2">
+            <UiButton
+              variant="ghost"
+              :disabled="deletingCandidateId === deleteConfirmCandidate.id"
+              @click="cancelRemoveCandidate()"
+            >
+              取消
+            </UiButton>
+            <UiButton
+              :disabled="deletingCandidateId === deleteConfirmCandidate.id"
+              @click="removeCandidate()"
+            >
+              {{ deletingCandidateId === deleteConfirmCandidate.id ? "删除中..." : "确认删除" }}
+            </UiButton>
+          </div>
+        </UiPanel>
+      </div>
     </div>
   </Teleport>
 </template>

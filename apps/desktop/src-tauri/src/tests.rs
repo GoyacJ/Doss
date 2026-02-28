@@ -7,16 +7,19 @@ use crate::domains::ai_runtime::{
     extract_json_object_block, normalize_task_runtime_settings, parse_ai_provider_response,
     parse_minimax_content,
 };
+use crate::domains::candidate::build_order_by_from_rules;
 use crate::domains::jobs::count_active_crawl_tasks_for_job;
 use crate::domains::screening::{
     build_structured_resume_fields, count_jobs_using_screening_template,
+    create_global_screening_template_internal, delete_global_screening_template_internal,
     derive_screening_recommendation, evaluate_interview_feedback_payload, extract_docx_xml_text,
-    normalize_screening_dimensions,
+    normalize_screening_dimensions, resolve_screening_template,
 };
 use crate::domains::search::build_fts_match_query;
 use crate::domains::sidecar_runtime::{sidecar_base_url, sidecar_port_candidates};
 use crate::infra::db::migrate_db;
 use crate::models::ai::TaskRuntimeSettings;
+use crate::models::candidate::SortRule;
 use crate::models::common::{is_valid_transition, resolve_qualification_stage, AiProvider};
 use crate::models::screening::ScreeningDimension;
 
@@ -129,6 +132,53 @@ fn build_fts_match_query_sanitizes_special_characters() {
         build_fts_match_query("前端 \"工程师\""),
         Some("\"前端\"* AND \"工程师\"*".to_string())
     );
+}
+
+#[test]
+fn order_by_builder_uses_whitelist_and_nulls_last() {
+    let rules = vec![
+        SortRule {
+            field: "job_title".to_string(),
+            direction: "asc".to_string(),
+        },
+        SortRule {
+            field: "score".to_string(),
+            direction: "desc".to_string(),
+        },
+    ];
+    let allowed = [
+        ("job_title", "linked_job_title"),
+        ("score", "score"),
+        ("updated_at", "updated_at"),
+    ];
+
+    let order_by = build_order_by_from_rules(
+        Some(&rules),
+        &allowed,
+        "updated_at DESC, id DESC",
+    );
+
+    assert_eq!(
+        order_by,
+        "linked_job_title IS NULL ASC, linked_job_title ASC, score IS NULL ASC, score DESC, id DESC"
+    );
+}
+
+#[test]
+fn order_by_builder_falls_back_when_rules_invalid() {
+    let rules = vec![SortRule {
+        field: "nonexistent".to_string(),
+        direction: "asc".to_string(),
+    }];
+    let allowed = [("updated_at", "updated_at")];
+
+    let order_by = build_order_by_from_rules(
+        Some(&rules),
+        &allowed,
+        "updated_at DESC, id DESC",
+    );
+
+    assert_eq!(order_by, "updated_at DESC, id DESC");
 }
 
 #[test]
@@ -317,6 +367,91 @@ fn count_jobs_using_screening_template_returns_usage_count() {
 
     let count = count_jobs_using_screening_template(&conn, 9).expect("count usage");
     assert_eq!(count, 2);
+}
+
+fn create_screening_template_schema(conn: &Connection) {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE screening_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT NOT NULL,
+            job_id INTEGER,
+            name TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE screening_dimensions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_id INTEGER NOT NULL,
+            dimension_key TEXT NOT NULL,
+            dimension_label TEXT NOT NULL,
+            weight INTEGER NOT NULL,
+            sort_order INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE job_screening_overrides (
+            job_id INTEGER PRIMARY KEY,
+            template_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        "#,
+    )
+    .expect("create screening template schema");
+}
+
+#[test]
+fn resolve_screening_template_returns_resident_default_when_no_override() {
+    let conn = Connection::open_in_memory().expect("open in-memory db");
+    create_screening_template_schema(&conn);
+
+    let default_template = create_global_screening_template_internal(
+        &conn,
+        "默认筛选模板".to_string(),
+        normalize_screening_dimensions(None).expect("default dimensions"),
+        serde_json::json!({}),
+    )
+    .expect("create default template");
+    let custom_template = create_global_screening_template_internal(
+        &conn,
+        "前端模板".to_string(),
+        normalize_screening_dimensions(None).expect("default dimensions"),
+        serde_json::json!({}),
+    )
+    .expect("create custom template");
+    assert_ne!(default_template.id, custom_template.id);
+
+    let resolved = resolve_screening_template(&conn, None).expect("resolve default template");
+    assert_eq!(resolved.id, default_template.id);
+}
+
+#[test]
+fn delete_screening_template_rejects_resident_default_template() {
+    let conn = Connection::open_in_memory().expect("open in-memory db");
+    create_screening_template_schema(&conn);
+
+    let default_template = create_global_screening_template_internal(
+        &conn,
+        "默认筛选模板".to_string(),
+        normalize_screening_dimensions(None).expect("default dimensions"),
+        serde_json::json!({}),
+    )
+    .expect("create default template");
+    let _ = create_global_screening_template_internal(
+        &conn,
+        "前端模板".to_string(),
+        normalize_screening_dimensions(None).expect("default dimensions"),
+        serde_json::json!({}),
+    )
+    .expect("create custom template");
+
+    let result = delete_global_screening_template_internal(&conn, default_template.id);
+    assert_eq!(
+        result.expect_err("default template should not be deletable"),
+        "默认筛选模板不可删除，请改为编辑模板内容".to_string()
+    );
 }
 
 #[test]

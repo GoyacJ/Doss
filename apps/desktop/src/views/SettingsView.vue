@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
+import type { SortRule } from "@doss/shared";
 import { useRecruitingStore } from "../stores/recruiting";
 import {
   deleteAiProviderProfile,
@@ -19,9 +20,16 @@ import UiCheckbox from "../components/UiCheckbox.vue";
 import UiField from "../components/UiField.vue";
 import UiInfoRow from "../components/UiInfoRow.vue";
 import UiPanel from "../components/UiPanel.vue";
+import UiSelect from "../components/UiSelect.vue";
+import UiTableFilterPanel from "../components/UiTableFilterPanel.vue";
 import UiTable from "../components/UiTable.vue";
+import UiTablePagination from "../components/UiTablePagination.vue";
+import UiTableToolbar from "../components/UiTableToolbar.vue";
 import UiTd from "../components/UiTd.vue";
 import UiTh from "../components/UiTh.vue";
+import { includesKeyword } from "../lib/table-filter";
+import { clampPage, paginateRows } from "../lib/table-pagination";
+import { normalizeSortRules, sortRowsByRules, type SortResolver } from "../lib/table-sort";
 import { useToastStore } from "../stores/toast";
 
 const store = useRecruitingStore();
@@ -35,8 +43,9 @@ const testingProfileId = ref<string | null>(null);
 const settingDefaultProfileId = ref<string | null>(null);
 const providerCatalog = ref<AiProviderCatalogItem[]>([]);
 const profiles = ref<AiProviderProfile[]>([]);
-const screeningLoading = ref(false);
-const screeningSaving = ref(false);
+const profileAdvancedFilterOpen = ref(false);
+const profilePage = ref(1);
+const profilePageSize = ref(10);
 
 const profileModalOpen = ref(false);
 const profileModalMode = ref<"create" | "edit">("create");
@@ -113,6 +122,49 @@ const profileForm = reactive({
   has_api_key: false,
 });
 
+const profileTableFilters = reactive({
+  quickKeyword: "",
+  provider: "" as "" | AiProviderId,
+});
+
+type ProfileSortField = "name" | "provider" | "model" | "base_url" | "has_api_key" | "updated_at";
+const profileSortOptions: { label: string; value: ProfileSortField }[] = [
+  { label: "名称", value: "name" },
+  { label: "供应商", value: "provider" },
+  { label: "模型", value: "model" },
+  { label: "Base URL", value: "base_url" },
+  { label: "密钥状态", value: "has_api_key" },
+  { label: "更新时间", value: "updated_at" },
+];
+
+const profileSorts = ref<SortRule<ProfileSortField>[]>([
+  { field: "updated_at", direction: "desc" },
+]);
+
+const effectiveProfileSorts = computed(() =>
+  normalizeSortRules(
+    profileSorts.value,
+    profileSortOptions.map((item) => item.value),
+  ),
+);
+
+function sortProfilesByColumn(payload: { field: string; direction: "asc" | "desc" }) {
+  const field = payload.field as ProfileSortField;
+  if (!profileSortOptions.some((item) => item.value === field)) {
+    return;
+  }
+  const next = [
+    { field, direction: payload.direction },
+    ...effectiveProfileSorts.value.filter((rule) => rule.field !== field),
+  ];
+  profileSorts.value = normalizeSortRules(next, profileSortOptions.map((item) => item.value));
+}
+
+const providerFilterOptions = computed(() => [
+  { value: "", label: "全部供应商" },
+  ...providerCatalog.value.map((item) => ({ value: item.id, label: item.label })),
+]);
+
 const selectedProvider = computed(() => providerCatalog.value.find((item) => item.id === profileForm.provider) ?? null);
 const selectedProviderModels = computed(() => selectedProvider.value?.models ?? []);
 const sidecarBadge = computed(() => sidecarHealthBadge(store.sidecarHealthy));
@@ -120,35 +172,41 @@ const sidecarErrorMessage = computed(() => {
   const message = store.sidecarError?.trim();
   return message && message.length > 0 ? message : null;
 });
+const canDeleteProfiles = computed(() => profiles.value.length > 1);
 
-type ScreeningDimensionFormItem = {
-  key: string;
-  label: string;
-  weight: number;
+const filteredProfiles = computed(() =>
+  profiles.value.filter((profile) => {
+    if (!includesKeyword(
+      profileTableFilters.quickKeyword,
+      profile.name,
+      profile.provider,
+      profile.model,
+      profile.base_url,
+    )) {
+      return false;
+    }
+    if (profileTableFilters.provider && profile.provider !== profileTableFilters.provider) {
+      return false;
+    }
+    return true;
+  }),
+);
+
+const profileSortResolver: SortResolver<AiProviderProfile, ProfileSortField> = {
+  name: (row) => row.name,
+  provider: (row) => row.provider,
+  model: (row) => row.model,
+  base_url: (row) => row.base_url,
+  has_api_key: (row) => row.has_api_key,
+  updated_at: (row) => row.updated_at,
 };
 
-const screeningForm = reactive<{
-  name: string;
-  dimensions: ScreeningDimensionFormItem[];
-}>({
-  name: "默认筛选模板",
-  dimensions: [
-    { key: "goal_orientation", label: "目标导向", weight: 30 },
-    { key: "team_collaboration", label: "团队协作", weight: 15 },
-    { key: "self_drive", label: "自驱力", weight: 15 },
-    { key: "reflection_iteration", label: "反思迭代", weight: 10 },
-    { key: "openness", label: "开放性", weight: 8 },
-    { key: "resilience", label: "抗压韧性", weight: 7 },
-    { key: "learning_ability", label: "学习能力", weight: 10 },
-    { key: "values_fit", label: "价值观契合", weight: 5 },
-  ],
-});
-const screeningRiskRulesText = ref("{}");
-
-const screeningWeightTotal = computed(() =>
-  screeningForm.dimensions.reduce((sum, item) => sum + Number(item.weight || 0), 0),
+const displayProfiles = computed(() =>
+  sortRowsByRules(filteredProfiles.value, effectiveProfileSorts.value, profileSortResolver),
 );
-const canDeleteProfiles = computed(() => profiles.value.length > 1);
+const pagedProfiles = computed(() =>
+  paginateRows(displayProfiles.value, profilePage.value, profilePageSize.value),
+);
 
 function resolveErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim()) {
@@ -257,104 +315,6 @@ async function loadProfiles() {
   } finally {
     loadingProfiles.value = false;
   }
-}
-
-function hydrateScreeningForm() {
-  const template = store.activeScreeningTemplate;
-  if (!template) {
-    return;
-  }
-
-  screeningForm.name = template.name || "默认筛选模板";
-  if (template.dimensions.length > 0) {
-    screeningForm.dimensions = template.dimensions.map((item) => ({
-      key: item.key,
-      label: item.label,
-      weight: item.weight,
-    }));
-  }
-  screeningRiskRulesText.value = JSON.stringify(template.risk_rules ?? {}, null, 2);
-}
-
-async function loadScreeningTemplate() {
-  screeningLoading.value = true;
-  try {
-    await store.loadScreeningTemplate();
-    hydrateScreeningForm();
-  } catch (error) {
-    const message = resolveErrorMessage(error, "加载筛选模板失败");
-    toast.danger(message);
-  } finally {
-    screeningLoading.value = false;
-  }
-}
-
-async function saveScreeningTemplate() {
-  if (screeningWeightTotal.value !== 100) {
-    toast.warning(`权重总和必须为100，当前为 ${screeningWeightTotal.value}`);
-    return;
-  }
-
-  const hasInvalidDimension = screeningForm.dimensions.some(
-    (item) => !item.key.trim() || !item.label.trim(),
-  );
-  if (hasInvalidDimension) {
-    toast.warning("请填写完整的维度 key 与名称");
-    return;
-  }
-
-  let riskRules: Record<string, unknown> = {};
-  const riskRulesText = screeningRiskRulesText.value.trim();
-  if (riskRulesText) {
-    try {
-      const parsed = JSON.parse(riskRulesText);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        toast.warning("风险规则必须是 JSON 对象");
-        return;
-      }
-      riskRules = parsed as Record<string, unknown>;
-    } catch {
-      toast.warning("风险规则 JSON 格式不正确");
-      return;
-    }
-  }
-
-  screeningSaving.value = true;
-  try {
-    await store.saveScreeningTemplate({
-      name: screeningForm.name.trim() || "默认筛选模板",
-      dimensions: screeningForm.dimensions.map((item) => ({
-        key: item.key.trim(),
-        label: item.label.trim(),
-        weight: Number(item.weight),
-      })),
-      risk_rules: riskRules,
-    });
-    hydrateScreeningForm();
-    toast.success("筛选模板已保存");
-  } catch (error) {
-    const message = resolveErrorMessage(error, "保存筛选模板失败");
-    toast.danger(message);
-  } finally {
-    screeningSaving.value = false;
-  }
-}
-
-function addScreeningDimension() {
-  const next = screeningForm.dimensions.length + 1;
-  screeningForm.dimensions.push({
-    key: `custom_dimension_${next}`,
-    label: `自定义维度${next}`,
-    weight: 5,
-  });
-}
-
-function removeScreeningDimension(index: number) {
-  if (screeningForm.dimensions.length <= 1) {
-    toast.warning("至少保留一个维度");
-    return;
-  }
-  screeningForm.dimensions.splice(index, 1);
 }
 
 async function saveProfile() {
@@ -471,12 +431,34 @@ watch(
   },
 );
 
+watch(
+  () => [
+    profileTableFilters.quickKeyword,
+    profileTableFilters.provider,
+    JSON.stringify(effectiveProfileSorts.value),
+  ],
+  () => {
+    profilePage.value = 1;
+  },
+);
+
+watch(profilePageSize, () => {
+  profilePage.value = 1;
+});
+
+watch(
+  () => displayProfiles.value.length,
+  (total) => {
+    profilePage.value = clampPage(profilePage.value, total, profilePageSize.value);
+  },
+  { immediate: true },
+);
+
 onMounted(async () => {
   try {
     await loadProviderCatalog();
     await loadProfiles();
     await store.loadAiSettings().catch(() => undefined);
-    await loadScreeningTemplate();
   } catch (error) {
     const message = resolveErrorMessage(error, "初始化设置失败");
     toast.danger(message);
@@ -507,111 +489,84 @@ onMounted(async () => {
       <p v-if="loadingProfiles" class="m-0 text-muted">配置加载中...</p>
 
       <template v-else>
-        <UiTable v-if="profiles.length > 0">
-          <thead>
-            <tr>
-              <UiTh align="center">名称</UiTh>
-              <UiTh align="center">供应商</UiTh>
-              <UiTh align="center">模型</UiTh>
-              <UiTh align="center">Base URL</UiTh>
-              <UiTh align="center">密钥</UiTh>
-              <UiTh align="center">操作</UiTh>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="profile in profiles" :key="profile.id">
-              <UiTd align="center">{{ profile.name }}</UiTd>
-              <UiTd align="center">{{ profile.provider }}</UiTd>
-              <UiTd align="center">{{ profile.model }}</UiTd>
-              <UiTd align="center" class="break-all">{{ profile.base_url }}</UiTd>
-              <UiTd align="center">{{ profile.has_api_key ? "已配置" : "未配置" }}</UiTd>
-              <UiTd align="center" no-wrap>
-                <div class="flex justify-center gap-2">
-                  <UiButton
-                    variant="ghost"
-                    :disabled="profile.is_active || settingDefaultProfileId === profile.id"
-                    @click="setDefaultProfile(profile)"
-                  >
-                    {{ settingDefaultProfileId === profile.id ? "设置中..." : (profile.is_active ? "默认中" : "设为默认") }}
-                  </UiButton>
-                  <UiButton
-                    variant="ghost"
-                    :disabled="testingProfileId === profile.id"
-                    @click="runProfileTest(profile)"
-                  >
-                    {{ testingProfileId === profile.id ? "测试中..." : "测试" }}
-                  </UiButton>
-                  <UiButton variant="ghost" @click="openEditProfileModal(profile)">编辑</UiButton>
-                  <UiButton
-                    variant="ghost"
-                    :disabled="!canDeleteProfiles || deletingProfileId === profile.id"
-                    @click="askRemoveProfile(profile)"
-                  >
-                    {{ deletingProfileId === profile.id ? "删除中..." : "删除" }}
-                  </UiButton>
-                </div>
-              </UiTd>
-            </tr>
-          </tbody>
-        </UiTable>
+        <template v-if="profiles.length > 0">
+          <UiTableToolbar
+            v-model:quick-keyword="profileTableFilters.quickKeyword"
+            v-model:advanced-open="profileAdvancedFilterOpen"
+            quick-placeholder="输入名称/模型/地址关键词"
+            :show-refresh="false"
+            :show-apply="false"
+          />
+
+          <UiTableFilterPanel v-model:open="profileAdvancedFilterOpen">
+            <UiField label="供应商">
+              <UiSelect v-model="profileTableFilters.provider" :options="providerFilterOptions" />
+            </UiField>
+          </UiTableFilterPanel>
+
+          <UiTable>
+            <thead>
+              <tr>
+                <UiTh sort-field="name" :sorts="effectiveProfileSorts" @sort="sortProfilesByColumn">名称</UiTh>
+                <UiTh sort-field="provider" :sorts="effectiveProfileSorts" @sort="sortProfilesByColumn">供应商</UiTh>
+                <UiTh sort-field="model" :sorts="effectiveProfileSorts" @sort="sortProfilesByColumn">模型</UiTh>
+                <UiTh sort-field="base_url" :sorts="effectiveProfileSorts" @sort="sortProfilesByColumn">Base URL</UiTh>
+                <UiTh sort-field="has_api_key" :sorts="effectiveProfileSorts" @sort="sortProfilesByColumn">密钥</UiTh>
+                <UiTh>操作</UiTh>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="profile in pagedProfiles" :key="profile.id">
+                <UiTd>{{ profile.name }}</UiTd>
+                <UiTd>{{ profile.provider }}</UiTd>
+                <UiTd>{{ profile.model }}</UiTd>
+                <UiTd class="break-all">{{ profile.base_url }}</UiTd>
+                <UiTd>{{ profile.has_api_key ? "已配置" : "未配置" }}</UiTd>
+                <UiTd no-wrap>
+                  <div class="flex justify-center gap-2">
+                    <UiButton
+                      variant="ghost"
+                      size="sm"
+                      :disabled="profile.is_active || settingDefaultProfileId === profile.id"
+                      @click="setDefaultProfile(profile)"
+                    >
+                      {{ settingDefaultProfileId === profile.id ? "设置中..." : (profile.is_active ? "默认中" : "设为默认") }}
+                    </UiButton>
+                    <UiButton
+                      variant="ghost"
+                      size="sm"
+                      :disabled="testingProfileId === profile.id"
+                      @click="runProfileTest(profile)"
+                    >
+                      {{ testingProfileId === profile.id ? "测试中..." : "测试" }}
+                    </UiButton>
+                    <UiButton variant="ghost" size="sm" @click="openEditProfileModal(profile)">编辑</UiButton>
+                    <UiButton
+                      variant="ghost"
+                      size="sm"
+                      :disabled="!canDeleteProfiles || deletingProfileId === profile.id"
+                      @click="askRemoveProfile(profile)"
+                    >
+                      {{ deletingProfileId === profile.id ? "删除中..." : "删除" }}
+                    </UiButton>
+                  </div>
+                </UiTd>
+              </tr>
+              <tr v-if="pagedProfiles.length === 0">
+                <UiTd colspan="6" class="text-center text-muted py-6">暂无匹配配置</UiTd>
+              </tr>
+            </tbody>
+          </UiTable>
+          <UiTablePagination
+            v-model:page="profilePage"
+            v-model:page-size="profilePageSize"
+            :total="displayProfiles.length"
+            :disabled="loadingProfiles"
+          />
+        </template>
 
         <p v-else class="m-0 text-muted">暂无 AI 配置，点击“新增配置”创建第一条。</p>
       </template>
-    </UiPanel>
-
-    <UiPanel title="全局筛选模板">
-      <UiField label="模板名称">
-        <input v-model="screeningForm.name" placeholder="默认筛选模板" />
-      </UiField>
-      <div class="mt-3 mb-2 flex items-center gap-2">
-        <UiButton variant="secondary" :disabled="screeningLoading || screeningSaving" @click="addScreeningDimension">
-          新增维度
-        </UiButton>
-      </div>
-      <div class="grid gap-2.5">
-        <div
-          v-for="(item, index) in screeningForm.dimensions"
-          :key="`${item.key}-${index}`"
-          class="border border-line rounded-xl p-2.5 grid grid-cols-[1fr_1fr_140px_auto] gap-2 lt-lg:grid-cols-1"
-        >
-          <UiField label="维度 Key">
-            <input v-model="item.key" placeholder="例如：goal_orientation" />
-          </UiField>
-          <UiField label="维度名称">
-            <input v-model="item.label" placeholder="例如：目标导向" />
-          </UiField>
-          <UiField label="权重">
-            <input v-model.number="item.weight" type="number" min="1" max="100" step="1" />
-          </UiField>
-          <div class="flex items-end">
-            <UiButton
-              variant="ghost"
-              :disabled="screeningLoading || screeningSaving"
-              @click="removeScreeningDimension(index)"
-            >
-              删除
-            </UiButton>
-          </div>
-        </div>
-      </div>
-      <UiField label="风险规则（JSON）" help="用于补充全局风险规则，可为空对象" class="mt-3">
-        <textarea v-model="screeningRiskRulesText" rows="6" placeholder='{"highRiskKeywords":["频繁跳槽"]}' />
-      </UiField>
-      <p class="mt-3 mb-2 text-sm" :class="screeningWeightTotal === 100 ? 'text-brand' : 'text-danger'">
-        权重合计: {{ screeningWeightTotal }} / 100
-      </p>
-      <div class="flex items-center gap-2.5 flex-wrap">
-        <UiButton
-          variant="secondary"
-          :disabled="screeningLoading || screeningSaving"
-          @click="loadScreeningTemplate"
-        >
-          {{ screeningLoading ? "加载中..." : "重新加载模板" }}
-        </UiButton>
-        <UiButton :disabled="screeningLoading || screeningSaving" @click="saveScreeningTemplate">
-          {{ screeningSaving ? "保存中..." : "保存模板" }}
-        </UiButton>
-      </div>
     </UiPanel>
 
     <UiPanel title="系统状态">

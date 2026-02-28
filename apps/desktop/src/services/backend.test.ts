@@ -226,18 +226,34 @@ describe("backend AI profile commands", () => {
       page: 2,
       page_size: 20,
       name_like: "张",
-      sort_by: "score",
-      sort_order: "desc",
+      sorts: [
+        {
+          field: "score",
+          direction: "desc",
+        },
+      ],
     });
     await listInterviewCandidatesPage({
       page: 1,
       page_size: 10,
       job_id: 12,
+      sorts: [
+        {
+          field: "updated_at",
+          direction: "desc",
+        },
+      ],
     });
     await listDecisionCandidatesPage({
       page: 3,
       page_size: 10,
       interview_passed: true,
+      sorts: [
+        {
+          field: "updated_at",
+          direction: "desc",
+        },
+      ],
     });
 
     expect(invokeMock).toHaveBeenCalledWith("list_candidates_page", {
@@ -245,8 +261,12 @@ describe("backend AI profile commands", () => {
         page: 2,
         page_size: 20,
         name_like: "张",
-        sort_by: "score",
-        sort_order: "desc",
+        sorts: [
+          {
+            field: "score",
+            direction: "desc",
+          },
+        ],
       },
     });
     expect(invokeMock).toHaveBeenCalledWith("list_interview_candidates_page", {
@@ -254,6 +274,12 @@ describe("backend AI profile commands", () => {
         page: 1,
         page_size: 10,
         job_id: 12,
+        sorts: [
+          {
+            field: "updated_at",
+            direction: "desc",
+          },
+        ],
       },
     });
     expect(invokeMock).toHaveBeenCalledWith("list_decision_candidates_page", {
@@ -261,6 +287,12 @@ describe("backend AI profile commands", () => {
         page: 3,
         page_size: 10,
         interview_passed: true,
+        sorts: [
+          {
+            field: "updated_at",
+            direction: "desc",
+          },
+        ],
       },
     });
   });

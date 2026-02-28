@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
-import type { CandidateRecord } from "@doss/shared";
+import type { CandidateRecord, SortRule } from "@doss/shared";
 import { useRoute, useRouter } from "vue-router";
 import UiBadge from "../components/UiBadge.vue";
 import UiButton from "../components/UiButton.vue";
@@ -8,7 +8,10 @@ import UiField from "../components/UiField.vue";
 import UiInfoRow from "../components/UiInfoRow.vue";
 import UiPanel from "../components/UiPanel.vue";
 import UiSelect from "../components/UiSelect.vue";
+import UiTableFilterPanel from "../components/UiTableFilterPanel.vue";
 import UiTable from "../components/UiTable.vue";
+import UiTablePagination from "../components/UiTablePagination.vue";
+import UiTableToolbar from "../components/UiTableToolbar.vue";
 import UiTd from "../components/UiTd.vue";
 import UiTh from "../components/UiTh.vue";
 import { formatStageLabel } from "../lib/pipeline";
@@ -17,6 +20,8 @@ import {
   interviewRecommendationTone,
   stageTone,
 } from "../lib/status";
+import { clampPage, normalizePageSize, paginateRows } from "../lib/table-pagination";
+import { normalizeSortRules } from "../lib/table-sort";
 import { listInterviewCandidatesPage, saveInterviewRecording } from "../services/backend";
 import { useRecruitingStore } from "../stores/recruiting";
 import { useToastStore } from "../stores/toast";
@@ -43,6 +48,37 @@ const filters = reactive({
   jobId: 0,
   nameLike: "",
 });
+const advancedFilterOpen = ref(false);
+
+type InterviewSortField = "name" | "job_title" | "stage" | "updated_at" | "created_at";
+const sortOptions: { label: string; value: InterviewSortField }[] = [
+  { label: "姓名", value: "name" },
+  { label: "职位", value: "job_title" },
+  { label: "阶段", value: "stage" },
+  { label: "更新时间", value: "updated_at" },
+  { label: "创建时间", value: "created_at" },
+];
+const sorts = ref<SortRule<InterviewSortField>[]>([
+  { field: "updated_at", direction: "desc" },
+]);
+const effectiveSorts = computed(() =>
+  normalizeSortRules(
+    sorts.value,
+    sortOptions.map((item) => item.value),
+  ),
+);
+
+function sortByColumn(payload: { field: string; direction: "asc" | "desc" }) {
+  const field = payload.field as InterviewSortField;
+  if (!sortOptions.some((item) => item.value === field)) {
+    return;
+  }
+  const next = [
+    { field, direction: payload.direction },
+    ...effectiveSorts.value.filter((rule) => rule.field !== field),
+  ];
+  sorts.value = normalizeSortRules(next, sortOptions.map((item) => item.value));
+}
 
 const drawerOpen = ref(false);
 const drawerLoading = ref(false);
@@ -56,6 +92,8 @@ const evaluating = ref(false);
 const actingCandidateId = ref<number | null>(null);
 
 const questionDrafts = ref<InterviewQuestionDraft[]>([]);
+const questionPage = ref(1);
+const questionPageSize = ref(5);
 const transcriptText = ref("");
 const feedbackSummary = ref("");
 const feedbackRedFlags = ref("");
@@ -92,14 +130,19 @@ const latestFeedback = computed(() => {
   return store.interviewFeedback[selectedCandidateId.value]?.[0] ?? null;
 });
 
-const hasPrevPage = computed(() => page.value > 1);
-const hasNextPage = computed(() => page.value * pageSize.value < total.value);
-const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)));
-
 const jobOptions = computed(() => [
   { value: 0, label: "全部职位" },
   ...store.jobs.map((job) => ({ value: job.id, label: `${job.title} · ${job.company}` })),
 ]);
+const pagedQuestionDrafts = computed(() => {
+  const safePageSize = normalizePageSize(questionPageSize.value, 5);
+  const safePage = clampPage(questionPage.value, questionDrafts.value.length, safePageSize);
+  const start = (safePage - 1) * safePageSize;
+  return paginateRows(questionDrafts.value, safePage, safePageSize).map((question, index) => ({
+    question,
+    index: start + index,
+  }));
+});
 
 function resolveErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim()) {
@@ -149,6 +192,7 @@ async function loadRows() {
       page_size: pageSize.value,
       job_id: filters.jobId > 0 ? filters.jobId : undefined,
       name_like: filters.nameLike.trim() || undefined,
+      sorts: effectiveSorts.value,
     });
     rows.value = data.items;
     total.value = data.total;
@@ -162,20 +206,6 @@ async function loadRows() {
 function applyFilters() {
   page.value = 1;
   void loadRows();
-}
-
-function nextPage() {
-  if (!hasNextPage.value) {
-    return;
-  }
-  page.value += 1;
-}
-
-function prevPage() {
-  if (!hasPrevPage.value) {
-    return;
-  }
-  page.value -= 1;
 }
 
 async function openDrawer(candidate: CandidateRecord) {
@@ -410,6 +440,35 @@ watch(page, () => {
   void loadRows();
 });
 
+watch(pageSize, () => {
+  if (page.value !== 1) {
+    page.value = 1;
+    return;
+  }
+  void loadRows();
+});
+
+watch(questionPageSize, () => {
+  questionPage.value = 1;
+});
+
+watch(
+  () => questionDrafts.value.length,
+  (total) => {
+    questionPage.value = clampPage(questionPage.value, total, questionPageSize.value);
+  },
+  { immediate: true },
+);
+
+watch(
+  sorts,
+  () => {
+    page.value = 1;
+    void loadRows();
+  },
+  { deep: true },
+);
+
 onMounted(async () => {
   await Promise.allSettled([
     store.bootstrap(),
@@ -429,25 +488,27 @@ onMounted(async () => {
 <template>
   <section class="flex flex-col gap-4">
     <UiPanel title="待面试列表">
-      <div class="grid grid-cols-4 gap-2.5 mb-3 lt-lg:grid-cols-2 lt-sm:grid-cols-1">
+      <UiTableToolbar
+        v-model:quick-keyword="filters.nameLike"
+        v-model:advanced-open="advancedFilterOpen"
+        :disabled="loading"
+        quick-placeholder="输入姓名关键词"
+        @apply="applyFilters"
+        @refresh="loadRows"
+      />
+
+      <UiTableFilterPanel v-model:open="advancedFilterOpen">
         <UiField label="职位筛选">
           <UiSelect v-model="filters.jobId" :options="jobOptions" value-type="number" />
         </UiField>
-        <UiField label="姓名关键词">
-          <input v-model="filters.nameLike" placeholder="输入姓名关键词" @keyup.enter="applyFilters" />
-        </UiField>
-        <div class="flex items-end gap-2 col-span-2 lt-sm:col-span-1">
-          <UiButton variant="secondary" :disabled="loading" @click="applyFilters">查询</UiButton>
-          <UiButton variant="ghost" :disabled="loading" @click="loadRows">刷新</UiButton>
-        </div>
-      </div>
+      </UiTableFilterPanel>
 
       <UiTable>
         <thead>
           <tr>
-            <UiTh>候选人</UiTh>
-            <UiTh>职位</UiTh>
-            <UiTh>阶段</UiTh>
+            <UiTh sort-field="name" :sorts="effectiveSorts" @sort="sortByColumn">候选人</UiTh>
+            <UiTh sort-field="job_title" :sorts="effectiveSorts" @sort="sortByColumn">职位</UiTh>
+            <UiTh sort-field="stage" :sorts="effectiveSorts" @sort="sortByColumn">阶段</UiTh>
             <UiTh>操作</UiTh>
           </tr>
         </thead>
@@ -459,7 +520,7 @@ onMounted(async () => {
               <UiBadge :tone="stageTone(candidate.stage)">{{ formatStageLabel(candidate.stage) }}</UiBadge>
             </UiTd>
             <UiTd>
-              <div class="flex items-center gap-2 flex-wrap">
+              <div class="flex items-center justify-center gap-2 flex-wrap">
                 <UiButton
                   variant="ghost"
                   :disabled="actingCandidateId === candidate.id"
@@ -489,13 +550,12 @@ onMounted(async () => {
         </tbody>
       </UiTable>
 
-      <div class="mt-3 flex items-center justify-between gap-2 flex-wrap">
-        <span class="text-sm text-muted">第 {{ page }} / {{ totalPages }} 页，共 {{ total }} 条</span>
-        <div class="flex items-center gap-2">
-          <UiButton variant="ghost" :disabled="!hasPrevPage || loading" @click="prevPage">上一页</UiButton>
-          <UiButton variant="ghost" :disabled="!hasNextPage || loading" @click="nextPage">下一页</UiButton>
-        </div>
-      </div>
+      <UiTablePagination
+        v-model:page="page"
+        v-model:page-size="pageSize"
+        :total="total"
+        :disabled="loading"
+      />
     </UiPanel>
   </section>
 
@@ -541,15 +601,23 @@ onMounted(async () => {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(question, index) in questionDrafts" :key="`${index}-${question.primaryQuestion}`">
-                <UiTd><textarea v-model="question.primaryQuestion" rows="4" placeholder="请输入主问题" /></UiTd>
-                <UiTd><textarea v-model="question.followUpsText" rows="4" placeholder="每行一个追问" /></UiTd>
-                <UiTd><textarea v-model="question.scoringPointsText" rows="4" placeholder="每行一个评分要点" /></UiTd>
-                <UiTd><textarea v-model="question.redFlagsText" rows="4" placeholder="每行一个红旗信号" /></UiTd>
-                <UiTd><UiButton variant="ghost" @click="removeQuestion(index)">删除</UiButton></UiTd>
+              <tr v-for="entry in pagedQuestionDrafts" :key="`${entry.index}-${entry.question.primaryQuestion}`">
+                <UiTd><textarea v-model="entry.question.primaryQuestion" rows="4" placeholder="请输入主问题" /></UiTd>
+                <UiTd><textarea v-model="entry.question.followUpsText" rows="4" placeholder="每行一个追问" /></UiTd>
+                <UiTd><textarea v-model="entry.question.scoringPointsText" rows="4" placeholder="每行一个评分要点" /></UiTd>
+                <UiTd><textarea v-model="entry.question.redFlagsText" rows="4" placeholder="每行一个红旗信号" /></UiTd>
+                <UiTd><UiButton variant="ghost" @click="removeQuestion(entry.index)">删除</UiButton></UiTd>
+              </tr>
+              <tr v-if="pagedQuestionDrafts.length === 0">
+                <UiTd colspan="5" class="text-center text-muted py-6">暂无题目</UiTd>
               </tr>
             </tbody>
           </UiTable>
+          <UiTablePagination
+            v-model:page="questionPage"
+            v-model:page-size="questionPageSize"
+            :total="questionDrafts.length"
+          />
           <p v-if="questionDrafts.length === 0" class="text-muted text-[0.85rem] mt-2">暂无题目，请先生成或新增。</p>
         </UiPanel>
 

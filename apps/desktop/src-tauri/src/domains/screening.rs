@@ -263,6 +263,8 @@ pub(crate) fn upsert_screening_template_internal(
         )
         .optional()
         .map_err(|error| error.to_string())?
+    } else if scope == "global" {
+        resolve_resident_default_global_template_id(conn)?
     } else {
         conn.query_row(
             "SELECT id FROM screening_templates WHERE scope = ?1 AND job_id IS NULL LIMIT 1",
@@ -461,22 +463,59 @@ pub(crate) fn update_global_screening_template_internal(
     read_screening_template_by_id(conn, template_id)
 }
 
+pub(crate) fn resolve_resident_default_global_template_id(
+    conn: &Connection,
+) -> Result<Option<i64>, String> {
+    let named_default = conn
+        .query_row(
+            r#"
+            SELECT id
+            FROM screening_templates
+            WHERE scope = 'global' AND name = '默认筛选模板'
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+            "#,
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if named_default.is_some() {
+        return Ok(named_default);
+    }
+
+    conn.query_row(
+        r#"
+        SELECT id
+        FROM screening_templates
+        WHERE scope = 'global'
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1
+        "#,
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map_err(|error| error.to_string())
+}
+
 pub(crate) fn list_global_screening_templates(
     conn: &Connection,
 ) -> Result<Vec<ScreeningTemplateRecord>, String> {
+    let default_template_id = resolve_resident_default_global_template_id(conn)?.unwrap_or(-1);
     let mut stmt = conn
         .prepare(
             r#"
             SELECT id
             FROM screening_templates
             WHERE scope = 'global'
-            ORDER BY updated_at DESC
+            ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END ASC, updated_at DESC, id DESC
             "#,
         )
         .map_err(|error| error.to_string())?;
 
     let ids = stmt
-        .query_map([], |row| row.get::<_, i64>(0))
+        .query_map([default_template_id], |row| row.get::<_, i64>(0))
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
@@ -513,20 +552,7 @@ pub(crate) fn resolve_screening_template(
         }
     }
 
-    let global_template_id = conn
-        .query_row(
-            r#"
-            SELECT id
-            FROM screening_templates
-            WHERE scope = 'global'
-            ORDER BY updated_at DESC
-            LIMIT 1
-            "#,
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
-        .map_err(|error| error.to_string())?;
+    let global_template_id = resolve_resident_default_global_template_id(conn)?;
 
     if let Some(id) = global_template_id {
         return read_screening_template_by_id(conn, id);
@@ -1399,17 +1425,21 @@ pub(crate) fn update_screening_template(
     Ok(template)
 }
 
-#[tauri::command]
-pub(crate) fn delete_screening_template(
-    state: State<'_, AppState>,
+pub(crate) fn delete_global_screening_template_internal(
+    conn: &Connection,
     template_id: i64,
 ) -> Result<Vec<ScreeningTemplateRecord>, String> {
-    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
-    let existing = read_screening_template_by_id(&conn, template_id)?;
+    let existing = read_screening_template_by_id(conn, template_id)?;
     if existing.scope != "global" {
         return Err("screening_template_scope_invalid".to_string());
     }
-    let job_usage_count = count_jobs_using_screening_template(&conn, template_id)?;
+
+    let default_template_id = resolve_resident_default_global_template_id(conn)?;
+    if default_template_id == Some(template_id) {
+        return Err("默认筛选模板不可删除，请改为编辑模板内容".to_string());
+    }
+
+    let job_usage_count = count_jobs_using_screening_template(conn, template_id)?;
     if job_usage_count > 0 {
         return Err(format!(
             "该评分模板已被 {job_usage_count} 个职位使用，请先为相关职位切换模板后再删除"
@@ -1422,6 +1452,31 @@ pub(crate) fn delete_screening_template(
     )
     .map_err(|error| error.to_string())?;
 
+    let mut templates = list_global_screening_templates(conn)?;
+    if templates.is_empty() {
+        let default_template = upsert_screening_template_internal(
+            conn,
+            "global",
+            None,
+            "默认筛选模板".to_string(),
+            normalize_screening_dimensions(None)?,
+            serde_json::json!({}),
+        )?;
+        templates = vec![default_template];
+    }
+
+    Ok(templates)
+}
+
+#[tauri::command]
+pub(crate) fn delete_screening_template(
+    state: State<'_, AppState>,
+    template_id: i64,
+) -> Result<Vec<ScreeningTemplateRecord>, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let existing = read_screening_template_by_id(&conn, template_id)?;
+    let templates = delete_global_screening_template_internal(&conn, template_id)?;
+
     write_audit(
         &conn,
         "screening.template.delete",
@@ -1433,19 +1488,6 @@ pub(crate) fn delete_screening_template(
         }),
     )
     .map_err(|error| error.to_string())?;
-
-    let mut templates = list_global_screening_templates(&conn)?;
-    if templates.is_empty() {
-        let default_template = upsert_screening_template_internal(
-            &conn,
-            "global",
-            None,
-            "默认筛选模板".to_string(),
-            normalize_screening_dimensions(None)?,
-            serde_json::json!({}),
-        )?;
-        templates = vec![default_template];
-    }
 
     Ok(templates)
 }

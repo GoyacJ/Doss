@@ -34,15 +34,25 @@ describe("resolveOverrideTemplateOptions", () => {
     expect(resolveOverrideTemplateOptions(templates)).toEqual([]);
   });
 
-  it("excludes latest template as floating default and keeps older templates", () => {
+  it("excludes resident default template and keeps custom templates", () => {
     const templates = [
-      buildTemplate(1, "模板A", "2026-02-26T09:00:00Z"),
+      buildTemplate(1, "默认筛选模板", "2026-02-26T09:00:00Z"),
       buildTemplate(2, "模板B", "2026-02-26T11:00:00Z"),
       buildTemplate(3, "模板C", "2026-02-26T10:00:00Z"),
     ];
 
     const result = resolveOverrideTemplateOptions(templates);
-    expect(result.map((item) => item.id)).toEqual([1, 3]);
+    expect(result.map((item) => item.id)).toEqual([2, 3]);
+  });
+
+  it("falls back to first template as default when default name is missing", () => {
+    const templates = [
+      buildTemplate(11, "主模板", "2026-02-26T09:00:00Z"),
+      buildTemplate(12, "模板B", "2026-02-26T11:00:00Z"),
+      buildTemplate(13, "模板C", "2026-02-26T10:00:00Z"),
+    ];
+
+    const result = resolveOverrideTemplateOptions(templates);
+    expect(result.map((item) => item.id)).toEqual([12, 13]);
   });
 });
-

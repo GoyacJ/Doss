@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
-import type { CandidateRecord } from "@doss/shared";
+import type { CandidateRecord, SortRule } from "@doss/shared";
 import { useRoute } from "vue-router";
 import UiBadge from "../components/UiBadge.vue";
 import UiButton from "../components/UiButton.vue";
@@ -8,7 +8,10 @@ import UiField from "../components/UiField.vue";
 import UiInfoRow from "../components/UiInfoRow.vue";
 import UiPanel from "../components/UiPanel.vue";
 import UiSelect from "../components/UiSelect.vue";
+import UiTableFilterPanel from "../components/UiTableFilterPanel.vue";
 import UiTable from "../components/UiTable.vue";
+import UiTablePagination from "../components/UiTablePagination.vue";
+import UiTableToolbar from "../components/UiTableToolbar.vue";
 import UiTd from "../components/UiTd.vue";
 import UiTh from "../components/UiTh.vue";
 import { formatStageLabel } from "../lib/pipeline";
@@ -19,6 +22,7 @@ import {
   interviewRecommendationTone,
   stageTone,
 } from "../lib/status";
+import { normalizeSortRules } from "../lib/table-sort";
 import { listDecisionCandidatesPage } from "../services/backend";
 import { useRecruitingStore } from "../stores/recruiting";
 import { useToastStore } from "../stores/toast";
@@ -38,6 +42,37 @@ const filters = reactive({
   nameLike: "",
   interviewPassed: "" as "" | "pass" | "fail",
 });
+const advancedFilterOpen = ref(false);
+
+type DecisionSortField = "name" | "job_title" | "stage" | "updated_at" | "created_at";
+const sortOptions: { label: string; value: DecisionSortField }[] = [
+  { label: "姓名", value: "name" },
+  { label: "职位", value: "job_title" },
+  { label: "阶段", value: "stage" },
+  { label: "更新时间", value: "updated_at" },
+  { label: "创建时间", value: "created_at" },
+];
+const sorts = ref<SortRule<DecisionSortField>[]>([
+  { field: "updated_at", direction: "desc" },
+]);
+const effectiveSorts = computed(() =>
+  normalizeSortRules(
+    sorts.value,
+    sortOptions.map((item) => item.value),
+  ),
+);
+
+function sortByColumn(payload: { field: string; direction: "asc" | "desc" }) {
+  const field = payload.field as DecisionSortField;
+  if (!sortOptions.some((item) => item.value === field)) {
+    return;
+  }
+  const next = [
+    { field, direction: payload.direction },
+    ...effectiveSorts.value.filter((rule) => rule.field !== field),
+  ];
+  sorts.value = normalizeSortRules(next, sortOptions.map((item) => item.value));
+}
 
 const drawerOpen = ref(false);
 const drawerLoading = ref(false);
@@ -66,10 +101,6 @@ const latestDecision = computed(() => {
   }
   return store.hiringDecisions[selectedCandidateId.value]?.[0] ?? null;
 });
-
-const hasPrevPage = computed(() => page.value > 1);
-const hasNextPage = computed(() => page.value * pageSize.value < total.value);
-const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)));
 
 const jobOptions = computed(() => [
   { value: 0, label: "全部职位" },
@@ -105,6 +136,7 @@ async function loadRows() {
       job_id: filters.jobId > 0 ? filters.jobId : undefined,
       name_like: filters.nameLike.trim() || undefined,
       interview_passed: filters.interviewPassed === "" ? undefined : filters.interviewPassed === "pass",
+      sorts: effectiveSorts.value,
     });
     rows.value = data.items;
     total.value = data.total;
@@ -118,20 +150,6 @@ async function loadRows() {
 function applyFilters() {
   page.value = 1;
   void loadRows();
-}
-
-function nextPage() {
-  if (!hasNextPage.value) {
-    return;
-  }
-  page.value += 1;
-}
-
-function prevPage() {
-  if (!hasPrevPage.value) {
-    return;
-  }
-  page.value -= 1;
 }
 
 async function openCandidateContext(candidate: CandidateRecord) {
@@ -175,6 +193,23 @@ watch(page, () => {
   void loadRows();
 });
 
+watch(pageSize, () => {
+  if (page.value !== 1) {
+    page.value = 1;
+    return;
+  }
+  void loadRows();
+});
+
+watch(
+  sorts,
+  () => {
+    page.value = 1;
+    void loadRows();
+  },
+  { deep: true },
+);
+
 onMounted(async () => {
   await Promise.allSettled([
     store.bootstrap(),
@@ -194,28 +229,32 @@ onMounted(async () => {
 <template>
   <section class="flex flex-col gap-4">
     <UiPanel title="已面试候选人列表">
-      <div class="grid grid-cols-4 gap-2.5 mb-3 lt-lg:grid-cols-2 lt-sm:grid-cols-1">
-        <UiField label="职位筛选">
-          <UiSelect v-model="filters.jobId" :options="jobOptions" value-type="number" />
-        </UiField>
-        <UiField label="姓名关键词">
-          <input v-model="filters.nameLike" placeholder="输入姓名关键词" @keyup.enter="applyFilters" />
-        </UiField>
-        <UiField label="面试是否通过">
-          <UiSelect v-model="filters.interviewPassed" :options="interviewPassOptions" />
-        </UiField>
-        <div class="flex items-end gap-2">
-          <UiButton variant="secondary" :disabled="loading" @click="applyFilters">查询</UiButton>
-          <UiButton variant="ghost" :disabled="loading" @click="loadRows">刷新</UiButton>
+      <UiTableToolbar
+        v-model:quick-keyword="filters.nameLike"
+        v-model:advanced-open="advancedFilterOpen"
+        :disabled="loading"
+        quick-placeholder="输入姓名关键词"
+        @apply="applyFilters"
+        @refresh="loadRows"
+      />
+
+      <UiTableFilterPanel v-model:open="advancedFilterOpen">
+        <div class="grid grid-cols-2 gap-2.5 lt-sm:grid-cols-1">
+          <UiField label="职位筛选">
+            <UiSelect v-model="filters.jobId" :options="jobOptions" value-type="number" />
+          </UiField>
+          <UiField label="面试是否通过">
+            <UiSelect v-model="filters.interviewPassed" :options="interviewPassOptions" />
+          </UiField>
         </div>
-      </div>
+      </UiTableFilterPanel>
 
       <UiTable>
         <thead>
           <tr>
-            <UiTh>候选人</UiTh>
-            <UiTh>职位</UiTh>
-            <UiTh>阶段</UiTh>
+            <UiTh sort-field="name" :sorts="effectiveSorts" @sort="sortByColumn">候选人</UiTh>
+            <UiTh sort-field="job_title" :sorts="effectiveSorts" @sort="sortByColumn">职位</UiTh>
+            <UiTh sort-field="stage" :sorts="effectiveSorts" @sort="sortByColumn">阶段</UiTh>
             <UiTh>操作</UiTh>
           </tr>
         </thead>
@@ -227,7 +266,7 @@ onMounted(async () => {
               <UiBadge :tone="stageTone(candidate.stage)">{{ formatStageLabel(candidate.stage) }}</UiBadge>
             </UiTd>
             <UiTd>
-              <div class="flex items-center gap-2 flex-wrap">
+              <div class="flex items-center justify-center gap-2 flex-wrap">
                 <UiButton variant="ghost" @click="openCandidateContext(candidate)">查看面试情况</UiButton>
                 <UiButton
                   :disabled="isRowDecided(candidate) || actingCandidateId === candidate.id"
@@ -251,13 +290,12 @@ onMounted(async () => {
         </tbody>
       </UiTable>
 
-      <div class="mt-3 flex items-center justify-between gap-2 flex-wrap">
-        <span class="text-sm text-muted">第 {{ page }} / {{ totalPages }} 页，共 {{ total }} 条</span>
-        <div class="flex items-center gap-2">
-          <UiButton variant="ghost" :disabled="!hasPrevPage || loading" @click="prevPage">上一页</UiButton>
-          <UiButton variant="ghost" :disabled="!hasNextPage || loading" @click="nextPage">下一页</UiButton>
-        </div>
-      </div>
+      <UiTablePagination
+        v-model:page="page"
+        v-model:page-size="pageSize"
+        :total="total"
+        :disabled="loading"
+      />
     </UiPanel>
   </section>
 

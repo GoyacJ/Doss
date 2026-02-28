@@ -130,14 +130,19 @@ pub(crate) struct SetCandidateQualificationInput {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SortRule {
+    pub(crate) field: String,
+    pub(crate) direction: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CandidateListQuery {
     #[serde(flatten)]
     pub(crate) page: PageQuery,
     pub(crate) job_id: Option<i64>,
     pub(crate) name_like: Option<String>,
     pub(crate) stage: Option<PipelineStage>,
-    pub(crate) sort_by: Option<String>,
-    pub(crate) sort_order: Option<String>,
+    pub(crate) sorts: Option<Vec<SortRule>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -146,6 +151,7 @@ pub(crate) struct InterviewListQuery {
     pub(crate) page: PageQuery,
     pub(crate) job_id: Option<i64>,
     pub(crate) name_like: Option<String>,
+    pub(crate) sorts: Option<Vec<SortRule>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -155,6 +161,7 @@ pub(crate) struct DecisionListQuery {
     pub(crate) job_id: Option<i64>,
     pub(crate) name_like: Option<String>,
     pub(crate) interview_passed: Option<bool>,
+    pub(crate) sorts: Option<Vec<SortRule>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
