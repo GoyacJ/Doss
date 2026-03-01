@@ -1,9 +1,9 @@
 use base64::prelude::*;
 use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
-use serde_json::Value;
-use tauri::State;
 #[cfg(test)]
 use serde::Serialize;
+use serde_json::Value;
+use tauri::State;
 #[cfg(test)]
 use tauri::{AppHandle, Emitter};
 
@@ -14,15 +14,21 @@ use crate::core::state::AppState;
 use crate::core::time::now_iso;
 #[cfg(test)]
 use crate::domains::ai_runtime::{
-    invoke_cloud_provider, read_resume_attachment, resolve_ai_settings, AiInvokeProgressEvent,
+    invoke_cloud_provider, planned_resume_input_mode, read_resume_attachment, resolve_ai_settings,
+    AiInvokeProgressEvent,
 };
+#[cfg(test)]
+use crate::domains::recruiting_utils::clamp_score;
 #[cfg(test)]
 use crate::domains::resume_materializer::ensure_resume_materialized;
 #[cfg(test)]
-use crate::domains::resume_parser::{expected_salary_k_from_parsed_json, parse_skills_from_parsed_json};
-use crate::domains::resume_parser::parse_resume_text_v2;
-#[cfg(test)]
-use crate::domains::recruiting_utils::clamp_score;
+use crate::domains::resume_parser::{
+    expected_salary_k_from_parsed_json, parse_skills_from_parsed_json,
+};
+use crate::domains::resume_parser::{
+    extract_resume_content_from_bytes, extract_resume_text_from_bytes, parse_resume_text_v2,
+    resume_parser_v3_enabled, ResumeTextExtraction,
+};
 use crate::infra::audit::write_audit;
 use crate::infra::db::open_connection;
 use crate::infra::search_index::sync_candidate_search;
@@ -1753,7 +1759,10 @@ fn resume_record_from_row(row: &rusqlite::Row<'_>) -> Result<ResumeRecord, rusql
     })
 }
 
-fn read_resume_record(conn: &Connection, candidate_id: i64) -> Result<Option<ResumeRecord>, String> {
+fn read_resume_record(
+    conn: &Connection,
+    candidate_id: i64,
+) -> Result<Option<ResumeRecord>, String> {
     conn.query_row(
         r#"
         SELECT r.id, r.candidate_id, r.source, r.raw_text, r.parsed_json,
@@ -1779,10 +1788,7 @@ pub(crate) fn get_resume(
 }
 
 #[tauri::command]
-pub(crate) fn delete_resume(
-    state: State<'_, AppState>,
-    candidate_id: i64,
-) -> Result<bool, String> {
+pub(crate) fn delete_resume(state: State<'_, AppState>, candidate_id: i64) -> Result<bool, String> {
     let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
     let deleted_resume_files = conn
         .execute(
@@ -1791,7 +1797,10 @@ pub(crate) fn delete_resume(
         )
         .map_err(|error| error.to_string())?;
     let deleted_resumes = conn
-        .execute("DELETE FROM resumes WHERE candidate_id = ?1", params![candidate_id])
+        .execute(
+            "DELETE FROM resumes WHERE candidate_id = ?1",
+            params![candidate_id],
+        )
         .map_err(|error| error.to_string())?;
 
     sync_candidate_search(&conn, candidate_id).map_err(|error| error.to_string())?;
@@ -1823,10 +1832,56 @@ pub(crate) fn upsert_resume(
         .unwrap_or(SourceType::Manual)
         .as_db()
         .to_string();
-    let raw_text = input.raw_text.unwrap_or_default();
-    let parsed_value = input
-        .parsed
-        .filter(ResumeParsedV2::is_v2_json)
+    let parser_v3_enabled = resume_parser_v3_enabled();
+    let enable_ocr = input.enable_ocr.unwrap_or(true);
+
+    let decoded_original_file = if let Some(original_file) = input.original_file.as_ref() {
+        let content = BASE64_STANDARD
+            .decode(original_file.content_base64.trim())
+            .map_err(|error| error.to_string())?;
+        let file_name = original_file.file_name.trim().to_string();
+        let content_type = original_file
+            .content_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        Some((file_name, content_type, content))
+    } else {
+        None
+    };
+
+    let mut raw_text = input.raw_text.unwrap_or_default();
+    let mut parsed_value = input.parsed.filter(ResumeParsedV2::is_v2_json);
+
+    if parsed_value.is_none() && raw_text.trim().is_empty() {
+        if let Some((file_name, _, content)) = decoded_original_file.as_ref() {
+            let extracted = if parser_v3_enabled {
+                extract_resume_content_from_bytes(file_name, content, enable_ocr)?
+            } else {
+                let (text, ocr_used, extension) =
+                    extract_resume_text_from_bytes(file_name, content, enable_ocr)?;
+                ResumeTextExtraction {
+                    canonical_markdown: text.clone(),
+                    plain_text: text,
+                    extension,
+                    ocr_used,
+                    warnings: Vec::new(),
+                    content_format: "plain".to_string(),
+                }
+            };
+
+            raw_text = extracted.canonical_markdown.clone();
+            let mut parsed =
+                parse_resume_text_v2(&extracted.plain_text, &source, extracted.ocr_used, None);
+            parsed.parse_meta.content_format = extracted.content_format;
+            parsed.parse_meta.source_extension = Some(extracted.extension);
+            parsed.parse_meta.warnings = extracted.warnings;
+            parsed_value = Some(parsed.to_value());
+        }
+    }
+
+    let parsed_value = parsed_value
         .unwrap_or_else(|| parse_resume_text_v2(&raw_text, &source, false, None).to_value());
     let parsed_json = parsed_value.to_string();
 
@@ -1848,18 +1903,8 @@ pub(crate) fn upsert_resume(
     )
     .map_err(|error| error.to_string())?;
 
-    if let Some(original_file) = input.original_file.as_ref() {
-        let content = BASE64_STANDARD
-            .decode(original_file.content_base64.trim())
-            .map_err(|error| error.to_string())?;
-        let file_name = original_file.file_name.trim();
-        if !file_name.is_empty() && !content.is_empty() {
-            let content_type = original_file
-                .content_type
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string);
+    if let Some((file_name, content_type, content)) = decoded_original_file.as_ref() {
+        if !file_name.trim().is_empty() && !content.is_empty() {
             conn.execute(
                 r#"
                 INSERT INTO resume_files(candidate_id, file_name, content_type, content_blob, created_at, updated_at)
@@ -1874,7 +1919,7 @@ pub(crate) fn upsert_resume(
                 params![
                     input.candidate_id,
                     file_name,
-                    content_type,
+                    content_type.clone(),
                     content,
                     now,
                     now,
@@ -2012,8 +2057,8 @@ where
     min_years = min_years.max((required_skills.len() as f64 / 2.0).floor());
 
     let compensation_score = if let Some(max) = max_salary {
-        let expected =
-            expected_salary_k_from_parsed_json(&materialized_resume.parsed_value).unwrap_or(max - 5.0);
+        let expected = expected_salary_k_from_parsed_json(&materialized_resume.parsed_value)
+            .unwrap_or(max - 5.0);
         clamp_score((80.0 + (max - expected) * 3.0) as i32)
     } else {
         75
@@ -2128,6 +2173,8 @@ where
         .or(read_resume_attachment(&conn, input.candidate_id)?);
     let provider_name = ai_settings.provider.as_db().to_string();
     let model_name = ai_settings.model.clone();
+    let input_mode =
+        planned_resume_input_mode(&ai_settings, resume_attachment.as_ref()).to_string();
     on_progress(analysis_progress_update(
         "ai",
         "running",
@@ -2197,6 +2244,7 @@ where
                 "model": model_name,
                 "generatedAt": now_iso(),
                 "mode": "cloud",
+                "input_mode": input_mode,
                 "confidence": payload.confidence,
             }),
         ),
@@ -2207,6 +2255,7 @@ where
                 "model": model_name,
                 "generatedAt": now_iso(),
                 "mode": "fallback",
+                "input_mode": input_mode,
                 "fallbackReason": reason,
             }),
         ),
@@ -2426,21 +2475,22 @@ pub(crate) fn list_analysis(
             let evidence_text: String = row.get(8)?;
             let model_info_text: String = row.get(9)?;
 
-            let dimension_scores: Vec<DimensionScore> =
-                serde_json::from_str(&dimension_text).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    4,
-                    rusqlite::types::Type::Text,
-                    Box::new(error),
-                )
-            })?;
-            let evidence: Vec<EvidenceItem> = serde_json::from_str(&evidence_text).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    8,
-                    rusqlite::types::Type::Text,
-                    Box::new(error),
-                )
-            })?;
+            let dimension_scores: Vec<DimensionScore> = serde_json::from_str(&dimension_text)
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+            let evidence: Vec<EvidenceItem> =
+                serde_json::from_str(&evidence_text).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
             let model_info = serde_json::from_str(&model_info_text).map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
                     9,

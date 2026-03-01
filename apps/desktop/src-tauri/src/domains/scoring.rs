@@ -7,18 +7,18 @@ use tauri::{AppHandle, Emitter, State};
 use crate::core::state::AppState;
 use crate::core::time::now_iso;
 use crate::domains::ai_runtime::{
-    invoke_text_generation, model_supports_file_upload, parse_json_from_text, resolve_ai_settings,
-    trim_resume_excerpt,
-};
-use crate::domains::resume_materializer::ensure_resume_materialized;
-use crate::domains::resume_parser::{
-    expected_salary_k_from_parsed_json, parse_skills_from_parsed_json,
-    project_mentions_from_parsed_json,
+    invoke_text_generation, model_supports_file_upload_for_attachment, parse_json_from_text,
+    resolve_ai_settings, trim_resume_excerpt,
 };
 use crate::domains::jobs::read_job_by_id;
 use crate::domains::recruiting_utils::{
     clamp_score, dimension_signal_score, parse_job_required_skills, parse_job_salary_max,
     round_one_decimal,
+};
+use crate::domains::resume_materializer::ensure_resume_materialized;
+use crate::domains::resume_parser::{
+    expected_salary_k_from_parsed_json, parse_skills_from_parsed_json,
+    project_mentions_from_parsed_json,
 };
 use crate::infra::audit::write_audit;
 use crate::infra::db::open_connection;
@@ -1218,12 +1218,8 @@ fn invoke_text_generation_map_reduce(
             "requiredSkills": ctx.required_skills,
             "chunkText": chunk,
         });
-        let map_text = invoke_text_generation(
-            settings,
-            map_system_prompt,
-            &map_payload.to_string(),
-            None,
-        )?;
+        let map_text =
+            invoke_text_generation(settings, map_system_prompt, &map_payload.to_string(), None)?;
         let map_value = parse_json_from_text(&map_text)?;
         mapped_rows.push(map_value);
     }
@@ -1374,7 +1370,10 @@ where
             None,
         ));
         let (system_prompt, user_prompt) = build_scoring_prompts(&template, &ctx);
-        let ai_result = if model_supports_file_upload(&ai_settings) && resume_attachment.is_some() {
+        let ai_result = if model_supports_file_upload_for_attachment(
+            &ai_settings,
+            resume_attachment.as_ref(),
+        ) {
             match invoke_text_generation(
                 &ai_settings,
                 &system_prompt,

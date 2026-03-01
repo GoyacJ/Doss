@@ -17,11 +17,11 @@ use domains::ai_settings::{
     upsert_ai_provider_settings, upsert_task_runtime_settings,
 };
 use domains::candidate::{
-    create_candidate, delete_candidate, list_analysis, list_candidates, list_candidates_page,
-    delete_resume, get_resume,
-    list_decision_candidates_page, list_interview_candidates_page, list_pending_candidates, list_pipeline_events,
-    merge_candidate_import, move_candidate_stage, set_candidate_qualification, sync_pending_candidate_to_candidate,
-    update_candidate, upsert_pending_candidates, upsert_resume,
+    create_candidate, delete_candidate, delete_resume, get_resume, list_analysis, list_candidates,
+    list_candidates_page, list_decision_candidates_page, list_interview_candidates_page,
+    list_pending_candidates, list_pipeline_events, merge_candidate_import, move_candidate_stage,
+    set_candidate_qualification, sync_pending_candidate_to_candidate, update_candidate,
+    upsert_pending_candidates, upsert_resume,
 };
 use domains::crawl_task::{
     create_crawl_task, delete_crawl_task, list_crawl_task_people, list_crawl_tasks,

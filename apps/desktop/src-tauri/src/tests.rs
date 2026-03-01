@@ -4,22 +4,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::app::bootstrap::{generate_system_local_key, normalize_local_key};
 use crate::core::cipher::FieldCipher;
 use crate::domains::ai_runtime::{
-    extract_json_object_block, normalize_task_runtime_settings, parse_ai_provider_response,
-    parse_minimax_content,
+    extract_json_object_block, model_supports_file_upload_for_attachment,
+    normalize_task_runtime_settings, parse_ai_provider_response, parse_minimax_content,
+    TextGenerationAttachment,
 };
 use crate::domains::candidate::build_order_by_from_rules;
 use crate::domains::jobs::count_active_crawl_tasks_for_job;
+use crate::domains::resume_parser::{extract_docx_xml_text, extract_resume_content_from_bytes};
 use crate::domains::screening::{
     build_structured_resume_fields, calculate_screening_overall_score_100,
     calculate_screening_overall_score_5, count_jobs_using_screening_template,
     create_global_screening_template_internal, delete_global_screening_template_internal,
-    derive_screening_recommendation, evaluate_interview_feedback_payload, extract_docx_xml_text,
+    derive_screening_recommendation, evaluate_interview_feedback_payload,
     normalize_screening_comment, normalize_screening_dimensions, resolve_screening_template,
 };
 use crate::domains::search::build_fts_match_query;
 use crate::domains::sidecar_runtime::{sidecar_base_url, sidecar_port_candidates};
 use crate::infra::db::migrate_db;
-use crate::models::ai::TaskRuntimeSettings;
+use crate::models::ai::{ResolvedAiProviderSettings, TaskRuntimeSettings};
 use crate::models::candidate::SortRule;
 use crate::models::common::{is_valid_transition, resolve_qualification_stage, AiProvider};
 use crate::models::screening::ScreeningDimension;
@@ -180,6 +182,66 @@ fn extract_docx_xml_text_collects_runs() {
     let text = extract_docx_xml_text(xml.as_bytes()).expect("extract docx xml");
     assert!(text.contains("张三"));
     assert!(text.contains("5年Vue开发经验"));
+}
+
+#[test]
+fn extract_docx_xml_text_preserves_table_structure() {
+    let xml = r#"
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:tbl>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>姓名</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>技能</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>李四</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>Rust</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+  </w:body>
+</w:document>
+"#;
+    let text = extract_docx_xml_text(xml.as_bytes()).expect("extract docx table xml");
+    assert!(text.contains("| 姓名 | 技能 |"));
+    assert!(text.contains("| 李四 | Rust |"));
+}
+
+#[test]
+fn extract_resume_content_from_csv_returns_markdown_table() {
+    let csv = "姓名,技能,年限\n王五,Vue,6\n";
+    let extracted =
+        extract_resume_content_from_bytes("resume.csv", csv.as_bytes(), false).expect("csv parse");
+    assert_eq!(extracted.content_format, "table");
+    assert!(extracted
+        .canonical_markdown
+        .contains("| 姓名 | 技能 | 年限 |"));
+    assert!(extracted.canonical_markdown.contains("| 王五 | Vue | 6 |"));
+}
+
+#[test]
+fn doubao_file_upload_is_pdf_only() {
+    let settings = ResolvedAiProviderSettings {
+        provider: AiProvider::Doubao,
+        model: "doubao-seed-1-6-250615".to_string(),
+        base_url: "https://ark.cn-beijing.volces.com/api/v3".to_string(),
+        api_key: Some("test-key".to_string()),
+        temperature: 0.2,
+        max_tokens: 1000,
+        timeout_secs: 20,
+        retry_count: 1,
+    };
+    let pdf = TextGenerationAttachment::from_text("resume.pdf", "hello");
+    let docx = TextGenerationAttachment::from_text("resume.docx", "hello");
+
+    assert!(model_supports_file_upload_for_attachment(
+        &settings,
+        Some(&pdf)
+    ));
+    assert!(!model_supports_file_upload_for_attachment(
+        &settings,
+        Some(&docx)
+    ));
 }
 
 #[test]

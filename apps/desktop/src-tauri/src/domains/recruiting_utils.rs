@@ -249,7 +249,10 @@ pub(crate) fn build_generated_interview_questions(
                 "问题拆解完整，优先级清晰".to_string(),
                 "有工程落地和风险兜底意识".to_string(),
             ],
-            red_flags: vec!["只讲理念，不给执行路径".to_string(), "忽略风险与兜底机制".to_string()],
+            red_flags: vec![
+                "只讲理念，不给执行路径".to_string(),
+                "忽略风险与兜底机制".to_string(),
+            ],
         });
     }
 
@@ -314,7 +317,13 @@ pub(crate) fn evaluate_interview_feedback_payload(
     let normalized_scores = raw_scores
         .into_iter()
         .filter(|value| value.is_finite())
-        .map(|value| if value > 0.0 && value <= 1.0 { value * 5.0 } else { value })
+        .map(|value| {
+            if value > 0.0 && value <= 1.0 {
+                value * 5.0
+            } else {
+                value
+            }
+        })
         .map(|value| value.clamp(0.0, 5.0))
         .collect::<Vec<_>>();
     let score_count = normalized_scores.len();

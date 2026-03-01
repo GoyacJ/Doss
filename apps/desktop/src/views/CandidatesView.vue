@@ -273,7 +273,7 @@ const genderOptions = [
   { value: "other", label: "其他" },
 ];
 
-const resumeAccept = ".pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.bmp,.tif,.tiff";
+const resumeAccept = ".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.md,.png,.jpg,.jpeg,.bmp,.tif,.tiff";
 const selectedResumeFileName = computed(() => createResumeFile.value?.name || "");
 const hasDetailResumeSelection = computed(() => Boolean(detailResumeFile.value?.name));
 const hasDetailPersistedResume = computed(() => Boolean(detailPersistedResumeFileName.value));
@@ -1128,7 +1128,7 @@ onUnmounted(() => {
             <input v-model="createForm.tagsText" placeholder="例如：Vue, TypeScript, 稳定" />
           </UiField>
 
-          <UiField class="mt-2.5" label="简历上传" help="支持 .pdf .docx .txt .md 以及图片格式">
+          <UiField class="mt-2.5" label="简历上传" help="支持 .pdf/.doc/.docx/.xls/.xlsx/.csv/.txt/.md 及图片；模型不支持直传时会自动解析">
             <input
               ref="createResumeInput"
               type="file"
@@ -1249,7 +1249,7 @@ onUnmounted(() => {
             <UiField class="col-span-2 lt-lg:col-span-1" label="标签" help="多个标签可用英文逗号、中文逗号或换行分隔">
               <input v-model="detailForm.tagsText" :disabled="savingDetail" placeholder="例如：Vue, TypeScript, 稳定" />
             </UiField>
-            <UiField class="col-span-2 lt-lg:col-span-1" label="简历上传" help="支持 .pdf .docx .txt .md 以及图片格式">
+            <UiField class="col-span-2 lt-lg:col-span-1" label="简历上传" help="支持 .pdf/.doc/.docx/.xls/.xlsx/.csv/.txt/.md 及图片；模型不支持直传时会自动解析">
               <div class="relative">
                 <input
                   ref="detailResumeInput"

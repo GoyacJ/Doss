@@ -2,9 +2,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub(crate) const RESUME_SCHEMA_VERSION_V2: i32 = 2;
-pub(crate) const RESUME_PARSER_VERSION: &str = "resume-parser-v2";
+pub(crate) const RESUME_PARSER_VERSION: &str = "resume-parser-v3";
+
+fn default_resume_content_format() -> String {
+    "plain".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub(crate) struct ResumeParseMeta {
     pub(crate) parser_version: String,
     pub(crate) parsed_at: String,
@@ -12,6 +17,10 @@ pub(crate) struct ResumeParseMeta {
     pub(crate) ocr_used: bool,
     pub(crate) text_length: usize,
     pub(crate) section_count: usize,
+    #[serde(default = "default_resume_content_format")]
+    pub(crate) content_format: String,
+    pub(crate) source_extension: Option<String>,
+    pub(crate) warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -85,6 +94,7 @@ pub(crate) struct ResumeDerivedMetrics {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub(crate) struct ResumeParsedV2 {
     pub(crate) schema_version: i32,
     pub(crate) parse_meta: ResumeParseMeta,

@@ -110,6 +110,7 @@ export function createAnalysisContextModule(deps: AnalysisContextDeps) {
     candidate_id: number;
     raw_text?: string;
     parsed?: Record<string, unknown>;
+    enable_ocr?: boolean;
     job_id?: number;
     source?: SourceType;
     original_file?: {
@@ -189,6 +190,7 @@ export function createAnalysisContextModule(deps: AnalysisContextDeps) {
     await saveResume({
       candidate_id: payload.candidateId,
       job_id: payload.jobId,
+      enable_ocr: payload.enableOcr,
       original_file: {
         file_name: payload.file.name,
         content_base64: contentBase64,
@@ -209,6 +211,7 @@ export function createAnalysisContextModule(deps: AnalysisContextDeps) {
     await deps.upsertResume({
       candidate_id: payload.candidateId,
       source: "manual",
+      enable_ocr: payload.enableOcr,
       original_file: {
         file_name: payload.file.name,
         content_base64: contentBase64,

@@ -96,6 +96,7 @@ pub(crate) struct UpsertResumeInput {
     pub(crate) source: Option<SourceType>,
     pub(crate) raw_text: Option<String>,
     pub(crate) parsed: Option<Value>,
+    pub(crate) enable_ocr: Option<bool>,
     pub(crate) original_file: Option<ResumeOriginalFileInput>,
 }
 

@@ -33,3 +33,6 @@ reqwest = { version = "0.12.24", default-features = false, features = ["blocking
 regex = "1.12.2"
 zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 pdf-extract = "0.7.12"
+quick-xml = "0.38.3"
+calamine = "0.31.0"
+csv = "1.4.0"

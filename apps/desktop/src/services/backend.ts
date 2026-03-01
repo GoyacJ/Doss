@@ -102,6 +102,7 @@ export interface UpsertResumePayload {
   source?: SourceType;
   raw_text?: string;
   parsed?: Record<string, unknown>;
+  enable_ocr?: boolean;
   original_file?: {
     file_name: string;
     content_base64: string;

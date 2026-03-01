@@ -5,9 +5,9 @@ pub mod crawl_task;
 pub mod hiring;
 pub mod interview;
 pub mod jobs;
+pub mod recruiting_utils;
 pub mod resume_materializer;
 pub mod resume_parser;
-pub mod recruiting_utils;
 pub mod scoring;
 #[cfg(test)]
 pub mod screening;

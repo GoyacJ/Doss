@@ -5,20 +5,20 @@ use reqwest::blocking::{
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
-use std::time::{Duration, Instant};
 #[cfg(test)]
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use crate::core::cipher::FieldCipher;
 use crate::core::error::{AppError, AppResult};
 use crate::core::time::now_iso;
+#[cfg(test)]
+use crate::models::ai::{AiAnalysisPayload, AiPromptContext, DimensionScore, EvidenceItem};
 use crate::models::ai::{
     AiProviderProfileView, AiProviderSettingsView, ResolvedAiProviderSettings,
     StoredAiProviderProfile, StoredAiProviderProfiles, StoredAiProviderSettings,
     TaskRuntimeSettings, UpsertAiProviderSettingsInput,
 };
-#[cfg(test)]
-use crate::models::ai::{AiAnalysisPayload, AiPromptContext, DimensionScore, EvidenceItem};
 use crate::models::common::AiProvider;
 
 #[cfg(test)]
@@ -885,6 +885,7 @@ impl TextGenerationAttachment {
 enum FileInputMode {
     OpenAiContentFile,
     QwenFileId,
+    DoubaoResponsesFile,
 }
 
 fn normalize_upload_file_name(file_name: &str) -> String {
@@ -910,8 +911,24 @@ fn normalize_upload_file_name(file_name: &str) -> String {
     }
 }
 
-fn provider_file_input_mode(settings: &ResolvedAiProviderSettings) -> Option<FileInputMode> {
+fn attachment_extension(attachment: Option<&TextGenerationAttachment>) -> Option<String> {
+    let file_name = attachment?.file_name.trim();
+    if file_name.is_empty() {
+        return None;
+    }
+    std::path::Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty())
+}
+
+fn provider_file_input_mode(
+    settings: &ResolvedAiProviderSettings,
+    attachment: Option<&TextGenerationAttachment>,
+) -> Option<FileInputMode> {
     let model = settings.model.trim().to_lowercase();
+    let extension = attachment_extension(attachment);
     match settings.provider {
         AiProvider::OpenApi => {
             let allowlist = [
@@ -932,13 +949,44 @@ fn provider_file_input_mode(settings: &ResolvedAiProviderSettings) -> Option<Fil
         AiProvider::Qwen => model
             .contains("qwen-long")
             .then_some(FileInputMode::QwenFileId)
-            .or_else(|| model.contains("qwen-doc").then_some(FileInputMode::QwenFileId)),
+            .or_else(|| {
+                model
+                    .contains("qwen-doc")
+                    .then_some(FileInputMode::QwenFileId)
+            }),
+        AiProvider::Doubao => {
+            if extension.as_deref() == Some("pdf") {
+                Some(FileInputMode::DoubaoResponsesFile)
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn model_supports_file_upload(settings: &ResolvedAiProviderSettings) -> bool {
-    provider_file_input_mode(settings).is_some()
+    provider_file_input_mode(settings, None).is_some()
+}
+
+pub(crate) fn model_supports_file_upload_for_attachment(
+    settings: &ResolvedAiProviderSettings,
+    attachment: Option<&TextGenerationAttachment>,
+) -> bool {
+    provider_file_input_mode(settings, attachment).is_some()
+}
+
+#[allow(dead_code)]
+pub(crate) fn planned_resume_input_mode(
+    settings: &ResolvedAiProviderSettings,
+    attachment: Option<&TextGenerationAttachment>,
+) -> &'static str {
+    if model_supports_file_upload_for_attachment(settings, attachment) {
+        "direct_file"
+    } else {
+        "parsed_text"
+    }
 }
 
 fn provider_file_upload_purpose(settings: &ResolvedAiProviderSettings) -> &'static str {
@@ -1103,6 +1151,25 @@ pub(crate) fn ensure_minimax_endpoint(base_url: &str) -> String {
     }
 }
 
+fn ensure_responses_endpoint(base_url: &str) -> String {
+    let normalized = base_url.trim().trim_end_matches('/');
+    if normalized.ends_with("/responses") {
+        normalized.to_string()
+    } else if normalized.ends_with("/chat/completions") {
+        format!(
+            "{}/responses",
+            normalized.trim_end_matches("/chat/completions")
+        )
+    } else if normalized.ends_with("/text/chatcompletion_v2") {
+        format!(
+            "{}/responses",
+            normalized.trim_end_matches("/text/chatcompletion_v2")
+        )
+    } else {
+        format!("{normalized}/responses")
+    }
+}
+
 pub(crate) fn parse_openai_content(response: &Value) -> Option<String> {
     if let Some(content) = response
         .pointer("/choices/0/message/content")
@@ -1122,6 +1189,89 @@ pub(crate) fn parse_openai_content(response: &Value) -> Option<String> {
                 .join("")
         })
         .filter(|value| !value.trim().is_empty())
+}
+
+fn parse_responses_content(response: &Value) -> Option<String> {
+    if let Some(content) = response
+        .get("output_text")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(content.to_string());
+    }
+
+    let output = response.get("output").and_then(|value| value.as_array())?;
+    let mut chunks = Vec::<String>::new();
+    for item in output {
+        let Some(content_array) = item.get("content").and_then(|value| value.as_array()) else {
+            continue;
+        };
+        for content in content_array {
+            if let Some(text) = content
+                .get("text")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                chunks.push(text.to_string());
+            }
+        }
+    }
+
+    if chunks.is_empty() {
+        None
+    } else {
+        Some(chunks.join("\n"))
+    }
+}
+
+fn call_doubao_responses_with_file(
+    client: &Client,
+    settings: &ResolvedAiProviderSettings,
+    system_prompt: &str,
+    user_prompt: &str,
+    file_id: &str,
+) -> Result<String, String> {
+    let endpoint = ensure_responses_endpoint(&settings.base_url);
+    let api_key = settings
+        .api_key
+        .as_ref()
+        .ok_or_else(|| "provider_api_key_missing".to_string())?;
+
+    let response = client
+        .post(endpoint)
+        .bearer_auth(api_key)
+        .json(&serde_json::json!({
+            "model": settings.model,
+            "instructions": system_prompt,
+            "max_output_tokens": settings.max_tokens,
+            "temperature": settings.temperature,
+            "input": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_file", "file_id": file_id},
+                    {"type": "input_text", "text": user_prompt}
+                ]
+            }]
+        }))
+        .send()
+        .map_err(|error| error.to_string())?;
+
+    let status = response.status();
+    let body_text = response.text().map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        return Err(format!(
+            "provider_http_{}: {}",
+            status.as_u16(),
+            trim_resume_excerpt(&body_text, 300)
+        ));
+    }
+
+    let body_json = serde_json::from_str::<Value>(&body_text).map_err(|error| error.to_string())?;
+    parse_responses_content(&body_json)
+        .or_else(|| parse_openai_content(&body_json))
+        .ok_or_else(|| "provider_response_content_missing".to_string())
 }
 
 pub(crate) fn parse_minimax_content(response: &Value) -> Result<String, String> {
@@ -1178,7 +1328,8 @@ pub(crate) fn call_openai_compatible_provider(
     ];
 
     let mut used_file_payload = false;
-    let messages = if let Some(mode) = provider_file_input_mode(settings) {
+    let mut file_fallback_reason: Option<String> = None;
+    let messages = if let Some(mode) = provider_file_input_mode(settings, attachment) {
         if let Some(file) = attachment.filter(|item| !item.bytes.is_empty()) {
             match upload_text_attachment_file(client, settings, file) {
                 Ok(file_id) => {
@@ -1207,9 +1358,27 @@ pub(crate) fn call_openai_compatible_provider(
                             serde_json::json!({"role": "system", "content": format!("fileid://{file_id}")}),
                             serde_json::json!({"role": "user", "content": user_prompt}),
                         ],
+                        FileInputMode::DoubaoResponsesFile => {
+                            match call_doubao_responses_with_file(
+                                client,
+                                settings,
+                                system_prompt,
+                                user_prompt,
+                                &file_id,
+                            ) {
+                                Ok(content) => return Ok(content),
+                                Err(error) => {
+                                    file_fallback_reason = Some(error);
+                                    fallback_messages.clone()
+                                }
+                            }
+                        }
                     }
                 }
-                Err(_) => fallback_messages.clone(),
+                Err(error) => {
+                    file_fallback_reason = Some(error);
+                    fallback_messages.clone()
+                }
             }
         } else {
             fallback_messages.clone()
@@ -1248,7 +1417,10 @@ pub(crate) fn call_openai_compatible_provider(
 
     match send_chat(&messages) {
         Ok(content) => Ok(content),
-        Err(error) if used_file_payload => send_chat(&fallback_messages).or(Err(error)),
+        Err(error) if used_file_payload => send_chat(&fallback_messages).or(Err(format!(
+            "direct_file_failed: {}",
+            file_fallback_reason.unwrap_or(error)
+        ))),
         Err(error) => Err(error),
     }
 }
