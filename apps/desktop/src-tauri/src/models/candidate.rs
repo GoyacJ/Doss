@@ -228,3 +228,107 @@ pub(crate) struct SyncPendingCandidateInput {
     pub(crate) pending_candidate_id: i64,
     pub(crate) run_screening: Option<bool>,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PreviewResumeProfileInput {
+    pub(crate) file_name: String,
+    pub(crate) content_base64: String,
+    pub(crate) content_type: Option<String>,
+    pub(crate) enable_ocr: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ResumeProfileFieldText {
+    pub(crate) value: String,
+    pub(crate) confidence: f64,
+    pub(crate) confidence_level: String,
+    pub(crate) evidences: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ResumeProfileFieldNumber {
+    pub(crate) value: f64,
+    pub(crate) confidence: f64,
+    pub(crate) confidence_level: String,
+    pub(crate) evidences: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ResumeProfileFieldInt {
+    pub(crate) value: i32,
+    pub(crate) confidence: f64,
+    pub(crate) confidence_level: String,
+    pub(crate) evidences: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ResumeProfilePreviewExtracted {
+    pub(crate) name: Option<ResumeProfileFieldText>,
+    pub(crate) current_company: Option<ResumeProfileFieldText>,
+    pub(crate) years_of_experience: Option<ResumeProfileFieldNumber>,
+    pub(crate) age: Option<ResumeProfileFieldInt>,
+    pub(crate) gender: Option<ResumeProfileFieldText>,
+    pub(crate) address: Option<ResumeProfileFieldText>,
+    pub(crate) phone: Option<ResumeProfileFieldText>,
+    pub(crate) email: Option<ResumeProfileFieldText>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ResumeProfilePreview {
+    pub(crate) full_text: String,
+    pub(crate) extracted: ResumeProfilePreviewExtracted,
+    pub(crate) warnings: Vec<String>,
+    pub(crate) content_format: String,
+    pub(crate) source_extension: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PendingSyncMode {
+    Single,
+    Multi,
+    Filtered,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PendingSyncRunInput {
+    pub(crate) mode: PendingSyncMode,
+    pub(crate) pending_candidate_id: Option<i64>,
+    pub(crate) pending_candidate_ids: Option<Vec<i64>>,
+    pub(crate) filter: Option<PendingCandidateListQuery>,
+    pub(crate) run_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PendingSyncItemResult {
+    pub(crate) pending_candidate_id: i64,
+    pub(crate) status: String,
+    pub(crate) candidate_id: Option<i64>,
+    pub(crate) error_code: Option<String>,
+    pub(crate) error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PendingSyncRunResult {
+    pub(crate) run_id: String,
+    pub(crate) total: i64,
+    pub(crate) completed: i64,
+    pub(crate) success: i64,
+    pub(crate) failed: i64,
+    pub(crate) outcomes: Vec<PendingSyncItemResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingSyncProgressEventPayload {
+    pub(crate) run_id: String,
+    pub(crate) total: i64,
+    pub(crate) completed: i64,
+    pub(crate) success: i64,
+    pub(crate) failed: i64,
+    pub(crate) current_pending_candidate_id: Option<i64>,
+    pub(crate) current_candidate_id: Option<i64>,
+    pub(crate) current_status: Option<String>,
+    pub(crate) message: String,
+    pub(crate) at: String,
+}

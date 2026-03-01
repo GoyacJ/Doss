@@ -363,7 +363,7 @@ const transitionMap: Record<PipelineStage, PipelineStage[]> = {
   SCREENING: ["INTERVIEW", "HOLD", "REJECTED"],
   INTERVIEW: ["HOLD", "REJECTED", "OFFERED"],
   HOLD: ["SCREENING", "INTERVIEW", "REJECTED"],
-  REJECTED: [],
+  REJECTED: ["NEW", "SCREENING", "INTERVIEW", "HOLD", "OFFERED"],
   OFFERED: [],
 };
 

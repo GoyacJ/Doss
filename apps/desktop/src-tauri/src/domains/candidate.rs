@@ -4,7 +4,6 @@ use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, O
 use serde::Serialize;
 use serde_json::Value;
 use tauri::State;
-#[cfg(test)]
 use tauri::{AppHandle, Emitter};
 
 use crate::core::cipher::FieldCipher;
@@ -26,9 +25,12 @@ use crate::domains::resume_parser::{
     expected_salary_k_from_parsed_json, parse_skills_from_parsed_json,
 };
 use crate::domains::resume_parser::{
-    extract_resume_content_from_bytes, extract_resume_text_from_bytes, parse_resume_text_v2,
-    resume_parser_v3_enabled, ResumeTextExtraction,
+    extract_resume_content_from_bytes, extract_resume_profile_fields,
+    extract_resume_text_from_bytes, parse_resume_text_v2, resume_parser_v3_enabled,
+    ResumeTextExtraction,
 };
+use crate::domains::scoring::run_candidate_ai_analysis_silent;
+use crate::domains::sidecar_runtime::try_crawl_resume_for_pending_sync;
 use crate::infra::audit::write_audit;
 use crate::infra::db::open_connection;
 use crate::infra::search_index::sync_candidate_search;
@@ -38,7 +40,9 @@ use crate::models::ai::{AnalysisRecord, DimensionScore, EvidenceItem};
 use crate::models::candidate::{
     Candidate, CandidateListQuery, DecisionListQuery, InterviewListQuery,
     MergeCandidateImportInput, MoveStageInput, NewCandidateInput, PendingCandidate,
-    PendingCandidateListQuery, PipelineEvent, ResumeRecord, SetCandidateQualificationInput,
+    PendingCandidateListQuery, PendingSyncItemResult, PendingSyncMode,
+    PendingSyncProgressEventPayload, PendingSyncRunInput, PendingSyncRunResult, PipelineEvent,
+    PreviewResumeProfileInput, ResumeProfilePreview, ResumeRecord, SetCandidateQualificationInput,
     SortRule, SyncPendingCandidateInput, UpdateCandidateInput, UpsertPendingCandidatesInput,
     UpsertResumeInput,
 };
@@ -46,9 +50,11 @@ use crate::models::common::{
     is_valid_transition, resolve_qualification_stage, PageResult, PipelineStage, SourceType,
 };
 use crate::models::resume::ResumeParsedV2;
+use crate::models::scoring::RunCandidateScoringInput;
 
 #[cfg(test)]
 const ANALYSIS_PROGRESS_EVENT: &str = "candidate-analysis-progress";
+const PENDING_SYNC_PROGRESS_EVENT: &str = "pending-ai-sync-progress";
 
 #[cfg(test)]
 #[derive(Debug, Clone)]
@@ -119,6 +125,10 @@ fn emit_analysis_progress(
 ) {
     let payload = to_analysis_progress_payload(run_id, candidate_id, update);
     let _ = app_handle.emit(ANALYSIS_PROGRESS_EVENT, payload);
+}
+
+fn emit_pending_sync_progress(app_handle: &AppHandle, payload: PendingSyncProgressEventPayload) {
+    let _ = app_handle.emit(PENDING_SYNC_PROGRESS_EVENT, payload);
 }
 
 pub(crate) fn merge_candidate_tags(existing: &[String], incoming: &[String]) -> Vec<String> {
@@ -1338,8 +1348,15 @@ pub(crate) fn list_pending_candidates(
 }
 
 #[tauri::command]
-pub(crate) fn sync_pending_candidate_to_candidate(
+pub(crate) fn list_pending_candidates_page(
     state: State<'_, AppState>,
+    input: Option<PendingCandidateListQuery>,
+) -> Result<PageResult<PendingCandidate>, String> {
+    list_pending_candidates(state, input)
+}
+
+fn sync_pending_candidate_to_candidate_inner(
+    state: &AppState,
     input: SyncPendingCandidateInput,
 ) -> Result<Candidate, String> {
     let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
@@ -1484,7 +1501,7 @@ pub(crate) fn sync_pending_candidate_to_candidate(
                 score, age, gender, years_of_experience, address, stage,
                 phone_enc, phone_hash, email_enc, email_hash, tags_json, created_at, updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, 'NEW', ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, 'SCREENING', ?11, ?12, ?13, ?14, ?15, ?16, ?17)
             "#,
             params![
                 pending.2,
@@ -1509,6 +1526,12 @@ pub(crate) fn sync_pending_candidate_to_candidate(
         .map_err(|error| error.to_string())?;
         conn.last_insert_rowid()
     };
+
+    conn.execute(
+        "UPDATE candidates SET stage = 'SCREENING', updated_at = ?1 WHERE id = ?2",
+        params![now, candidate_id],
+    )
+    .map_err(|error| error.to_string())?;
 
     if let Some(job_id) = pending.5 {
         let stage_text: String = conn
@@ -1581,6 +1604,276 @@ pub(crate) fn sync_pending_candidate_to_candidate(
     .map_err(|error| error.to_string())?;
 
     Ok(candidate)
+}
+
+#[tauri::command]
+pub(crate) fn sync_pending_candidate_to_candidate(
+    state: State<'_, AppState>,
+    input: SyncPendingCandidateInput,
+) -> Result<Candidate, String> {
+    sync_pending_candidate_to_candidate_inner(state.inner(), input)
+}
+
+fn pending_ids_for_sync(
+    conn: &Connection,
+    input: &PendingSyncRunInput,
+) -> Result<Vec<i64>, String> {
+    match input.mode {
+        PendingSyncMode::Single => {
+            let id = input
+                .pending_candidate_id
+                .ok_or_else(|| "pending_candidate_id_required".to_string())?;
+            Ok(vec![id])
+        }
+        PendingSyncMode::Multi => Ok(input
+            .pending_candidate_ids
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| *item > 0)
+            .collect()),
+        PendingSyncMode::Filtered => {
+            let mut where_clauses = Vec::<String>::new();
+            let mut params = Vec::<SqlValue>::new();
+            if let Some(filter) = input.filter.as_ref() {
+                if let Some(sync_status) = filter
+                    .sync_status
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    where_clauses.push("sync_status = ?".to_string());
+                    params.push(SqlValue::Text(sync_status.to_uppercase()));
+                }
+                if let Some(name_like) = filter
+                    .name_like
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    where_clauses.push("name LIKE ?".to_string());
+                    params.push(SqlValue::Text(format!("%{name_like}%")));
+                }
+                if let Some(job_id) = filter.job_id {
+                    where_clauses.push("linked_job_id = ?".to_string());
+                    params.push(SqlValue::Integer(job_id));
+                }
+            }
+            let where_sql = if where_clauses.is_empty() {
+                String::new()
+            } else {
+                format!(" WHERE {}", where_clauses.join(" AND "))
+            };
+            let sql = format!(
+                "SELECT id FROM pending_candidates{where_sql} ORDER BY updated_at DESC, id DESC"
+            );
+            let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
+            let rows = stmt
+                .query_map(params_from_iter(params.iter()), |row| row.get::<_, i64>(0))
+                .map_err(|error| error.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())
+        }
+    }
+}
+
+fn parse_sidecar_resume_payload(payload: &Value) -> (Option<String>, Option<Value>) {
+    let root = payload.get("output").unwrap_or(payload);
+    let raw_text = root
+        .get("raw_text")
+        .or_else(|| root.get("rawText"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let parsed = root
+        .get("parsed")
+        .or_else(|| root.get("resumeParsed"))
+        .filter(|value| value.is_object() || value.is_array())
+        .cloned();
+    (raw_text, parsed)
+}
+
+#[tauri::command]
+pub(crate) async fn run_pending_candidates_ai_sync(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    input: PendingSyncRunInput,
+) -> Result<PendingSyncRunResult, String> {
+    let run_id = input
+        .run_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("pending-ai-sync-{}", now_iso()));
+    let app_state = state.inner().clone();
+    let app_handle_for_task = app_handle.clone();
+    let run_id_for_task = run_id.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_connection(&app_state.db_path).map_err(|error| error.to_string())?;
+        let pending_ids = pending_ids_for_sync(&conn, &input)?;
+        let total = pending_ids.len() as i64;
+        let mut completed = 0_i64;
+        let mut success = 0_i64;
+        let mut failed = 0_i64;
+        let mut outcomes = Vec::<PendingSyncItemResult>::new();
+
+        emit_pending_sync_progress(
+            &app_handle_for_task,
+            PendingSyncProgressEventPayload {
+                run_id: run_id_for_task.clone(),
+                total,
+                completed,
+                success,
+                failed,
+                current_pending_candidate_id: None,
+                current_candidate_id: None,
+                current_status: Some("RUNNING".to_string()),
+                message: format!("开始 AI 同步，共 {total} 条待定人"),
+                at: now_iso(),
+            },
+        );
+
+        for pending_id in pending_ids {
+            let mut current_candidate_id: Option<i64> = None;
+            let item_result = (|| -> Result<PendingSyncItemResult, String> {
+                let conn =
+                    open_connection(&app_state.db_path).map_err(|error| error.to_string())?;
+                let pending_row = conn
+                    .query_row(
+                        "SELECT source, external_id FROM pending_candidates WHERE id = ?1",
+                        [pending_id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                    )
+                    .optional()
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("Pending candidate {pending_id} not found"))?;
+
+                if let Some(external_id) = pending_row.1.as_deref() {
+                    if let Ok(sidecar_payload) =
+                        try_crawl_resume_for_pending_sync(&app_state, &pending_row.0, external_id)
+                    {
+                        let (raw_text, parsed) = parse_sidecar_resume_payload(&sidecar_payload);
+                        if raw_text.is_some() || parsed.is_some() {
+                            let now = now_iso();
+                            let parsed_json_text = parsed
+                                .unwrap_or_else(|| Value::Object(Default::default()))
+                                .to_string();
+                            conn.execute(
+                                r#"
+                                UPDATE pending_candidates
+                                SET resume_raw_text = COALESCE(?1, resume_raw_text),
+                                    resume_parsed_json = CASE
+                                        WHEN ?2 <> '{}' THEN ?2
+                                        ELSE resume_parsed_json
+                                    END,
+                                    updated_at = ?3
+                                WHERE id = ?4
+                                "#,
+                                params![raw_text, parsed_json_text, now, pending_id],
+                            )
+                            .map_err(|error| error.to_string())?;
+                        }
+                    }
+                }
+
+                let candidate = sync_pending_candidate_to_candidate_inner(
+                    &app_state,
+                    SyncPendingCandidateInput {
+                        pending_candidate_id: pending_id,
+                        run_screening: Some(true),
+                    },
+                )?;
+                current_candidate_id = Some(candidate.id);
+
+                let _ = run_candidate_ai_analysis_silent(
+                    &app_state,
+                    RunCandidateScoringInput {
+                        candidate_id: candidate.id,
+                        job_id: candidate.job_id,
+                        run_id: Some(format!("{run_id_for_task}-{pending_id}")),
+                    },
+                )?;
+
+                Ok(PendingSyncItemResult {
+                    pending_candidate_id: pending_id,
+                    status: "SYNCED".to_string(),
+                    candidate_id: Some(candidate.id),
+                    error_code: None,
+                    error_message: None,
+                })
+            })();
+
+            match item_result {
+                Ok(item) => {
+                    success += 1;
+                    outcomes.push(item);
+                }
+                Err(error) => {
+                    failed += 1;
+                    let conn = open_connection(&app_state.db_path)
+                        .map_err(|db_error| db_error.to_string())?;
+                    let now = now_iso();
+                    conn.execute(
+                        r#"
+                        UPDATE pending_candidates
+                        SET sync_status = 'FAILED',
+                            sync_error_code = 'pending_ai_sync_failed',
+                            sync_error_message = ?1,
+                            updated_at = ?2
+                        WHERE id = ?3
+                        "#,
+                        params![error.clone(), now, pending_id],
+                    )
+                    .map_err(|db_error| db_error.to_string())?;
+                    outcomes.push(PendingSyncItemResult {
+                        pending_candidate_id: pending_id,
+                        status: "FAILED".to_string(),
+                        candidate_id: current_candidate_id,
+                        error_code: Some("pending_ai_sync_failed".to_string()),
+                        error_message: Some(error),
+                    });
+                }
+            }
+
+            completed += 1;
+            let current = outcomes.last().cloned();
+            emit_pending_sync_progress(
+                &app_handle_for_task,
+                PendingSyncProgressEventPayload {
+                    run_id: run_id_for_task.clone(),
+                    total,
+                    completed,
+                    success,
+                    failed,
+                    current_pending_candidate_id: current
+                        .as_ref()
+                        .map(|item| item.pending_candidate_id),
+                    current_candidate_id: current.as_ref().and_then(|item| item.candidate_id),
+                    current_status: current.as_ref().map(|item| item.status.clone()),
+                    message: if failed > 0 && completed == total {
+                        format!("同步完成，成功 {success}，失败 {failed}")
+                    } else {
+                        format!("同步进度 {completed}/{total}")
+                    },
+                    at: now_iso(),
+                },
+            );
+        }
+
+        Ok(PendingSyncRunResult {
+            run_id: run_id_for_task,
+            total,
+            completed,
+            success,
+            failed,
+            outcomes,
+        })
+    })
+    .await
+    .map_err(|error| format!("pending_ai_sync_task_join_error:{error}"))?
 }
 
 #[tauri::command]
@@ -1756,6 +2049,35 @@ fn resume_record_from_row(row: &rusqlite::Row<'_>) -> Result<ResumeRecord, rusql
         original_file_content_type: row.get(8)?,
         created_at: row.get(5)?,
         updated_at: row.get(6)?,
+    })
+}
+
+#[tauri::command]
+pub(crate) fn preview_resume_profile(
+    input: PreviewResumeProfileInput,
+) -> Result<ResumeProfilePreview, String> {
+    let file_name = input.file_name.trim();
+    if file_name.is_empty() {
+        return Err("resume_file_name_required".to_string());
+    }
+    let content = BASE64_STANDARD
+        .decode(input.content_base64.trim())
+        .map_err(|error| error.to_string())?;
+    if content.is_empty() {
+        return Err("resume_file_content_empty".to_string());
+    }
+
+    let extracted =
+        extract_resume_content_from_bytes(file_name, &content, input.enable_ocr.unwrap_or(true))?;
+    let profile = extract_resume_profile_fields(&extracted.plain_text);
+    let _ = input.content_type;
+
+    Ok(ResumeProfilePreview {
+        full_text: extracted.canonical_markdown,
+        extracted: profile,
+        warnings: extracted.warnings,
+        content_format: extracted.content_format,
+        source_extension: extracted.extension,
     })
 }
 

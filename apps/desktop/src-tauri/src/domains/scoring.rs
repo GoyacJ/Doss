@@ -8,7 +8,7 @@ use crate::core::state::AppState;
 use crate::core::time::now_iso;
 use crate::domains::ai_runtime::{
     invoke_text_generation, model_supports_file_upload_for_attachment, parse_json_from_text,
-    resolve_ai_settings, trim_resume_excerpt,
+    resolve_ai_settings,
 };
 use crate::domains::jobs::read_job_by_id;
 use crate::domains::recruiting_utils::{
@@ -29,7 +29,7 @@ use crate::models::scoring::{
     SetJobScoringTemplateInput, UpdateScoringTemplateInput, UpsertScoringTemplateInput,
 };
 
-const SCORING_PROGRESS_EVENT: &str = "candidate-scoring-progress";
+const SCORING_PROGRESS_EVENT: &str = "candidate-ai-analysis-progress";
 
 #[derive(Debug, Clone)]
 struct ScoringProgressUpdate {
@@ -1112,7 +1112,6 @@ fn build_scoring_prompts(
         },
         "resumeParsed": ctx.resume_parsed,
         "resumeText": ctx.resume_raw_text,
-        "resumeExcerpt": trim_resume_excerpt(&ctx.resume_raw_text, 2600),
     });
 
     (system_prompt.to_string(), payload.to_string())
@@ -1233,7 +1232,7 @@ fn invoke_text_generation_map_reduce(
     invoke_text_generation(settings, system_prompt, &reduce_payload.to_string(), None)
 }
 
-fn run_candidate_scoring_blocking<F>(
+fn run_candidate_ai_analysis_blocking<F>(
     state: &AppState,
     input: RunCandidateScoringInput,
     on_progress: F,
@@ -1360,43 +1359,37 @@ where
     let ai_settings =
         resolve_ai_settings(&conn, &state.cipher).map_err(|error| error.to_string())?;
     let resume_attachment = materialized_resume.attachment.clone();
-    let mut ai_value = Value::Null;
-    if ai_settings.api_key.is_some() {
-        on_progress(scoring_progress_update(
-            "prepare",
-            "running",
-            "progress",
-            "已准备模板化评分输入，开始调用 AI",
-            None,
-        ));
-        let (system_prompt, user_prompt) = build_scoring_prompts(&template, &ctx);
-        let ai_result = if model_supports_file_upload_for_attachment(
-            &ai_settings,
-            resume_attachment.as_ref(),
-        ) {
+    if ai_settings.api_key.is_none() {
+        return Err("ai_provider_api_key_missing".to_string());
+    }
+    on_progress(scoring_progress_update(
+        "prepare",
+        "running",
+        "progress",
+        "已准备模板化评分输入，开始调用 AI",
+        None,
+    ));
+    let (system_prompt, user_prompt) = build_scoring_prompts(&template, &ctx);
+    let ai_content =
+        if model_supports_file_upload_for_attachment(&ai_settings, resume_attachment.as_ref()) {
             match invoke_text_generation(
                 &ai_settings,
                 &system_prompt,
                 &user_prompt,
                 resume_attachment.as_ref(),
             ) {
-                Ok(content) => Ok(content),
+                Ok(content) => content,
                 Err(_) => invoke_text_generation_map_reduce(
                     &ai_settings,
                     &system_prompt,
                     &user_prompt,
                     &ctx,
-                ),
+                )?,
             }
         } else {
-            invoke_text_generation_map_reduce(&ai_settings, &system_prompt, &user_prompt, &ctx)
+            invoke_text_generation_map_reduce(&ai_settings, &system_prompt, &user_prompt, &ctx)?
         };
-        if let Ok(content) = ai_result {
-            if let Ok(value) = serde_json::from_str::<Value>(&content) {
-                ai_value = value;
-            }
-        }
-    }
+    let ai_value = parse_json_from_text(&ai_content)?;
 
     on_progress(scoring_progress_update(
         "t0",
@@ -1645,6 +1638,13 @@ where
     .map_err(|error| error.to_string())?;
 
     Ok(result)
+}
+
+pub(crate) fn run_candidate_ai_analysis_silent(
+    state: &AppState,
+    input: RunCandidateScoringInput,
+) -> Result<ScoringResultRecord, String> {
+    run_candidate_ai_analysis_blocking(state, input, |_| {})
 }
 
 #[tauri::command]
@@ -1901,7 +1901,7 @@ pub(crate) fn set_job_scoring_template(
 }
 
 #[tauri::command]
-pub(crate) async fn run_candidate_scoring(
+pub(crate) async fn run_candidate_ai_analysis(
     app_handle: AppHandle,
     state: State<'_, AppState>,
     input: RunCandidateScoringInput,
@@ -1912,7 +1912,7 @@ pub(crate) async fn run_candidate_scoring(
         .map(str::trim)
         .filter(|item| !item.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| format!("scoring-{}-{}", input.candidate_id, now_iso()));
+        .unwrap_or_else(|| format!("ai-analysis-{}-{}", input.candidate_id, now_iso()));
 
     let candidate_id = input.candidate_id;
     let app_state = state.inner().clone();
@@ -1922,7 +1922,7 @@ pub(crate) async fn run_candidate_scoring(
 
     let task_result = tauri::async_runtime::spawn_blocking(move || {
         let mut last_phase = "prepare".to_string();
-        let result = run_candidate_scoring_blocking(&app_state, input_for_task, |update| {
+        let result = run_candidate_ai_analysis_blocking(&app_state, input_for_task, |update| {
             last_phase = update.phase.to_string();
             emit_scoring_progress(&app_handle_for_task, &run_id_for_task, candidate_id, update);
         });

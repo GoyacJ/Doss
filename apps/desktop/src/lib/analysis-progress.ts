@@ -1,4 +1,4 @@
-export const ANALYSIS_PROGRESS_EVENT = "candidate-scoring-progress";
+export const ANALYSIS_PROGRESS_EVENT = "candidate-ai-analysis-progress";
 
 export type AnalysisProgressPhase = "prepare" | "ai" | "t0" | "t1" | "t2" | "t3" | "persist";
 export type AnalysisProgressStatus = "running" | "completed" | "failed";

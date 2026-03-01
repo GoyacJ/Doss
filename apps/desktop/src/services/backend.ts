@@ -110,6 +110,51 @@ export interface UpsertResumePayload {
   };
 }
 
+export interface PreviewResumeProfilePayload {
+  file_name: string;
+  content_base64: string;
+  content_type?: string;
+  enable_ocr?: boolean;
+}
+
+export interface ResumeProfileFieldText {
+  value: string;
+  confidence: number;
+  confidence_level: "HIGH" | "MEDIUM" | "LOW";
+  evidences: string[];
+}
+
+export interface ResumeProfileFieldNumber {
+  value: number;
+  confidence: number;
+  confidence_level: "HIGH" | "MEDIUM" | "LOW";
+  evidences: string[];
+}
+
+export interface ResumeProfileFieldInt {
+  value: number;
+  confidence: number;
+  confidence_level: "HIGH" | "MEDIUM" | "LOW";
+  evidences: string[];
+}
+
+export interface ResumeProfilePreview {
+  full_text: string;
+  extracted: {
+    name?: ResumeProfileFieldText;
+    current_company?: ResumeProfileFieldText;
+    years_of_experience?: ResumeProfileFieldNumber;
+    age?: ResumeProfileFieldInt;
+    gender?: ResumeProfileFieldText;
+    address?: ResumeProfileFieldText;
+    phone?: ResumeProfileFieldText;
+    email?: ResumeProfileFieldText;
+  };
+  warnings: string[];
+  content_format: string;
+  source_extension: string;
+}
+
 export interface CrawlTaskPayload {
   source: CrawlTaskSource;
   mode: CrawlMode;
@@ -224,6 +269,46 @@ export interface PendingCandidateListQuery {
 export interface SyncPendingCandidatePayload {
   pending_candidate_id: number;
   run_screening?: boolean;
+}
+
+export type PendingSyncRunMode = "single" | "multi" | "filtered";
+
+export interface PendingSyncRunInput {
+  mode: PendingSyncRunMode;
+  pending_candidate_id?: number;
+  pending_candidate_ids?: number[];
+  filter?: PendingCandidateListQuery;
+  run_id?: string;
+}
+
+export interface PendingSyncItemResult {
+  pending_candidate_id: number;
+  status: "SYNCED" | "FAILED";
+  candidate_id?: number | null;
+  error_code?: string | null;
+  error_message?: string | null;
+}
+
+export interface PendingSyncRunResult {
+  run_id: string;
+  total: number;
+  completed: number;
+  success: number;
+  failed: number;
+  outcomes: PendingSyncItemResult[];
+}
+
+export interface PendingSyncProgressEventPayload {
+  runId: string;
+  total: number;
+  completed: number;
+  success: number;
+  failed: number;
+  currentPendingCandidateId?: number;
+  currentCandidateId?: number;
+  currentStatus?: "SYNCED" | "FAILED" | "RUNNING";
+  message: string;
+  at: string;
 }
 
 export type AiProviderId =
@@ -673,12 +758,12 @@ export async function setJobScoringTemplate(input: SetJobScoringTemplatePayload)
   return invoke<JobRecord>("set_job_scoring_template", { input });
 }
 
-export async function runCandidateScoring(input: {
+export async function runCandidateAiAnalysis(input: {
   candidate_id: number;
   job_id?: number;
   run_id?: string;
 }): Promise<ScoringResultRecord> {
-  return invoke<ScoringResultRecord>("run_candidate_scoring", { input });
+  return invoke<ScoringResultRecord>("run_candidate_ai_analysis", { input });
 }
 
 export async function listScoringResults(candidate_id: number): Promise<ScoringResultRecord[]> {
@@ -821,10 +906,28 @@ export async function listPendingCandidates(
   return invoke<PageResult<PendingCandidateRecord>>("list_pending_candidates", { input });
 }
 
+export async function listPendingCandidatesPage(
+  input?: PendingCandidateListQuery,
+): Promise<PageResult<PendingCandidateRecord>> {
+  return invoke<PageResult<PendingCandidateRecord>>("list_pending_candidates_page", { input });
+}
+
 export async function syncPendingCandidateToCandidate(
   input: SyncPendingCandidatePayload,
 ): Promise<CandidateRecord> {
   return invoke<CandidateRecord>("sync_pending_candidate_to_candidate", { input });
+}
+
+export async function runPendingCandidatesAiSync(
+  input: PendingSyncRunInput,
+): Promise<PendingSyncRunResult> {
+  return invoke<PendingSyncRunResult>("run_pending_candidates_ai_sync", { input });
+}
+
+export async function previewResumeProfile(
+  input: PreviewResumeProfilePayload,
+): Promise<ResumeProfilePreview> {
+  return invoke<ResumeProfilePreview>("preview_resume_profile", { input });
 }
 
 export async function getTaskRuntimeSettings(): Promise<TaskRuntimeSettings> {

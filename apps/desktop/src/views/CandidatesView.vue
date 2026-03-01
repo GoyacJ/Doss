@@ -31,7 +31,17 @@ import {
 import { resolveScoringRerunFeedback } from "../lib/scoring-rerun-feedback";
 import { stageTone } from "../lib/status";
 import { normalizeSortRules } from "../lib/table-sort";
-import { deleteResume, getResume, listCandidatesPage } from "../services/backend";
+import {
+  deleteResume,
+  getResume,
+  listCandidatesPage,
+  listPendingCandidatesPage,
+  previewResumeProfile,
+  type PendingCandidateRecord,
+  type PendingCandidateListQuery,
+  type PendingSyncProgressEventPayload,
+  type ResumeProfilePreview,
+} from "../services/backend";
 import { useRecruitingStore } from "../stores/recruiting";
 import { useToastStore } from "../stores/toast";
 
@@ -130,6 +140,46 @@ const analysisTraceItems = ref<AnalysisTraceItem[]>([]);
 const analysisUnlisten = ref<UnlistenFn | null>(null);
 const analysisLastProgressEventAt = ref(0);
 const analysisTraceListRef = ref<HTMLUListElement | null>(null);
+const PENDING_SYNC_PROGRESS_EVENT = "pending-ai-sync-progress";
+const pendingModalOpen = ref(false);
+const pendingLoading = ref(false);
+const pendingRows = ref<PendingCandidateRecord[]>([]);
+const pendingPage = ref(1);
+const pendingPageSize = ref(10);
+const pendingTotal = ref(0);
+const pendingFilters = reactive({
+  syncStatus: "UNSYNCED" as "UNSYNCED" | "SYNCED" | "FAILED" | "",
+  nameLike: "",
+  jobId: 0,
+});
+const pendingSelectedIds = ref<number[]>([]);
+const pendingActionLoading = ref(false);
+const pendingSyncProgressVisible = ref(false);
+const pendingSyncProgressMinimized = ref(false);
+const pendingSyncProgress = reactive({
+  runId: "",
+  total: 0,
+  completed: 0,
+  success: 0,
+  failed: 0,
+  message: "",
+  currentPendingCandidateId: 0,
+});
+const pendingSyncUnlisten = ref<UnlistenFn | null>(null);
+const resumeProfilePreview = ref<ResumeProfilePreview | null>(null);
+const resumeProfileBackfillOpen = ref(false);
+const resumeProfileBackfillTarget = ref<"create" | "detail">("create");
+const resumeProfileBackfillSubmitting = ref(false);
+const resumeProfileSelections = reactive({
+  name: false,
+  current_company: false,
+  years_of_experience: false,
+  age: false,
+  gender: false,
+  address: false,
+  phone: false,
+  email: false,
+});
 
 const analysisProgressSteps = [
   {
@@ -218,6 +268,9 @@ const detailForm = reactive({
   email: "",
   tagsText: "",
 });
+const detailStage = ref<PipelineStage>("NEW");
+const stagePickerOpen = ref(false);
+const stageChangeNote = ref("");
 
 const selectedCandidate = computed(() => {
   if (!selectedCandidateId.value) {
@@ -256,6 +309,11 @@ const stageOptions = [
   { value: "OFFERED", label: "已录用" },
 ];
 
+const detailStageOptions = stageOptions.filter((item) => item.value !== "") as Array<{
+  value: PipelineStage;
+  label: string;
+}>;
+
 const jobOptions = computed(() => [
   { value: 0, label: "全部职位" },
   ...store.jobs.map((job) => ({ value: job.id, label: `${job.title} · ${job.company}` })),
@@ -279,6 +337,37 @@ const hasDetailResumeSelection = computed(() => Boolean(detailResumeFile.value?.
 const hasDetailPersistedResume = computed(() => Boolean(detailPersistedResumeFileName.value));
 const detailResumeFileName = computed(() => detailResumeFile.value?.name || detailPersistedResumeFileName.value);
 const detailResumeFileLabel = computed(() => (hasDetailResumeSelection.value ? "待上传文件" : "已上传文件"));
+const pendingPageAllSelected = computed(() =>
+  pendingRows.value.length > 0 && pendingRows.value.every((row) => pendingSelectedIds.value.includes(row.id)),
+);
+const pendingSyncProgressPercent = computed(() => {
+  if (pendingSyncProgress.total <= 0) {
+    return 0;
+  }
+  return Math.min(100, Math.round((pendingSyncProgress.completed / pendingSyncProgress.total) * 100));
+});
+const resumeProfileRows = computed(() => {
+  const extracted = resumeProfilePreview.value?.extracted;
+  return [
+    { key: "name", label: "姓名", field: extracted?.name },
+    { key: "current_company", label: "当前公司", field: extracted?.current_company },
+    { key: "years_of_experience", label: "工作年限", field: extracted?.years_of_experience },
+    { key: "age", label: "年龄", field: extracted?.age },
+    { key: "gender", label: "性别", field: extracted?.gender },
+    { key: "address", label: "地址", field: extracted?.address },
+    { key: "phone", label: "电话", field: extracted?.phone },
+    { key: "email", label: "邮箱", field: extracted?.email },
+  ] as Array<{
+    key: keyof typeof resumeProfileSelections;
+    label: string;
+    field?: {
+      value?: string | number;
+      confidence?: number;
+      confidence_level?: string;
+      evidences?: string[];
+    };
+  }>;
+});
 
 function formatScore5(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) {
@@ -315,6 +404,10 @@ function resolveErrorMessage(error: unknown, fallback: string): string {
     return error;
   }
   return fallback;
+}
+
+function isChecked(event: Event): boolean {
+  return Boolean((event.target as HTMLInputElement | null)?.checked);
 }
 
 function formatTraceTime(value: string): string {
@@ -390,6 +483,11 @@ function onCreateResumeChange(event: Event) {
   const target = event.target as HTMLInputElement | null;
   const file = target?.files?.[0];
   createResumeFile.value = file ?? null;
+  if (file) {
+    void previewResumeBackfill(file, "create").catch((error) => {
+      toast.warning(resolveErrorMessage(error, "简历预解析失败"));
+    });
+  }
 }
 
 function clearCreateResume() {
@@ -405,6 +503,9 @@ function onDetailResumeChange(event: Event) {
   detailResumeFile.value = file ?? null;
   detailResumeUploadTip.value = "";
   if (file) {
+    void previewResumeBackfill(file, "detail").catch((error) => {
+      toast.warning(resolveErrorMessage(error, "简历预解析失败"));
+    });
     void uploadDetailResume(file);
   }
 }
@@ -450,6 +551,7 @@ function fillDetailForm(candidate: CandidateRecord) {
   detailForm.phone = "";
   detailForm.email = "";
   detailForm.tagsText = candidate.tags.join(", ");
+  detailStage.value = candidate.stage;
 }
 
 function cleanupAnalysisProgressTimers() {
@@ -620,6 +722,304 @@ function restoreAnalysisProgress() {
   void scrollAnalysisTraceToBottom();
 }
 
+async function fileToBase64(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function resetResumeProfileSelections(target: "create" | "detail", preview: ResumeProfilePreview) {
+  const fields = preview.extracted;
+  const existing = target === "create"
+    ? {
+        name: createForm.name,
+        current_company: createForm.currentCompany,
+        years_of_experience: createForm.yearsOfExperience,
+        age: createForm.age,
+        gender: createForm.gender,
+        address: createForm.address,
+        phone: createForm.phone,
+        email: createForm.email,
+      }
+    : {
+        name: detailForm.name,
+        current_company: detailForm.currentCompany,
+        years_of_experience: detailForm.yearsOfExperience,
+        age: detailForm.age,
+        gender: detailForm.gender,
+        address: detailForm.address,
+        phone: detailForm.phone,
+        email: detailForm.email,
+      };
+
+  for (const key of Object.keys(resumeProfileSelections) as Array<keyof typeof resumeProfileSelections>) {
+    const field = fields[key];
+    if (!field || !("value" in field)) {
+      resumeProfileSelections[key] = false;
+      continue;
+    }
+    const existingValue = String((existing as Record<string, unknown>)[key] ?? "").trim();
+    const isEmpty = existingValue.length === 0;
+    const highConfidence = field.confidence >= 0.8;
+    resumeProfileSelections[key] = isEmpty || highConfidence;
+  }
+}
+
+async function previewResumeBackfill(file: File, target: "create" | "detail") {
+  const contentBase64 = await fileToBase64(file);
+  const preview = await previewResumeProfile({
+    file_name: file.name,
+    content_base64: contentBase64,
+    content_type: file.type || undefined,
+    enable_ocr: target === "create" ? createForm.enableOcr : detailResumeEnableOcr.value,
+  });
+  resumeProfilePreview.value = preview;
+  resumeProfileBackfillTarget.value = target;
+  resetResumeProfileSelections(target, preview);
+  resumeProfileBackfillOpen.value = true;
+}
+
+async function applyResumeProfileBackfill() {
+  if (!resumeProfilePreview.value || resumeProfileBackfillSubmitting.value) {
+    return;
+  }
+  resumeProfileBackfillSubmitting.value = true;
+  try {
+    const fields = resumeProfilePreview.value.extracted;
+    const target = resumeProfileBackfillTarget.value;
+    const applyToCreate = target === "create";
+
+    const setField = (key: keyof typeof resumeProfileSelections, value: string) => {
+      if (!resumeProfileSelections[key]) {
+        return;
+      }
+      if (applyToCreate) {
+        if (key === "name")
+          createForm.name = value;
+        else if (key === "current_company")
+          createForm.currentCompany = value;
+        else if (key === "years_of_experience")
+          createForm.yearsOfExperience = value;
+        else if (key === "age")
+          createForm.age = value;
+        else if (key === "gender")
+          createForm.gender = value as CandidateGender | "";
+        else if (key === "address")
+          createForm.address = value;
+        else if (key === "phone")
+          createForm.phone = value;
+        else if (key === "email")
+          createForm.email = value;
+      } else {
+        if (key === "name")
+          detailForm.name = value;
+        else if (key === "current_company")
+          detailForm.currentCompany = value;
+        else if (key === "years_of_experience")
+          detailForm.yearsOfExperience = value;
+        else if (key === "age")
+          detailForm.age = value;
+        else if (key === "gender")
+          detailForm.gender = value as CandidateGender | "";
+        else if (key === "address")
+          detailForm.address = value;
+        else if (key === "phone")
+          detailForm.phone = value;
+        else if (key === "email")
+          detailForm.email = value;
+      }
+    };
+
+    if (fields.name)
+      setField("name", fields.name.value);
+    if (fields.current_company)
+      setField("current_company", fields.current_company.value);
+    if (fields.years_of_experience)
+      setField("years_of_experience", String(fields.years_of_experience.value));
+    if (fields.age)
+      setField("age", String(fields.age.value));
+    if (fields.gender)
+      setField("gender", fields.gender.value);
+    if (fields.address)
+      setField("address", fields.address.value);
+    if (fields.phone)
+      setField("phone", fields.phone.value);
+    if (fields.email)
+      setField("email", fields.email.value);
+
+    resumeProfileBackfillOpen.value = false;
+    toast.success("已按勾选项回填字段");
+    if (!applyToCreate && selectedCandidate.value) {
+      await saveCandidateDetail();
+    }
+  } catch (error) {
+    toast.danger(resolveErrorMessage(error, "回填失败"));
+  } finally {
+    resumeProfileBackfillSubmitting.value = false;
+  }
+}
+
+function closeResumeProfileBackfill() {
+  if (resumeProfileBackfillSubmitting.value) {
+    return;
+  }
+  resumeProfileBackfillOpen.value = false;
+}
+
+function pendingQuery(): PendingCandidateListQuery {
+  return {
+    page: pendingPage.value,
+    page_size: pendingPageSize.value,
+    sync_status: pendingFilters.syncStatus || undefined,
+    name_like: pendingFilters.nameLike.trim() || undefined,
+    job_id: pendingFilters.jobId > 0 ? pendingFilters.jobId : undefined,
+  };
+}
+
+async function loadPendingRows() {
+  pendingLoading.value = true;
+  try {
+    const data = await listPendingCandidatesPage(pendingQuery());
+    pendingRows.value = data.items;
+    pendingTotal.value = data.total;
+    pendingSelectedIds.value = pendingSelectedIds.value.filter((id) =>
+      pendingRows.value.some((item) => item.id === id),
+    );
+  } catch (error) {
+    toast.danger(resolveErrorMessage(error, "待定人列表加载失败"));
+  } finally {
+    pendingLoading.value = false;
+  }
+}
+
+function openPendingModal() {
+  pendingModalOpen.value = true;
+  pendingPage.value = 1;
+  pendingSelectedIds.value = [];
+  void loadPendingRows();
+}
+
+function closePendingModal() {
+  if (pendingActionLoading.value) {
+    return;
+  }
+  pendingModalOpen.value = false;
+}
+
+function pendingRowSelected(id: number): boolean {
+  return pendingSelectedIds.value.includes(id);
+}
+
+function togglePendingRow(id: number, checked: boolean) {
+  if (checked) {
+    if (!pendingSelectedIds.value.includes(id)) {
+      pendingSelectedIds.value.push(id);
+    }
+    return;
+  }
+  pendingSelectedIds.value = pendingSelectedIds.value.filter((item) => item !== id);
+}
+
+function togglePendingPageAll(checked: boolean) {
+  if (checked) {
+    pendingSelectedIds.value = pendingRows.value.map((item) => item.id);
+    return;
+  }
+  pendingSelectedIds.value = [];
+}
+
+function teardownPendingSyncProgressListener() {
+  if (pendingSyncUnlisten.value) {
+    pendingSyncUnlisten.value();
+    pendingSyncUnlisten.value = null;
+  }
+}
+
+async function setupPendingSyncProgressListener(runId: string) {
+  teardownPendingSyncProgressListener();
+  pendingSyncUnlisten.value = await listen<PendingSyncProgressEventPayload>(
+    PENDING_SYNC_PROGRESS_EVENT,
+    (event) => {
+      const payload = event.payload;
+      if (payload.runId !== runId) {
+        return;
+      }
+      pendingSyncProgress.runId = payload.runId;
+      pendingSyncProgress.total = payload.total;
+      pendingSyncProgress.completed = payload.completed;
+      pendingSyncProgress.success = payload.success;
+      pendingSyncProgress.failed = payload.failed;
+      pendingSyncProgress.message = payload.message;
+      pendingSyncProgress.currentPendingCandidateId = payload.currentPendingCandidateId ?? 0;
+    },
+  );
+}
+
+function openPendingSyncProgress(runId: string) {
+  pendingSyncProgressVisible.value = true;
+  pendingSyncProgressMinimized.value = false;
+  pendingSyncProgress.runId = runId;
+  pendingSyncProgress.total = 0;
+  pendingSyncProgress.completed = 0;
+  pendingSyncProgress.success = 0;
+  pendingSyncProgress.failed = 0;
+  pendingSyncProgress.message = "任务初始化中...";
+  pendingSyncProgress.currentPendingCandidateId = 0;
+}
+
+function closePendingSyncProgress() {
+  teardownPendingSyncProgressListener();
+  pendingSyncProgressVisible.value = false;
+  pendingSyncProgressMinimized.value = false;
+}
+
+async function runPendingAiSync(input: {
+  mode: "single" | "multi" | "filtered";
+  pendingCandidateId?: number;
+  pendingCandidateIds?: number[];
+}) {
+  if (pendingActionLoading.value) {
+    return;
+  }
+  pendingActionLoading.value = true;
+  const runId = `pending-sync-${Date.now()}`;
+  openPendingSyncProgress(runId);
+  try {
+    await setupPendingSyncProgressListener(runId);
+    const result = await store.runPendingAiSync({
+      mode: input.mode,
+      pending_candidate_id: input.pendingCandidateId,
+      pending_candidate_ids: input.pendingCandidateIds,
+      filter: pendingQuery(),
+      run_id: runId,
+    });
+    pendingSyncProgress.message = `同步完成：成功 ${result.success}，失败 ${result.failed}`;
+    await Promise.all([loadPendingRows(), loadRows()]);
+    toast.success("待定人 AI 同步已完成");
+  } catch (error) {
+    pendingSyncProgress.message = resolveErrorMessage(error, "待定人 AI 同步失败");
+    toast.danger(pendingSyncProgress.message);
+  } finally {
+    pendingActionLoading.value = false;
+    setTimeout(() => {
+      closePendingSyncProgress();
+    }, 800);
+  }
+}
+
+function minimizePendingSyncProgress() {
+  pendingSyncProgressMinimized.value = true;
+}
+
+function restorePendingSyncProgress() {
+  pendingSyncProgressMinimized.value = false;
+}
+
 async function saveCandidate() {
   if (creatingCandidate.value) {
     return;
@@ -787,6 +1187,54 @@ async function saveCandidateDetail() {
   } finally {
     savingDetail.value = false;
   }
+}
+
+async function saveCandidateStage() {
+  if (!selectedCandidate.value || actionLoading.value) {
+    return;
+  }
+  if (detailStage.value === selectedCandidate.value.stage && !stageChangeNote.value.trim()) {
+    stagePickerOpen.value = false;
+    return;
+  }
+  actionLoading.value = true;
+  try {
+    await store.moveStage({
+      candidate_id: selectedCandidate.value.id,
+      to_stage: detailStage.value,
+      job_id: selectedCandidate.value.job_id ?? undefined,
+      note: stageChangeNote.value.trim() || undefined,
+    });
+    await Promise.all([loadRows(), store.loadCandidateContext(selectedCandidate.value.id)]);
+    const refreshed = rows.value.find((item) => item.id === selectedCandidate.value?.id)
+      ?? store.candidates.find((item) => item.id === selectedCandidate.value?.id);
+    if (refreshed) {
+      fillDetailForm(refreshed);
+    }
+    stagePickerOpen.value = false;
+    stageChangeNote.value = "";
+    toast.success("候选人阶段已更新");
+  } catch (error) {
+    toast.danger(resolveErrorMessage(error, "更新候选人阶段失败"));
+  } finally {
+    actionLoading.value = false;
+  }
+}
+
+function openStagePicker() {
+  if (!selectedCandidate.value || actionLoading.value) {
+    return;
+  }
+  detailStage.value = selectedCandidate.value.stage;
+  stageChangeNote.value = "";
+  stagePickerOpen.value = true;
+}
+
+function closeStagePicker() {
+  if (actionLoading.value) {
+    return;
+  }
+  stagePickerOpen.value = false;
 }
 
 async function uploadDetailResume(file?: File) {
@@ -978,11 +1426,54 @@ watch(() => filters.nameLike, () => {
   }, 250);
 });
 
+watch(pendingPage, () => {
+  if (pendingModalOpen.value) {
+    void loadPendingRows();
+  }
+});
+
+watch(pendingPageSize, () => {
+  if (!pendingModalOpen.value) {
+    return;
+  }
+  if (pendingPage.value !== 1) {
+    pendingPage.value = 1;
+    return;
+  }
+  void loadPendingRows();
+});
+
+watch(() => pendingFilters.syncStatus, () => {
+  if (!pendingModalOpen.value) {
+    return;
+  }
+  pendingPage.value = 1;
+  void loadPendingRows();
+});
+
+watch(() => pendingFilters.jobId, () => {
+  if (!pendingModalOpen.value) {
+    return;
+  }
+  pendingPage.value = 1;
+  void loadPendingRows();
+});
+
+watch(() => pendingFilters.nameLike, () => {
+  if (!pendingModalOpen.value) {
+    return;
+  }
+  pendingPage.value = 1;
+  void loadPendingRows();
+});
+
 watch(drawerOpen, (open) => {
   if (!open) {
     clearDetailResume();
     detailPersistedResumeFileName.value = "";
     detailResumeRemoving.value = false;
+    stagePickerOpen.value = false;
+    stageChangeNote.value = "";
   }
 });
 
@@ -1006,6 +1497,7 @@ onUnmounted(() => {
     clearTimeout(filterNameLikeTimer);
   }
   closeAnalysisProgress();
+  teardownPendingSyncProgressListener();
 });
 </script>
 
@@ -1024,7 +1516,10 @@ onUnmounted(() => {
             placeholder="输入姓名关键词"
             :disabled="loading"
           />
-          <UiButton :disabled="loading" @click="openCreateCandidateModal">创建候选人</UiButton>
+          <div class="flex items-center gap-2">
+            <UiButton variant="ghost" :disabled="loading" @click="openPendingModal">待定人列表</UiButton>
+            <UiButton :disabled="loading" @click="openCreateCandidateModal">创建候选人</UiButton>
+          </div>
         </div>
       </template>
 
@@ -1319,6 +1814,9 @@ onUnmounted(() => {
             <UiButton :disabled="savingDetail || actionLoading" @click="saveCandidateDetail">
               {{ savingDetail ? "保存中..." : "保存修改" }}
             </UiButton>
+            <UiButton variant="secondary" :disabled="savingDetail || actionLoading" @click="openStagePicker">
+              更改阶段
+            </UiButton>
             <UiButton :disabled="savingDetail || actionLoading" @click="rerunScoring">重新分析</UiButton>
             <UiButton variant="secondary" :disabled="savingDetail || actionLoading" @click="goInterview">邀约面试</UiButton>
             <UiButton variant="ghost" :disabled="savingDetail || actionLoading" @click="rejectCandidate">遗憾</UiButton>
@@ -1442,6 +1940,44 @@ onUnmounted(() => {
 
   <Teleport to="body">
     <div
+      v-if="stagePickerOpen && selectedCandidate"
+      class="fixed inset-0 z-[86] flex items-center justify-center bg-black/35 p-4"
+      @click.self="closeStagePicker"
+    >
+      <div class="w-full max-w-md">
+        <UiPanel title="更改候选人阶段">
+          <UiField label="当前阶段">
+            <input :value="formatStageLabel(selectedCandidate.stage)" readonly />
+          </UiField>
+          <UiField class="mt-2.5" label="目标阶段">
+            <UiSelect
+              v-model="detailStage"
+              :disabled="actionLoading"
+              :options="detailStageOptions"
+            />
+          </UiField>
+          <UiField class="mt-2.5" label="备注">
+            <input
+              v-model="stageChangeNote"
+              :disabled="actionLoading"
+              placeholder="可选，记录阶段变更原因"
+            />
+          </UiField>
+          <div class="mt-4 flex flex-wrap justify-end gap-2">
+            <UiButton variant="ghost" :disabled="actionLoading" @click="closeStagePicker">
+              取消
+            </UiButton>
+            <UiButton :disabled="actionLoading" @click="saveCandidateStage">
+              {{ actionLoading ? "更新中..." : "确认更新" }}
+            </UiButton>
+          </div>
+        </UiPanel>
+      </div>
+    </div>
+  </Teleport>
+
+  <Teleport to="body">
+    <div
       v-if="analysisProgressVisible && !analysisProgressMinimized"
       class="fixed inset-0 z-[87] flex items-center justify-center bg-black/35 p-4"
     >
@@ -1531,6 +2067,222 @@ onUnmounted(() => {
         </div>
         <div class="mt-2 flex justify-end">
           <UiButton variant="ghost" @click="restoreAnalysisProgress">展开</UiButton>
+        </div>
+      </UiPanel>
+    </div>
+  </Teleport>
+
+  <Teleport to="body">
+    <div
+      v-if="resumeProfileBackfillOpen && resumeProfilePreview"
+      class="fixed inset-0 z-[88] flex items-center justify-center bg-black/35 p-4"
+      @click.self="closeResumeProfileBackfill"
+    >
+      <div class="w-full max-w-4xl">
+        <UiPanel title="简历字段回填确认">
+          <p class="m-0 text-sm text-muted">
+            勾选要回填的字段。默认已勾选空值字段或高置信字段。
+          </p>
+          <div class="mt-3 overflow-x-auto">
+            <table class="w-full border-collapse text-sm">
+              <thead>
+                <tr class="text-left text-muted">
+                  <th class="px-2 py-1.5 font-600">回填</th>
+                  <th class="px-2 py-1.5 font-600">字段</th>
+                  <th class="px-2 py-1.5 font-600">提取值</th>
+                  <th class="px-2 py-1.5 font-600">置信度</th>
+                  <th class="px-2 py-1.5 font-600">证据片段</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="row in resumeProfileRows"
+                  :key="row.key"
+                  class="border-t border-line align-top"
+                >
+                  <td class="px-2 py-2">
+                    <input
+                      v-model="resumeProfileSelections[row.key]"
+                      type="checkbox"
+                      :disabled="!row.field"
+                    />
+                  </td>
+                  <td class="px-2 py-2">{{ row.label }}</td>
+                  <td class="px-2 py-2">
+                    {{ row.field?.value ?? "-" }}
+                  </td>
+                  <td class="px-2 py-2">
+                    {{ row.field?.confidence_level ?? "-" }}
+                    {{ (row.field?.confidence ?? 0).toFixed(2) }}
+                  </td>
+                  <td class="px-2 py-2">
+                    {{ (row.field?.evidences ?? []).join(" / ") || "-" }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="mt-4 flex flex-wrap justify-end gap-2">
+            <UiButton variant="ghost" :disabled="resumeProfileBackfillSubmitting" @click="closeResumeProfileBackfill">
+              取消
+            </UiButton>
+            <UiButton :disabled="resumeProfileBackfillSubmitting" @click="applyResumeProfileBackfill">
+              {{ resumeProfileBackfillSubmitting ? "回填中..." : "确认回填" }}
+            </UiButton>
+          </div>
+        </UiPanel>
+      </div>
+    </div>
+  </Teleport>
+
+  <Teleport to="body">
+    <div
+      v-if="pendingModalOpen"
+      class="fixed inset-0 z-[82] flex items-center justify-center bg-black/35 p-4"
+      @click.self="closePendingModal"
+    >
+      <div class="w-full max-w-6xl">
+        <UiPanel title="待定人列表">
+          <div class="mb-2 grid grid-cols-4 gap-2 lt-lg:grid-cols-2 lt-sm:grid-cols-1">
+            <UiField label="姓名">
+              <input v-model="pendingFilters.nameLike" placeholder="姓名关键词" />
+            </UiField>
+            <UiField label="职位">
+              <UiSelect v-model="pendingFilters.jobId" :options="jobOptions" value-type="number" />
+            </UiField>
+            <UiField label="同步状态">
+              <UiSelect
+                v-model="pendingFilters.syncStatus"
+                :options="[
+                  { value: '', label: '全部' },
+                  { value: 'UNSYNCED', label: '未同步' },
+                  { value: 'SYNCED', label: '已同步' },
+                  { value: 'FAILED', label: '失败' },
+                ]"
+              />
+            </UiField>
+            <UiField label="操作">
+              <div class="flex flex-wrap gap-2">
+                <UiButton
+                  :disabled="pendingActionLoading || pendingSelectedIds.length === 0"
+                  @click="runPendingAiSync({ mode: 'multi', pendingCandidateIds: pendingSelectedIds })"
+                >
+                  同步选中
+                </UiButton>
+                <UiButton
+                  variant="secondary"
+                  :disabled="pendingActionLoading || pendingTotal === 0"
+                  @click="runPendingAiSync({ mode: 'filtered' })"
+                >
+                  同步当前筛选全部
+                </UiButton>
+              </div>
+            </UiField>
+          </div>
+
+          <UiTable>
+            <thead>
+              <tr>
+                <UiTh>
+                  <input
+                    type="checkbox"
+                    :checked="pendingPageAllSelected"
+                    @change="togglePendingPageAll(isChecked($event))"
+                  />
+                </UiTh>
+                <UiTh>姓名</UiTh>
+                <UiTh>当前公司</UiTh>
+                <UiTh>职位</UiTh>
+                <UiTh>状态</UiTh>
+                <UiTh>操作</UiTh>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in pendingRows" :key="item.id">
+                <UiTd>
+                  <input
+                    type="checkbox"
+                    :checked="pendingRowSelected(item.id)"
+                    @change="togglePendingRow(item.id, isChecked($event))"
+                  />
+                </UiTd>
+                <UiTd>{{ item.name }}</UiTd>
+                <UiTd>{{ item.current_company || '-' }}</UiTd>
+                <UiTd>{{ item.job_title || (item.job_id ? `职位 #${item.job_id}` : '-') }}</UiTd>
+                <UiTd>
+                  <UiBadge :tone="item.sync_status === 'SYNCED' ? 'success' : item.sync_status === 'FAILED' ? 'danger' : 'warning'">
+                    {{ item.sync_status }}
+                  </UiBadge>
+                </UiTd>
+                <UiTd>
+                  <UiButton
+                    variant="ghost"
+                    :disabled="pendingActionLoading"
+                    @click="runPendingAiSync({ mode: 'single', pendingCandidateId: item.id })"
+                  >
+                    AI同步
+                  </UiButton>
+                </UiTd>
+              </tr>
+              <tr v-if="!pendingLoading && pendingRows.length === 0">
+                <UiTd colspan="6" class="text-center text-muted py-6">暂无待定人</UiTd>
+              </tr>
+            </tbody>
+          </UiTable>
+          <UiTablePagination
+            v-model:page="pendingPage"
+            v-model:page-size="pendingPageSize"
+            :total="pendingTotal"
+            :disabled="pendingLoading || pendingActionLoading"
+          />
+
+          <div class="mt-2 flex justify-end">
+            <UiButton variant="ghost" :disabled="pendingActionLoading" @click="closePendingModal">关闭</UiButton>
+          </div>
+        </UiPanel>
+      </div>
+    </div>
+  </Teleport>
+
+  <Teleport to="body">
+    <div
+      v-if="pendingSyncProgressVisible && !pendingSyncProgressMinimized"
+      class="fixed inset-0 z-[89] flex items-center justify-center bg-black/35 p-4"
+    >
+      <div class="w-full max-w-xl">
+        <UiPanel title="待定人 AI 同步中">
+          <p class="m-0 text-sm">{{ pendingSyncProgress.message }}</p>
+          <p class="m-0 mt-1 text-xs text-muted">
+            {{ pendingSyncProgress.completed }}/{{ pendingSyncProgress.total }}
+            · 成功 {{ pendingSyncProgress.success }}
+            · 失败 {{ pendingSyncProgress.failed }}
+          </p>
+          <div class="mt-3 h-2 w-full overflow-hidden rounded bg-line">
+            <div class="h-full bg-brand" :style="{ width: `${pendingSyncProgressPercent}%` }" />
+          </div>
+          <div class="mt-3 flex justify-end">
+            <UiButton variant="ghost" @click="minimizePendingSyncProgress">最小化</UiButton>
+          </div>
+        </UiPanel>
+      </div>
+    </div>
+  </Teleport>
+
+  <Teleport to="body">
+    <div
+      v-if="pendingSyncProgressVisible && pendingSyncProgressMinimized"
+      class="fixed right-4 bottom-4 z-[89] w-[320px] max-w-[calc(100vw-2rem)]"
+    >
+      <UiPanel>
+        <div class="flex items-start justify-between gap-2">
+          <div class="min-w-0">
+            <p class="m-0 text-sm font-600">待定人同步中</p>
+            <p class="m-0 mt-1 text-xs text-muted truncate">{{ pendingSyncProgress.message }}</p>
+          </div>
+          <span class="mt-0.5 h-3.5 w-3.5 rounded-full border-2 border-brand/28 border-t-brand animate-spin" />
+        </div>
+        <div class="mt-2 flex justify-end">
+          <UiButton variant="ghost" @click="restorePendingSyncProgress">展开</UiButton>
         </div>
       </UiPanel>
     </div>

@@ -33,13 +33,16 @@ import {
   listScoringResults,
   generateInterviewKit,
   getScoringTemplate,
-  runCandidateScoring,
+  runCandidateAiAnalysis,
   runInterviewEvaluation,
   saveInterviewRecording,
   saveInterviewKit,
   setCandidateQualification,
   setDefaultAiProviderProfile,
   syncPendingCandidateToCandidate,
+  runPendingCandidatesAiSync,
+  listPendingCandidatesPage,
+  previewResumeProfile,
   submitInterviewFeedback,
   testAiProviderProfile,
   triggerSidecarCrawlCandidates,
@@ -172,7 +175,7 @@ describe("backend AI profile commands", () => {
 
   it("passes snake_case args for scoring commands", async () => {
     await getScoringTemplate(12);
-    await runCandidateScoring({
+    await runCandidateAiAnalysis({
       candidate_id: 101,
       job_id: 12,
     });
@@ -180,7 +183,7 @@ describe("backend AI profile commands", () => {
     expect(invokeMock).toHaveBeenCalledWith("get_scoring_template", {
       job_id: 12,
     });
-    expect(invokeMock).toHaveBeenCalledWith("run_candidate_scoring", {
+    expect(invokeMock).toHaveBeenCalledWith("run_candidate_ai_analysis", {
       input: {
         candidate_id: 101,
         job_id: 12,
@@ -196,7 +199,7 @@ describe("backend AI profile commands", () => {
     await listScoringResults(103);
     await listHiringDecisions(104);
     await listInterviewEvaluations(105);
-    await runCandidateScoring({
+    await runCandidateAiAnalysis({
       candidate_id: 106,
       job_id: 12,
       run_id: "run-106",
@@ -225,7 +228,7 @@ describe("backend AI profile commands", () => {
     expect(invokeMock).toHaveBeenCalledWith("list_interview_evaluations", {
       candidateId: 105,
     });
-    expect(invokeMock).toHaveBeenCalledWith("run_candidate_scoring", {
+    expect(invokeMock).toHaveBeenCalledWith("run_candidate_ai_analysis", {
       input: {
         candidate_id: 106,
         job_id: 12,
@@ -721,9 +724,24 @@ describe("backend AI profile commands", () => {
       sync_status: "UNSYNCED",
       name_like: "王",
     });
+    await listPendingCandidatesPage({
+      page: 1,
+      page_size: 50,
+      sync_status: "FAILED",
+    });
     await syncPendingCandidateToCandidate({
       pending_candidate_id: 18,
       run_screening: true,
+    });
+    await runPendingCandidatesAiSync({
+      mode: "multi",
+      pending_candidate_ids: [18, 19],
+      run_id: "pending-sync-1",
+    });
+    await previewResumeProfile({
+      file_name: "resume.pdf",
+      content_base64: "aGVsbG8=",
+      enable_ocr: true,
     });
 
     expect(invokeMock).toHaveBeenCalledWith("upsert_pending_candidates", {
@@ -750,10 +768,31 @@ describe("backend AI profile commands", () => {
         name_like: "王",
       },
     });
+    expect(invokeMock).toHaveBeenCalledWith("list_pending_candidates_page", {
+      input: {
+        page: 1,
+        page_size: 50,
+        sync_status: "FAILED",
+      },
+    });
     expect(invokeMock).toHaveBeenCalledWith("sync_pending_candidate_to_candidate", {
       input: {
         pending_candidate_id: 18,
         run_screening: true,
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith("run_pending_candidates_ai_sync", {
+      input: {
+        mode: "multi",
+        pending_candidate_ids: [18, 19],
+        run_id: "pending-sync-1",
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith("preview_resume_profile", {
+      input: {
+        file_name: "resume.pdf",
+        content_base64: "aGVsbG8=",
+        enable_ocr: true,
       },
     });
   });

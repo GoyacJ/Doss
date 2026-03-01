@@ -21,7 +21,7 @@ export interface AnalysisContextDeps {
   hiringDecisions: Ref<Record<number, HiringDecisionRecord[]>>;
   pipelineEvents: Ref<Record<number, PipelineEvent[]>>;
   mapAnalysis: (record: BackendAnalysisRecord) => UiAnalysisRecord;
-  runCandidateScoring: (input: { candidate_id: number; job_id?: number; run_id?: string }) => Promise<unknown>;
+  runCandidateAiAnalysis: (input: { candidate_id: number; job_id?: number; run_id?: string }) => Promise<unknown>;
   listAnalysis: (candidateId: number) => Promise<BackendAnalysisRecord[]>;
   listPipelineEvents: (candidateId: number) => Promise<PipelineEvent[]>;
   listScoringResults: (candidateId: number) => Promise<ScoringResultRecord[]>;
@@ -123,7 +123,7 @@ export function createAnalysisContextModule(deps: AnalysisContextDeps) {
       ...payload,
       source: payload.source ?? "manual",
     });
-    await deps.runCandidateScoring({
+    await deps.runCandidateAiAnalysis({
       candidate_id: payload.candidate_id,
       job_id: payload.job_id,
     });
@@ -135,7 +135,7 @@ export function createAnalysisContextModule(deps: AnalysisContextDeps) {
   }
 
   async function analyzeCandidate(candidateId: number, jobId?: number, runId?: string) {
-    await deps.runCandidateScoring({
+    await deps.runCandidateAiAnalysis({
       candidate_id: candidateId,
       job_id: jobId,
       ...(runId ? { run_id: runId } : {}),
@@ -160,7 +160,7 @@ export function createAnalysisContextModule(deps: AnalysisContextDeps) {
   }
 
   async function runScoring(candidateId: number, jobId?: number, runId?: string) {
-    await deps.runCandidateScoring({
+    await deps.runCandidateAiAnalysis({
       candidate_id: candidateId,
       job_id: jobId,
       ...(runId ? { run_id: runId } : {}),
@@ -170,7 +170,7 @@ export function createAnalysisContextModule(deps: AnalysisContextDeps) {
   }
 
   async function rerunAiAnalysis(candidateId: number, jobId?: number, runId?: string) {
-    await deps.runCandidateScoring({
+    await deps.runCandidateAiAnalysis({
       candidate_id: candidateId,
       job_id: jobId,
       ...(runId ? { run_id: runId } : {}),

@@ -476,5 +476,32 @@ pub(crate) fn migrate_db(db_path: &Path) -> AppResult<()> {
         )?;
     }
 
+    let ai_rebuild_marker: Option<String> = conn
+        .query_row(
+            "SELECT value_json FROM app_settings WHERE key = 'ai_fulltext_rebuild_v1_done' LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    if ai_rebuild_marker.is_none() {
+        let now = Utc::now().to_rfc3339();
+        conn.execute("DELETE FROM resumes", [])?;
+        conn.execute("DELETE FROM resume_files", [])?;
+        conn.execute("DELETE FROM analysis_results", [])?;
+        conn.execute("DELETE FROM scoring_results", [])?;
+        conn.execute("DELETE FROM screening_results", [])?;
+        conn.execute("DELETE FROM pending_candidates", [])?;
+        conn.execute(
+            r#"
+            INSERT INTO app_settings(key, value_json, updated_at)
+            VALUES ('ai_fulltext_rebuild_v1_done', 'true', ?1)
+            ON CONFLICT(key)
+            DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
+            "#,
+            [now],
+        )?;
+    }
+
     Ok(())
 }

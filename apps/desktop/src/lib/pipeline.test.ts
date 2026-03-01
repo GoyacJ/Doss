@@ -8,5 +8,12 @@ describe("pipeline helpers", () => {
 
   it("returns valid next stage options", () => {
     expect(nextStageOptions("NEW")).toEqual(["SCREENING", "HOLD", "REJECTED"]);
+    expect(nextStageOptions("REJECTED")).toEqual([
+      "NEW",
+      "SCREENING",
+      "INTERVIEW",
+      "HOLD",
+      "OFFERED",
+    ]);
   });
 });

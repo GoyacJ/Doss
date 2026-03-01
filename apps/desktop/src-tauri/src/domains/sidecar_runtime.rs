@@ -254,6 +254,31 @@ fn sidecar_post_json(state: &AppState, path: &str, payload: Value) -> Result<Val
         .map_err(|error| format!("sidecar_invalid_json:{error}"))
 }
 
+pub(crate) fn try_crawl_resume_for_pending_sync(
+    state: &AppState,
+    source: &str,
+    candidate_id: &str,
+) -> Result<Value, String> {
+    let normalized_source = source.trim().to_lowercase();
+    if normalized_source.is_empty() || normalized_source == "manual" {
+        return Err("pending_resume_source_not_supported".to_string());
+    }
+    let normalized_candidate_id = candidate_id.trim();
+    if normalized_candidate_id.is_empty() {
+        return Err("pending_external_candidate_id_missing".to_string());
+    }
+
+    sidecar_post_json(
+        state,
+        "/v1/crawl/resume",
+        serde_json::json!({
+          "source": normalized_source,
+          "mode": "compliant",
+          "candidateId": normalized_candidate_id
+        }),
+    )
+}
+
 #[tauri::command]
 pub(crate) fn ensure_sidecar(state: State<'_, AppState>) -> Result<SidecarRuntime, String> {
     ensure_sidecar_running(state.inner())

@@ -12,6 +12,10 @@ use std::process::{Command, Stdio};
 use zip::ZipArchive;
 
 use crate::core::time::now_iso;
+use crate::models::candidate::{
+    ResumeProfileFieldInt, ResumeProfileFieldNumber, ResumeProfileFieldText,
+    ResumeProfilePreviewExtracted,
+};
 use crate::models::resume::{
     ResumeBasicInfo, ResumeDerivedMetrics, ResumeEducationItem, ResumeLanguageItem,
     ResumeParseMeta, ResumeParsedV2, ResumeProjectItem, ResumeSection, ResumeWorkExperienceItem,
@@ -1046,4 +1050,271 @@ pub(crate) fn project_mentions_from_parsed_json(parsed: &Value) -> i64 {
         .and_then(|value| value.as_array())
         .map(|items| items.len() as i64)
         .unwrap_or(0)
+}
+
+fn confidence_level(confidence: f64) -> String {
+    if confidence >= 0.85 {
+        "HIGH".to_string()
+    } else if confidence >= 0.6 {
+        "MEDIUM".to_string()
+    } else {
+        "LOW".to_string()
+    }
+}
+
+fn build_text_field(
+    value: String,
+    confidence: f64,
+    evidences: Vec<String>,
+) -> Option<ResumeProfileFieldText> {
+    let normalized = value.trim().to_string();
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(ResumeProfileFieldText {
+        value: normalized,
+        confidence,
+        confidence_level: confidence_level(confidence),
+        evidences,
+    })
+}
+
+fn build_number_field(
+    value: f64,
+    confidence: f64,
+    evidences: Vec<String>,
+) -> Option<ResumeProfileFieldNumber> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    Some(ResumeProfileFieldNumber {
+        value,
+        confidence,
+        confidence_level: confidence_level(confidence),
+        evidences,
+    })
+}
+
+fn build_int_field(
+    value: i32,
+    confidence: f64,
+    evidences: Vec<String>,
+) -> Option<ResumeProfileFieldInt> {
+    if value < 0 {
+        return None;
+    }
+    Some(ResumeProfileFieldInt {
+        value,
+        confidence,
+        confidence_level: confidence_level(confidence),
+        evidences,
+    })
+}
+
+fn extract_field_line_with_regex(lines: &[&str], regex: &Regex) -> Option<(String, String)> {
+    for line in lines {
+        if let Some(capture) = regex.captures(line) {
+            let Some(value) = capture.get(1).map(|item| item.as_str().trim()) else {
+                continue;
+            };
+            if value.is_empty() {
+                continue;
+            }
+            return Some((value.to_string(), (*line).trim().to_string()));
+        }
+    }
+    None
+}
+
+pub(crate) fn extract_resume_profile_fields(raw_text: &str) -> ResumeProfilePreviewExtracted {
+    let normalized = normalize_resume_text(raw_text);
+    let lines = normalized
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+
+    let name = {
+        let explicit = Regex::new(r"(?i)(?:姓名|name)\s*[:：]\s*([^\s|,，]{2,20})").ok();
+        if let Some(regex) = explicit.as_ref() {
+            if let Some((value, evidence)) = extract_field_line_with_regex(&lines, regex) {
+                build_text_field(value, 0.95, vec![evidence])
+            } else {
+                let first_line = lines.first().copied().unwrap_or_default();
+                let looks_like_name = first_line.chars().count() <= 16
+                    && !first_line.contains('@')
+                    && !first_line.contains("简历")
+                    && !first_line.contains("工作")
+                    && !first_line.contains("经验");
+                if looks_like_name {
+                    build_text_field(first_line.to_string(), 0.62, vec![first_line.to_string()])
+                } else {
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
+    let current_company = {
+        let regex = Regex::new(
+            r"(?i)(?:当前公司|现公司|目前公司|现任公司|所在公司|就职于|任职于|current\s*company)\s*[:：]?\s*([^\n,，|]{2,60})",
+        )
+        .ok();
+        if let Some(regex) = regex.as_ref() {
+            if let Some((value, evidence)) = extract_field_line_with_regex(&lines, regex) {
+                build_text_field(value, 0.88, vec![evidence])
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    let years_of_experience = {
+        let regexes = [
+            Regex::new(r"(?i)(\d{1,2}(?:\.\d+)?)\s*年(?:工作)?经验").ok(),
+            Regex::new(r"(?i)工作年限\s*[:：]?\s*(\d{1,2}(?:\.\d+)?)").ok(),
+            Regex::new(r"(?i)experience\s*[:：]?\s*(\d{1,2}(?:\.\d+)?)").ok(),
+        ];
+        let mut best_value: Option<f64> = None;
+        let mut evidences = Vec::<String>::new();
+        let mut best_confidence = 0.0_f64;
+
+        for regex in regexes.iter().flatten() {
+            for line in lines.iter().copied() {
+                let Some(capture) = regex.captures(line) else {
+                    continue;
+                };
+                let Some(raw_number) = capture.get(1).map(|item| item.as_str()) else {
+                    continue;
+                };
+                let Ok(parsed) = raw_number.parse::<f64>() else {
+                    continue;
+                };
+                if !(0.0..=50.0).contains(&parsed) {
+                    continue;
+                }
+                if best_value.is_none() || parsed > best_value.unwrap_or(0.0) {
+                    best_value = Some(parsed);
+                    evidences = vec![line.to_string()];
+                    best_confidence = 0.9;
+                }
+            }
+        }
+
+        best_value.and_then(|value| build_number_field(value, best_confidence, evidences))
+    };
+
+    let age = {
+        let regexes = [
+            Regex::new(r"(?i)年龄\s*[:：]?\s*(\d{2})").ok(),
+            Regex::new(r"(?i)(\d{2})\s*岁").ok(),
+        ];
+        let mut matched: Option<i32> = None;
+        let mut evidence = String::new();
+        let mut confidence = 0.0_f64;
+        for regex in regexes.iter().flatten() {
+            for line in lines.iter().copied() {
+                let Some(capture) = regex.captures(line) else {
+                    continue;
+                };
+                let Some(raw_number) = capture.get(1).map(|item| item.as_str()) else {
+                    continue;
+                };
+                let Ok(parsed) = raw_number.parse::<i32>() else {
+                    continue;
+                };
+                if !(16..=70).contains(&parsed) {
+                    continue;
+                }
+                matched = Some(parsed);
+                evidence = line.to_string();
+                confidence = if line.contains("年龄") { 0.92 } else { 0.72 };
+                break;
+            }
+            if matched.is_some() {
+                break;
+            }
+        }
+        matched.and_then(|value| build_int_field(value, confidence, vec![evidence]))
+    };
+
+    let gender = {
+        let regex = Regex::new(r"(?i)性别\s*[:：]?\s*(男|女|male|female)").ok();
+        if let Some(regex) = regex.as_ref() {
+            if let Some((value, evidence)) = extract_field_line_with_regex(&lines, regex) {
+                let normalized_gender = match value.to_lowercase().as_str() {
+                    "男" | "male" => "male",
+                    "女" | "female" => "female",
+                    _ => "other",
+                }
+                .to_string();
+                build_text_field(normalized_gender, 0.94, vec![evidence])
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    let address = {
+        let regex = Regex::new(
+            r"(?i)(?:现居住地|居住地|住址|地址|所在地|location|现居)\s*[:：]?\s*([^\n]{2,80})",
+        )
+        .ok();
+        if let Some(regex) = regex.as_ref() {
+            if let Some((value, evidence)) = extract_field_line_with_regex(&lines, regex) {
+                build_text_field(value, 0.83, vec![evidence])
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    let phone = {
+        let regex = Regex::new(r"(?i)(\+?\d[\d\-\s]{6,}\d)").ok();
+        if let Some(regex) = regex.as_ref() {
+            if let Some((value, evidence)) = extract_field_line_with_regex(&lines, regex) {
+                let normalized = value
+                    .chars()
+                    .filter(|ch| ch.is_ascii_digit() || *ch == '+')
+                    .collect::<String>();
+                build_text_field(normalized, 0.9, vec![evidence])
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    let email = {
+        let regex = Regex::new(r"(?i)([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})").ok();
+        if let Some(regex) = regex.as_ref() {
+            if let Some((value, evidence)) = extract_field_line_with_regex(&lines, regex) {
+                build_text_field(value.to_lowercase(), 0.97, vec![evidence])
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    ResumeProfilePreviewExtracted {
+        name,
+        current_company,
+        years_of_experience,
+        age,
+        gender,
+        address,
+        phone,
+        email,
+    }
 }

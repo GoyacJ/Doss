@@ -30,7 +30,7 @@ const backend = vi.hoisted(() => ({
   loadDashboardMetrics: vi.fn(),
   mergeCandidateImport: vi.fn(),
   moveCandidateStage: vi.fn(),
-  runCandidateScoring: vi.fn(),
+  runCandidateAiAnalysis: vi.fn(),
   runInterviewEvaluation: vi.fn(),
   searchCandidates: vi.fn(),
   saveInterviewKit: vi.fn(),
@@ -49,6 +49,7 @@ const backend = vi.hoisted(() => ({
   upsertAiProviderSettings: vi.fn(),
   setCandidateQualification: vi.fn(),
   upsertPendingCandidates: vi.fn(),
+  runPendingCandidatesAiSync: vi.fn(),
   syncPendingCandidateToCandidate: vi.fn(),
   upsertScoringTemplate: vi.fn(),
   upsertTaskRuntimeSettings: vi.fn(),
@@ -84,19 +85,16 @@ describe("recruiting store auto workflow", () => {
     backend.upsertCrawlTaskPeople.mockResolvedValue([]);
     backend.updateCrawlTaskPeopleSync.mockResolvedValue([]);
     backend.upsertPendingCandidates.mockResolvedValue([]);
-    backend.syncPendingCandidateToCandidate.mockResolvedValue({
-      id: 11,
-      source: "boss",
-      external_id: "boss-existing-11",
-      name: "张三",
-      current_company: "示例科技",
-      job_id: 101,
-      job_title: "前端工程师",
-      years_of_experience: 5,
-      stage: "NEW",
-      tags: ["safe"],
-      created_at: "2026-02-26T00:00:00Z",
-      updated_at: "2026-02-26T00:00:00Z",
+    backend.runPendingCandidatesAiSync.mockResolvedValue({
+      run_id: "pending-sync-1",
+      total: 2,
+      completed: 2,
+      success: 2,
+      failed: 0,
+      outcomes: [
+        { pending_candidate_id: 1, status: "SYNCED", candidate_id: 11 },
+        { pending_candidate_id: 2, status: "SYNCED", candidate_id: 12 },
+      ],
     });
     backend.deleteCrawlTask.mockResolvedValue(true);
     backend.deleteResume.mockResolvedValue(true);
@@ -269,7 +267,7 @@ describe("recruiting store auto workflow", () => {
       created_at: "2026-02-26T00:00:00Z",
       updated_at: "2026-02-26T00:00:00Z",
     });
-    backend.runCandidateScoring.mockResolvedValue({
+    backend.runCandidateAiAnalysis.mockResolvedValue({
       id: 1,
       candidate_id: 11,
       overall_score: 82,
@@ -286,7 +284,7 @@ describe("recruiting store auto workflow", () => {
     backend.listInterviewEvaluations.mockResolvedValue([]);
     backend.listPipelineEvents.mockResolvedValue([]);
     backend.listScoringResults.mockResolvedValue([]);
-    backend.runCandidateScoring.mockResolvedValue({
+    backend.runCandidateAiAnalysis.mockResolvedValue({
       id: 1,
       candidate_id: 11,
       job_id: 101,
@@ -516,7 +514,7 @@ describe("recruiting store auto workflow", () => {
     expect(result.analysisTriggered).toBe(2);
 
     expect(backend.triggerSidecarCrawlResume).toHaveBeenCalledTimes(2);
-    expect(backend.runCandidateScoring).toHaveBeenCalledTimes(2);
+    expect(backend.runCandidateAiAnalysis).toHaveBeenCalledTimes(2);
     expect(backend.upsertResume).toHaveBeenCalledTimes(2);
     for (const [payload] of backend.upsertResume.mock.calls) {
       expect(payload).toEqual(expect.objectContaining({
@@ -751,8 +749,8 @@ describe("recruiting store auto workflow", () => {
         }),
       }),
     );
-    expect(backend.runCandidateScoring).toHaveBeenCalledTimes(1);
-    expect(backend.runCandidateScoring).toHaveBeenCalledWith(expect.objectContaining({
+    expect(backend.runCandidateAiAnalysis).toHaveBeenCalledTimes(1);
+    expect(backend.runCandidateAiAnalysis).toHaveBeenCalledWith(expect.objectContaining({
       candidate_id: 11,
     }));
     expect(backend.loadDashboardMetrics).toHaveBeenCalledTimes(2);
@@ -778,7 +776,7 @@ describe("recruiting store auto workflow", () => {
         }),
       }),
     );
-    expect(backend.runCandidateScoring).not.toHaveBeenCalled();
+    expect(backend.runCandidateAiAnalysis).not.toHaveBeenCalled();
     expect(backend.loadDashboardMetrics).toHaveBeenCalledTimes(2);
   });
 
@@ -788,7 +786,7 @@ describe("recruiting store auto workflow", () => {
 
     await store.rerunAiAnalysis(11, 101);
 
-    expect(backend.runCandidateScoring).toHaveBeenCalledWith({
+    expect(backend.runCandidateAiAnalysis).toHaveBeenCalledWith({
       candidate_id: 11,
       job_id: 101,
     });
@@ -1180,19 +1178,17 @@ describe("recruiting store auto workflow", () => {
         updated_at: "2026-02-26T00:00:00Z",
       },
     ]);
-    backend.syncPendingCandidateToCandidate.mockResolvedValue({
-      id: 11,
-      source: "boss",
-      external_id: "boss-candidate-303",
-      name: "钱七",
-      current_company: "示例科技",
-      job_id: 101,
-      job_title: "前端工程师",
-      years_of_experience: 4,
-      stage: "NEW",
-      tags: ["safe"],
-      created_at: "2026-02-26T00:00:00Z",
-      updated_at: "2026-02-26T00:00:00Z",
+    backend.runPendingCandidatesAiSync.mockResolvedValueOnce({
+      run_id: "pending-sync-303",
+      total: 1,
+      completed: 1,
+      success: 1,
+      failed: 0,
+      outcomes: [{
+        pending_candidate_id: 801,
+        status: "SYNCED",
+        candidate_id: 11,
+      }],
     });
     backend.updateCrawlTaskPeopleSync.mockResolvedValue([
       {
@@ -1225,9 +1221,9 @@ describe("recruiting store auto workflow", () => {
           job_id: 101,
         })],
       });
-      expect(backend.syncPendingCandidateToCandidate).toHaveBeenCalledWith({
-        pending_candidate_id: 801,
-        run_screening: true,
+      expect(backend.runPendingCandidatesAiSync).toHaveBeenCalledWith({
+        mode: "multi",
+        pending_candidate_ids: [801],
       });
       expect(backend.updateCrawlTaskPeopleSync).toHaveBeenCalledWith({
         task_id: 303,
@@ -1236,10 +1232,6 @@ describe("recruiting store auto workflow", () => {
           sync_status: "SYNCED",
           candidate_id: 11,
         })],
-      });
-      expect(backend.runCandidateScoring).toHaveBeenCalledWith({
-        candidate_id: 11,
-        job_id: 101,
       });
     });
   });

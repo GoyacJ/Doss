@@ -19,9 +19,11 @@ use domains::ai_settings::{
 use domains::candidate::{
     create_candidate, delete_candidate, delete_resume, get_resume, list_analysis, list_candidates,
     list_candidates_page, list_decision_candidates_page, list_interview_candidates_page,
-    list_pending_candidates, list_pipeline_events, merge_candidate_import, move_candidate_stage,
-    set_candidate_qualification, sync_pending_candidate_to_candidate, update_candidate,
-    upsert_pending_candidates, upsert_resume,
+    list_pending_candidates, list_pending_candidates_page, list_pipeline_events,
+    merge_candidate_import, move_candidate_stage, preview_resume_profile,
+    run_pending_candidates_ai_sync, set_candidate_qualification,
+    sync_pending_candidate_to_candidate, update_candidate, upsert_pending_candidates,
+    upsert_resume,
 };
 use domains::crawl_task::{
     create_crawl_task, delete_crawl_task, list_crawl_task_people, list_crawl_tasks,
@@ -35,7 +37,7 @@ use domains::interview::{
 use domains::jobs::{create_job, delete_job, list_jobs, stop_job, update_job};
 use domains::scoring::{
     create_scoring_template, delete_scoring_template, get_scoring_template, list_scoring_results,
-    list_scoring_templates, run_candidate_scoring, set_job_scoring_template,
+    list_scoring_templates, run_candidate_ai_analysis, set_job_scoring_template,
     update_scoring_template, upsert_scoring_template,
 };
 use domains::search::search_candidates;
@@ -114,9 +116,12 @@ pub fn run() {
             get_resume,
             delete_resume,
             upsert_resume,
+            preview_resume_profile,
             upsert_pending_candidates,
             list_pending_candidates,
+            list_pending_candidates_page,
             sync_pending_candidate_to_candidate,
+            run_pending_candidates_ai_sync,
             get_scoring_template,
             upsert_scoring_template,
             list_scoring_templates,
@@ -124,7 +129,7 @@ pub fn run() {
             update_scoring_template,
             delete_scoring_template,
             set_job_scoring_template,
-            run_candidate_scoring,
+            run_candidate_ai_analysis,
             list_scoring_results,
             generate_interview_kit,
             save_interview_kit,

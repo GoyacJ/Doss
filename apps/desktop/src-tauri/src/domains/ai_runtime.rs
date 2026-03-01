@@ -1127,7 +1127,6 @@ pub(crate) fn build_ai_prompts(context: &AiPromptContext) -> (String, String) {
         "tags": context.tags,
         "resumeParsed": context.resume_parsed,
         "resumeText": context.resume_raw_text,
-        "resumeExcerpt": trim_resume_excerpt(&context.resume_raw_text, 2600),
     });
 
     (system_prompt.to_string(), user_payload.to_string())

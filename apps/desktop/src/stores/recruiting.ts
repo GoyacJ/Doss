@@ -41,6 +41,7 @@ import {
   triggerSidecarCrawlCandidates,
   triggerSidecarCrawlJobs,
   triggerSidecarCrawlResume,
+  runPendingCandidatesAiSync,
   setJobScoringTemplate as setJobScoringTemplateApi,
   stopJob as stopJobApi,
   upsertTaskRuntimeSettings,
@@ -50,10 +51,11 @@ import {
   updateCrawlTaskPeopleSync as updateCrawlTaskPeopleSyncApi,
   upsertCrawlTaskPeople as upsertCrawlTaskPeopleApi,
   upsertPendingCandidates,
-  syncPendingCandidateToCandidate,
   type AppHealth,
   type AiProviderId,
   type AiProviderSettings,
+  type PendingSyncRunInput,
+  type PendingSyncRunResult,
   type AiProviderTestResult,
   type ScoringResultRecord,
   type ScoringTemplateRecord,
@@ -80,7 +82,7 @@ import {
   listInterviewEvaluations,
   listPipelineEvents,
   listScoringResults,
-  runCandidateScoring,
+  runCandidateAiAnalysis,
   runInterviewEvaluation as runInterviewEvaluationApi,
   saveInterviewKit as saveInterviewKitApi,
   submitInterviewFeedback as submitInterviewFeedbackApi,
@@ -746,46 +748,28 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     let syncedPeople = 0;
     let failedPeople = 0;
     if (payload.autoSyncToCandidates) {
-      const syncOutcomesByDedupe = new Map<string, {
+      const syncByPendingId = new Map<number, {
         sync_status: "SYNCED" | "FAILED";
         candidate_id?: number;
         sync_error_message?: string;
       }>();
+      if (pendingRecords.length > 0) {
+        const syncResult = await runPendingCandidatesAiSync({
+          mode: "multi",
+          pending_candidate_ids: pendingRecords.map((item) => item.id),
+        });
+        for (const outcome of syncResult.outcomes) {
+          syncByPendingId.set(outcome.pending_candidate_id, {
+            sync_status: outcome.status,
+            candidate_id: outcome.candidate_id ?? undefined,
+            sync_error_message: outcome.error_message ?? undefined,
+          });
+        }
+      }
+
+      const pendingIdByDedupe = new Map<string, number>();
       for (const pending of pendingRecords) {
-        if (pending.sync_status === "SYNCED" && pending.candidate_id) {
-          syncOutcomesByDedupe.set(pending.dedupe_key, {
-            sync_status: "SYNCED",
-            candidate_id: pending.candidate_id,
-          });
-          continue;
-        }
-        try {
-          const candidate = await syncPendingCandidateToCandidate({
-            pending_candidate_id: pending.id,
-            run_screening: true,
-          });
-          upsertCandidateInList(candidate);
-          try {
-            await runCandidateScoring({
-              candidate_id: candidate.id,
-              job_id: candidate.job_id ?? undefined,
-            });
-          } catch (error) {
-            const scoringErrorMessage = resolveErrorMessage(error, "candidate_scoring_failed");
-            if (scoringErrorMessage !== "Resume required before scoring") {
-              throw new Error(scoringErrorMessage);
-            }
-          }
-          syncOutcomesByDedupe.set(pending.dedupe_key, {
-            sync_status: "SYNCED",
-            candidate_id: candidate.id,
-          });
-        } catch (error) {
-          syncOutcomesByDedupe.set(pending.dedupe_key, {
-            sync_status: "FAILED",
-            sync_error_message: resolveErrorMessage(error, "candidate_sync_failed"),
-          });
-        }
+        pendingIdByDedupe.set(pending.dedupe_key, pending.id);
       }
 
       const syncedByExternalId = new Map<string, {
@@ -800,7 +784,8 @@ export const useRecruitingStore = defineStore("recruiting", () => {
       }>();
       for (const person of mergedPeople) {
         const dedupeKey = buildPendingDedupeKey(person.name, person.age, person.address);
-        const outcome = syncOutcomesByDedupe.get(dedupeKey);
+        const pendingId = pendingIdByDedupe.get(dedupeKey);
+        const outcome = pendingId ? syncByPendingId.get(pendingId) : undefined;
         if (!outcome) {
           continue;
         }
@@ -843,6 +828,11 @@ export const useRecruitingStore = defineStore("recruiting", () => {
         updates,
       });
       taskPeople.value[task.id] = afterSync;
+      const [candidatesData] = await Promise.all([
+        listCandidates(),
+        refreshMetrics(),
+      ]);
+      candidates.value = candidatesData;
       syncedPeople = afterSync.filter((item) => item.sync_status === "SYNCED").length;
       failedPeople = afterSync.filter((item) => item.sync_status === "FAILED").length;
     }
@@ -1156,7 +1146,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     hiringDecisions,
     pipelineEvents,
     mapAnalysis: mapBackendAnalysisRecord,
-    runCandidateScoring,
+    runCandidateAiAnalysis,
     listAnalysis,
     listHiringDecisions,
     listInterviewEvaluations,
@@ -1359,6 +1349,14 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     return people;
   }
 
+  async function runPendingAiSync(input: PendingSyncRunInput): Promise<PendingSyncRunResult> {
+    const result = await runPendingCandidatesAiSync(input);
+    const candidatesData = await listCandidates();
+    candidates.value = candidatesData;
+    await refreshMetrics();
+    return result;
+  }
+
   async function toggleTaskRunState(taskId: number) {
     const task = findTaskById(taskId);
     if (!task) {
@@ -1522,6 +1520,7 @@ export const useRecruitingStore = defineStore("recruiting", () => {
     loadTaskSettings,
     saveTaskSettings,
     loadTaskPeople,
+    runPendingAiSync,
     syncTaskPeople,
     toggleTaskRunState,
     deleteTask,
