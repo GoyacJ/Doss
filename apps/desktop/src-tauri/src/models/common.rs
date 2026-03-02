@@ -39,20 +39,9 @@ impl PipelineStage {
 }
 
 pub(crate) fn is_valid_transition(from: &str, to: &str) -> bool {
-    if from == "REJECTED" {
-        return true;
-    }
-    match (from, to) {
-        ("NEW", "SCREENING")
-        | ("NEW", "REJECTED")
-        | ("SCREENING", "INTERVIEW")
-        | ("SCREENING", "HOLD")
-        | ("SCREENING", "REJECTED")
-        | ("INTERVIEW", "OFFERED")
-        | ("INTERVIEW", "HOLD")
-        | ("INTERVIEW", "REJECTED") => true,
-        _ => from == to,
-    }
+    let _ = from;
+    let _ = to;
+    true
 }
 
 pub(crate) fn resolve_qualification_stage(

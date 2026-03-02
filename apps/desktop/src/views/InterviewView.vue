@@ -226,6 +226,24 @@ async function openDrawer(candidate: CandidateRecord) {
   }
 }
 
+function parseCandidateIdQuery(value: unknown): number | null {
+  const raw = Array.isArray(value) ? value[0] : value;
+  const candidateId = Number(raw);
+  if (!Number.isFinite(candidateId) || candidateId <= 0) {
+    return null;
+  }
+  return candidateId;
+}
+
+async function openDrawerByCandidateId(candidateId: number) {
+  const candidate = rows.value.find((item) => item.id === candidateId)
+    ?? store.candidates.find((item) => item.id === candidateId);
+  if (!candidate) {
+    return;
+  }
+  await openDrawer(candidate);
+}
+
 async function removeInterview(candidate: CandidateRecord) {
   if (actingCandidateId.value) {
     return;
@@ -486,18 +504,26 @@ watch(() => filters.nameLike, () => {
   }, 250);
 });
 
+watch(
+  () => route.query.candidateId,
+  (value) => {
+    const candidateId = parseCandidateIdQuery(value);
+    if (!candidateId) {
+      return;
+    }
+    void openDrawerByCandidateId(candidateId);
+  },
+);
+
 onMounted(async () => {
   await Promise.allSettled([
     store.bootstrap(),
     loadRows(),
   ]);
 
-  const candidateId = Number(route.query.candidateId);
-  if (Number.isFinite(candidateId) && candidateId > 0) {
-    const candidate = rows.value.find((item) => item.id === candidateId);
-    if (candidate) {
-      await openDrawer(candidate);
-    }
+  const candidateId = parseCandidateIdQuery(route.query.candidateId);
+  if (candidateId) {
+    await openDrawerByCandidateId(candidateId);
   }
 });
 
@@ -540,7 +566,7 @@ onUnmounted(() => {
         </thead>
         <tbody>
           <tr v-for="candidate in rows" :key="candidate.id">
-            <UiTd>#{{ candidate.id }} {{ candidate.name }}</UiTd>
+            <UiTd>{{ candidate.name }}</UiTd>
             <UiTd>{{ candidate.job_title || (candidate.job_id ? `职位 #${candidate.job_id}` : '-') }}</UiTd>
             <UiTd>
               <UiBadge :tone="stageTone(candidate.stage)">{{ formatStageLabel(candidate.stage) }}</UiBadge>

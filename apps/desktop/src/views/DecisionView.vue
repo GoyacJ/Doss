@@ -290,7 +290,7 @@ onUnmounted(() => {
         </thead>
         <tbody>
           <tr v-for="candidate in rows" :key="candidate.id">
-            <UiTd>#{{ candidate.id }} {{ candidate.name }}</UiTd>
+            <UiTd>{{ candidate.name }}</UiTd>
             <UiTd>{{ candidate.job_title || (candidate.job_id ? `职位 #${candidate.job_id}` : '-') }}</UiTd>
             <UiTd>
               <UiBadge :tone="stageTone(candidate.stage)">{{ formatStageLabel(candidate.stage) }}</UiBadge>

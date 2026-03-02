@@ -8,14 +8,13 @@ use crate::core::state::AppState;
 use crate::core::time::now_iso;
 use crate::domains::ai_runtime::{
     invoke_text_generation, model_supports_file_upload_for_attachment, parse_json_from_text,
-    resolve_ai_settings,
+    resolve_ai_settings, trim_resume_excerpt, TextGenerationAttachment,
 };
 use crate::domains::jobs::read_job_by_id;
 use crate::domains::recruiting_utils::{
-    clamp_score, dimension_signal_score, parse_job_required_skills, parse_job_salary_max,
-    round_one_decimal,
+    clamp_score, parse_job_required_skills, parse_job_salary_max, round_one_decimal,
 };
-use crate::domains::resume_materializer::ensure_resume_materialized;
+use crate::domains::resume_materializer::materialize_resume_from_file_full_text;
 use crate::domains::resume_parser::{
     expected_salary_k_from_parsed_json, parse_skills_from_parsed_json,
     project_mentions_from_parsed_json,
@@ -30,6 +29,8 @@ use crate::models::scoring::{
 };
 
 const SCORING_PROGRESS_EVENT: &str = "candidate-ai-analysis-progress";
+const PROVIDER_RESPONSE_NOT_JSON_AFTER_REPAIR: &str = "provider_response_not_json_after_repair";
+const PROVIDER_RESPONSE_SCHEMA_INVALID: &str = "provider_response_schema_invalid";
 
 #[derive(Debug, Clone)]
 struct ScoringProgressUpdate {
@@ -79,15 +80,19 @@ struct CandidateScoringContext {
     candidate_tags: Vec<String>,
     resume_raw_text: String,
     resume_parsed: Value,
-    resume_lower: String,
     required_skills: Vec<String>,
     extracted_skills: Vec<String>,
-    normalized_skills: Vec<String>,
     matched_skill_count: usize,
     skill_coverage: f64,
     expected_salary_k: Option<f64>,
     max_salary_k: Option<f64>,
     project_mentions: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResumeInputMode {
+    DirectFile,
+    ParsedText,
 }
 
 fn scoring_progress_update(
@@ -264,251 +269,6 @@ pub(crate) fn default_scoring_template_config() -> ScoringTemplateConfig {
             ],
         },
     }
-}
-
-fn normalize_text(value: &str) -> String {
-    value
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_string()
-}
-
-fn normalize_comment(text: &str, fallback: &str) -> String {
-    let normalized = normalize_text(text);
-    if normalized.is_empty() {
-        fallback.to_string()
-    } else {
-        normalized
-    }
-}
-
-fn score_band(score_5: f64) -> &'static str {
-    if score_5 >= 4.0 {
-        "较强"
-    } else if score_5 >= 3.0 {
-        "中等"
-    } else {
-        "偏弱"
-    }
-}
-
-fn skills_preview(ctx: &CandidateScoringContext, limit: usize) -> String {
-    ctx.extracted_skills
-        .iter()
-        .take(limit)
-        .map(|item| item.trim())
-        .filter(|item| !item.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn required_skill_match_text(ctx: &CandidateScoringContext) -> String {
-    if ctx.required_skills.is_empty() {
-        return "未配置岗位技能".to_string();
-    }
-    format!("{}/{}", ctx.matched_skill_count, ctx.required_skills.len())
-}
-
-fn default_item_reason(
-    section_key: &str,
-    item: &ScoringItemConfig,
-    score_5: f64,
-    ctx: &CandidateScoringContext,
-) -> String {
-    let band = score_band(score_5);
-    let skills = skills_preview(ctx, 2);
-    match section_key {
-        "t0" => {
-            if item.key.contains("skill") {
-                return format!(
-                    "核心技能匹配{}，建议核验深度。",
-                    required_skill_match_text(ctx)
-                );
-            }
-            if item.key.contains("year") || item.label.contains("年限") {
-                return format!("{:.1}年经验，年限匹配{}。", ctx.candidate_years, band);
-            }
-            if item.key.contains("resume") || item.label.contains("完整") {
-                if ctx.project_mentions > 0 {
-                    return format!("含{}段项目经历，信息较完整。", ctx.project_mentions);
-                }
-                return "简历项目信息偏少，需补充。".to_string();
-            }
-            format!("{}与岗位要求{}。", item.label, band)
-        }
-        "t1" => {
-            if !skills.is_empty() {
-                format!("{}见{}经历，表现{}。", item.label, skills, band)
-            } else {
-                format!("{}证据有限，建议面试核验。", item.label)
-            }
-        }
-        "t2" => {
-            if item.key.contains("project") {
-                return format!(
-                    "含{}段项目，{}潜力{}。",
-                    ctx.project_mentions, item.label, band
-                );
-            }
-            if item.key.contains("rare") || item.label.contains("稀缺") {
-                if let Some(rare_skill) = ctx
-                    .extracted_skills
-                    .iter()
-                    .find(|skill| {
-                        let lower = skill.to_lowercase();
-                        lower.contains("rust")
-                            || lower.contains("go")
-                            || lower.contains("playwright")
-                            || lower.contains("k8s")
-                    })
-                    .map(|skill| skill.trim().to_string())
-                {
-                    return format!("具备{}等栈，稀缺能力可加分。", rare_skill);
-                }
-            }
-            if item.key.contains("core") || item.key.contains("skill") {
-                return format!(
-                    "核心技能匹配{}，具备加分潜力。",
-                    required_skill_match_text(ctx)
-                );
-            }
-            if !skills.is_empty() {
-                return format!("简历体现{}能力，{}。", item.label, band);
-            }
-            format!("{}表现{}，建议补充案例。", item.label, band)
-        }
-        "t3" => {
-            let risk_text = if score_5 >= 3.5 {
-                "可控"
-            } else if score_5 >= 2.0 {
-                "需关注"
-            } else {
-                "偏高"
-            };
-            if item.key.contains("salary") || item.label.contains("薪资") {
-                if let (Some(expected), Some(max)) = (ctx.expected_salary_k, ctx.max_salary_k) {
-                    return format!("期望{:.0}K/预算{:.0}K，风险{}。", expected, max, risk_text);
-                }
-                return "薪资信息不足，建议确认期望。".to_string();
-            }
-            if item.key.contains("stability") || item.label.contains("稳定") {
-                return format!(
-                    "{:.1}年经验，稳定性风险{}。",
-                    ctx.candidate_years, risk_text
-                );
-            }
-            if item.key.contains("info") || item.label.contains("信息") {
-                if ctx.resume_raw_text.chars().count() < 220 {
-                    return "关键信息偏少，决策风险较高。".to_string();
-                }
-                return "项目与经历信息较全，风险可控。".to_string();
-            }
-            format!("{}{}。", item.label, risk_text)
-        }
-        _ => format!("{}表现{}。", item.label, band),
-    }
-}
-
-fn default_section_comment(section_key: &str, section_score: f64, items: &[ScoredItem]) -> String {
-    let title = section_key.to_uppercase();
-    if items.is_empty() {
-        return format!("{title}小结：简历证据不足，建议补充后复评。");
-    }
-
-    let mut top_item = &items[0];
-    let mut low_item = &items[0];
-    for item in items.iter().skip(1) {
-        if item.score_5 > top_item.score_5 {
-            top_item = item;
-        }
-        if item.score_5 < low_item.score_5 {
-            low_item = item;
-        }
-    }
-
-    let advice = match section_key {
-        "t0" => format!("建议优先核验{}相关项目证据。", low_item.label),
-        "t1" => format!("建议围绕{}追问具体行为案例。", low_item.label),
-        "t2" => format!("建议补充{}的量化成果数据。", low_item.label),
-        "t3" => format!("建议重点排查{}的真实风险。", low_item.label),
-        _ => format!("建议补充{}的关键证据。", low_item.label),
-    };
-
-    format!(
-        "{title}小结：整体{}（{:.1}/5），优势在{}（{:.1}），短板在{}（{:.1}）。{}",
-        score_band(section_score),
-        section_score,
-        top_item.label,
-        top_item.score_5,
-        low_item.label,
-        low_item.score_5,
-        advice
-    )
-}
-
-fn build_overall_comment_fallback(
-    ctx: &CandidateScoringContext,
-    _weights: &ScoringWeights,
-    overall_score_5: f64,
-    _overall_score_100: i32,
-    t0: &SectionAssessment,
-    t1: &SectionAssessment,
-    t2: &SectionAssessment,
-    t3: &SectionAssessment,
-    recommendation: &str,
-    risk_level: &str,
-) -> String {
-    let recommendation_text = if recommendation == "PASS" {
-        "进入下一轮面试"
-    } else if recommendation == "REVIEW" {
-        "进入人工复核"
-    } else {
-        "暂缓推进"
-    };
-
-    let risk_text = match risk_level {
-        "HIGH" => "高风险",
-        "MEDIUM" => "中风险",
-        _ => "低风险",
-    };
-
-    let weakest_module = [
-        ("T0", t0.score_5, "硬性匹配与项目深度"),
-        ("T1", t1.score_5, "行为能力与协作案例"),
-        ("T2", t2.score_5, "项目影响力与加分项证明"),
-        ("T3", t3.score_5, "薪资与稳定性风险信息"),
-    ]
-    .iter()
-    .min_by(|a, b| a.1.total_cmp(&b.1))
-    .copied()
-    .unwrap_or(("T1", t1.score_5, "行为能力与协作案例"));
-
-    let skills = skills_preview(ctx, 3);
-    let skills_text = if skills.is_empty() {
-        "未提取到明确技能关键词".to_string()
-    } else {
-        format!("技能关键词包含{}", skills)
-    };
-
-    format!(
-        "候选人{:.1}年经验，简历提及{}段项目，{}；核心技能匹配{}。综合评分{:.1}/5（T0 {:.1}、T1 {:.1}、T2 {:.1}、T3 {:.1}），当前{}，建议{}。下一步建议围绕{}补充可量化证据，并在面试中重点核验{}。",
-        ctx.candidate_years,
-        ctx.project_mentions,
-        skills_text,
-        required_skill_match_text(ctx),
-        overall_score_5,
-        t0.score_5,
-        t1.score_5,
-        t2.score_5,
-        t3.score_5,
-        risk_text,
-        recommendation_text,
-        weakest_module.0,
-        weakest_module.2
-    )
 }
 
 fn normalize_item(item: &ScoringItemConfig) -> Result<ScoringItemConfig, String> {
@@ -870,124 +630,11 @@ fn recommendation_from_scores(t0_score_5: f64, overall_score_100: i32, risk_leve
     "REJECT".to_string()
 }
 
-fn risk_level_from_t3_score(t3_score_5: f64) -> &'static str {
-    if t3_score_5 < 2.0 {
-        "HIGH"
-    } else if t3_score_5 < 3.5 {
-        "MEDIUM"
-    } else {
-        "LOW"
-    }
-}
-
-fn fallback_score_for_item(
-    section_key: &str,
-    item: &ScoringItemConfig,
-    ctx: &CandidateScoringContext,
-) -> f64 {
-    let key = item.key.as_str();
-    match section_key {
-        "t0" => {
-            if key.contains("skill") {
-                return clamp_score_5(1.0 + 4.0 * ctx.skill_coverage);
-            }
-            if key.contains("year") || item.label.contains("年限") {
-                return if ctx.candidate_years >= 5.0 {
-                    4.5
-                } else if ctx.candidate_years >= 3.0 {
-                    4.0
-                } else if ctx.candidate_years >= 1.5 {
-                    3.0
-                } else {
-                    2.0
-                };
-            }
-            if key.contains("resume") || item.label.contains("完整") {
-                let len = ctx.resume_raw_text.chars().count();
-                return if len >= 400 {
-                    4.5
-                } else if len >= 220 {
-                    4.0
-                } else if len >= 120 {
-                    3.2
-                } else {
-                    1.8
-                };
-            }
-            clamp_score_5(2.8 + ctx.skill_coverage)
-        }
-        "t1" => {
-            let signal = dimension_signal_score(&item.key, &ctx.resume_lower, ctx.candidate_years);
-            clamp_score_5(signal)
-        }
-        "t2" => {
-            if key.contains("project") {
-                return if ctx.project_mentions >= 3 {
-                    4.5
-                } else if ctx.project_mentions >= 1 {
-                    3.5
-                } else {
-                    2.0
-                };
-            }
-            if key.contains("rare") || item.label.contains("稀缺") {
-                let has_rare = ctx.normalized_skills.iter().any(|skill| {
-                    skill.contains("playwright") || skill.contains("rust") || skill.contains("go")
-                });
-                return if has_rare { 4.4 } else { 2.4 };
-            }
-            if key.contains("core") || item.label.contains("核心") || key.contains("skill") {
-                return if ctx.skill_coverage >= 0.8 {
-                    4.5
-                } else if ctx.skill_coverage >= 0.5 {
-                    3.5
-                } else {
-                    2.2
-                };
-            }
-            3.0
-        }
-        "t3" => {
-            if key.contains("salary") || item.label.contains("薪资") {
-                return match (ctx.expected_salary_k, ctx.max_salary_k) {
-                    (Some(expected), Some(max)) if expected > max + 8.0 => 1.5,
-                    (Some(expected), Some(max)) if expected > max + 3.0 => 2.5,
-                    (Some(_), Some(_)) => 4.3,
-                    _ => 3.5,
-                };
-            }
-            if key.contains("stability") || item.label.contains("稳定") {
-                return if ctx.candidate_years < 1.5 {
-                    2.0
-                } else if ctx.candidate_years < 3.0 {
-                    3.0
-                } else {
-                    4.2
-                };
-            }
-            if key.contains("info") || item.label.contains("信息") {
-                let len = ctx.resume_raw_text.chars().count();
-                return if len < 120 {
-                    1.5
-                } else if len < 220 {
-                    2.8
-                } else {
-                    4.4
-                };
-            }
-            3.0
-        }
-        _ => 3.0,
-    }
-}
-
-fn parse_ai_item_map(items: Option<&Vec<Value>>) -> BTreeMap<String, Value> {
+fn parse_ai_item_map(items: &[Value]) -> BTreeMap<String, Value> {
     let mut map = BTreeMap::<String, Value>::new();
-    if let Some(values) = items {
-        for item in values {
-            if let Some(key) = item.get("key").and_then(|value| value.as_str()) {
-                map.insert(key.trim().to_lowercase(), item.clone());
-            }
+    for item in items {
+        if let Some(key) = item.get("key").and_then(|value| value.as_str()) {
+            map.insert(key.trim().to_lowercase(), item.clone());
         }
     }
     map
@@ -1006,33 +653,181 @@ fn as_string(value: Option<&Value>) -> String {
         .unwrap_or_default()
 }
 
+fn expected_scoring_json_schema_hint() -> &'static str {
+    r#"{
+  "t0_assessment": {"items": [{"key": "...", "score_5": 0-5, "reason": "...", "evidence": "..."}], "comment": "..."},
+  "t1_assessment": {"items": [{"key": "...", "score_5": 0-5, "reason": "...", "evidence": "..."}], "comment": "..."},
+  "t2_assessment": {"items": [{"key": "...", "score_5": 0-5, "reason": "...", "evidence": "..."}], "comment": "..."},
+  "t3_assessment": {"items": [{"key": "...", "score_5": 0-5, "reason": "...", "evidence": "..."}], "comment": "..."},
+  "overall_comment": "...",
+  "risk_level": "LOW|MEDIUM|HIGH",
+  "highlights": ["..."],
+  "risks": ["..."],
+  "suggestions": ["..."]
+}"#
+}
+
+fn parse_score_5_value(value: &Value) -> Option<f64> {
+    as_f64(Some(value)).or_else(|| value.as_str().and_then(|item| item.trim().parse::<f64>().ok()))
+}
+
+fn required_non_empty_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .ok_or_else(|| PROVIDER_RESPONSE_SCHEMA_INVALID.to_string())
+}
+
+fn required_array<'a>(value: &'a Value, key: &str) -> Result<&'a [Value], String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| PROVIDER_RESPONSE_SCHEMA_INVALID.to_string())
+}
+
+fn validate_scoring_response_schema(value: &Value) -> Result<(), String> {
+    required_non_empty_string(value, "overall_comment")?;
+    let risk_level = required_non_empty_string(value, "risk_level")?;
+    if !matches!(risk_level, "LOW" | "MEDIUM" | "HIGH") {
+        return Err(PROVIDER_RESPONSE_SCHEMA_INVALID.to_string());
+    }
+    required_array(value, "highlights")?;
+    required_array(value, "risks")?;
+    required_array(value, "suggestions")?;
+
+    let required_sections = ["t0_assessment", "t1_assessment", "t2_assessment", "t3_assessment"];
+    for section in required_sections {
+        let section_value = value
+            .get(section)
+            .ok_or_else(|| PROVIDER_RESPONSE_SCHEMA_INVALID.to_string())?;
+        required_non_empty_string(section_value, "comment")?;
+        let items = required_array(section_value, "items")?;
+        if items.is_empty() {
+            return Err(PROVIDER_RESPONSE_SCHEMA_INVALID.to_string());
+        }
+        for item in items {
+            let score_5_value = item
+                .get("score_5")
+                .ok_or_else(|| PROVIDER_RESPONSE_SCHEMA_INVALID.to_string())?;
+            if parse_score_5_value(score_5_value).is_none() {
+                return Err(PROVIDER_RESPONSE_SCHEMA_INVALID.to_string());
+            }
+            required_non_empty_string(item, "key")?;
+            required_non_empty_string(item, "reason")?;
+            required_non_empty_string(item, "evidence")?;
+        }
+    }
+    Ok(())
+}
+
+fn parse_json_with_repair<F>(raw_text: &str, repair_once: F) -> Result<Value, String>
+where
+    F: FnOnce() -> Result<String, String>,
+{
+    match parse_json_from_text(raw_text) {
+        Ok(value) => Ok(value),
+        Err(_) => {
+            let repaired_text = repair_once()?;
+            parse_json_from_text(&repaired_text)
+                .map_err(|_| PROVIDER_RESPONSE_NOT_JSON_AFTER_REPAIR.to_string())
+        }
+    }
+}
+
+fn invoke_json_repair(
+    settings: &ResolvedAiProviderSettings,
+    raw_text: &str,
+) -> Result<String, String> {
+    let mut repair_settings = settings.clone();
+    repair_settings.temperature = 0.0;
+    let repair_system_prompt = r#"你是 JSON 修复助手。只修复 JSON 格式，不增删语义，不要解释，不要 markdown。输出必须是单个 JSON 对象。"#;
+    let repair_user_prompt = serde_json::json!({
+        "task": "repair_json_only",
+        "schema_hint": expected_scoring_json_schema_hint(),
+        "raw_response": trim_resume_excerpt(raw_text, 6000),
+    });
+    invoke_text_generation(
+        &repair_settings,
+        repair_system_prompt,
+        &repair_user_prompt.to_string(),
+        None,
+    )
+}
+
+fn invoke_text_generation_json_strict(
+    settings: &ResolvedAiProviderSettings,
+    system_prompt: &str,
+    user_prompt: &str,
+    attachment: Option<&TextGenerationAttachment>,
+    mut on_retry: Option<&mut dyn FnMut()>,
+) -> Result<Value, String> {
+    let raw_text = invoke_text_generation(settings, system_prompt, user_prompt, attachment)?;
+    let parsed = match parse_json_from_text(&raw_text) {
+        Ok(value) => value,
+        Err(_) => {
+            if let Some(callback) = on_retry.as_mut() {
+                (**callback)();
+            }
+            parse_json_with_repair(&raw_text, || invoke_json_repair(settings, &raw_text))?
+        }
+    };
+    validate_scoring_response_schema(&parsed)?;
+    Ok(parsed)
+}
+
 fn build_section_assessment(
-    section_key: &str,
     section: &ScoringSectionConfig,
     ai_section: Option<&Value>,
-    ctx: &CandidateScoringContext,
-) -> SectionAssessment {
-    let ai_items = ai_section
-        .and_then(|value| value.get("items"))
+) -> Result<SectionAssessment, String> {
+    let section_value = ai_section.ok_or_else(|| PROVIDER_RESPONSE_SCHEMA_INVALID.to_string())?;
+    let ai_items = section_value
+        .get("items")
         .and_then(|value| value.as_array())
-        .map(|values| values.to_vec());
-    let ai_map = parse_ai_item_map(ai_items.as_ref());
+        .ok_or_else(|| PROVIDER_RESPONSE_SCHEMA_INVALID.to_string())?;
+    let ai_map = parse_ai_item_map(ai_items);
+    let template_keys = section
+        .items
+        .iter()
+        .map(|item| item.key.clone())
+        .collect::<Vec<_>>();
+
+    if ai_map.len() != template_keys.len() {
+        return Err(PROVIDER_RESPONSE_SCHEMA_INVALID.to_string());
+    }
+    for key in &template_keys {
+        if !ai_map.contains_key(key) {
+            return Err(PROVIDER_RESPONSE_SCHEMA_INVALID.to_string());
+        }
+    }
+    for key in ai_map.keys() {
+        if !template_keys.iter().any(|item| item == key) {
+            return Err(PROVIDER_RESPONSE_SCHEMA_INVALID.to_string());
+        }
+    }
 
     let mut scored_items = Vec::<ScoredItem>::new();
     for item in &section.items {
-        let ai_item = ai_map.get(&item.key);
-        let fallback_score = fallback_score_for_item(section_key, item, ctx);
-        let score_5 = as_f64(ai_item.and_then(|value| value.get("score_5")))
-            .map(clamp_score_5)
-            .unwrap_or(fallback_score);
-        let reason = normalize_comment(
-            &as_string(ai_item.and_then(|value| value.get("reason"))),
-            &default_item_reason(section_key, item, score_5, ctx),
-        );
-        let evidence = normalize_comment(
-            &as_string(ai_item.and_then(|value| value.get("evidence"))),
-            "证据来源：候选人简历与岗位描述。",
-        );
+        let ai_item = ai_map
+            .get(&item.key)
+            .ok_or_else(|| PROVIDER_RESPONSE_SCHEMA_INVALID.to_string())?;
+        let score_5 = parse_score_5_value(
+            ai_item
+                .get("score_5")
+                .ok_or_else(|| PROVIDER_RESPONSE_SCHEMA_INVALID.to_string())?,
+        )
+        .map(clamp_score_5)
+        .ok_or_else(|| PROVIDER_RESPONSE_SCHEMA_INVALID.to_string())?;
+        let reason = as_string(ai_item.get("reason"));
+        if reason.is_empty() {
+            return Err(PROVIDER_RESPONSE_SCHEMA_INVALID.to_string());
+        }
+        let evidence = as_string(ai_item.get("evidence"));
+        if evidence.is_empty() {
+            return Err(PROVIDER_RESPONSE_SCHEMA_INVALID.to_string());
+        }
 
         scored_items.push(ScoredItem {
             key: item.key.clone(),
@@ -1046,22 +841,22 @@ fn build_section_assessment(
     }
 
     let section_score = section_score_5(&scored_items);
-    let default_comment = default_section_comment(section_key, section_score, &scored_items);
-    let section_comment = normalize_comment(
-        &as_string(ai_section.and_then(|value| value.get("comment"))),
-        &default_comment,
-    );
+    let section_comment = as_string(section_value.get("comment"));
+    if section_comment.is_empty() {
+        return Err(PROVIDER_RESPONSE_SCHEMA_INVALID.to_string());
+    }
 
-    SectionAssessment {
+    Ok(SectionAssessment {
         score_5: section_score,
         items: scored_items,
         comment: section_comment,
-    }
+    })
 }
 
 fn build_scoring_prompts(
     template: &ScoringTemplateRecord,
     ctx: &CandidateScoringContext,
+    input_mode: ResumeInputMode,
 ) -> (String, String) {
     let system_prompt = r#"你是招聘评分助手。请严格输出 JSON（不要 markdown，不要额外文本）。
 输出结构:
@@ -1080,13 +875,14 @@ fn build_scoring_prompts(
 1) 只根据输入信息打分，不得编造。
 2) 每个区块 items 的 key 必须来自模板。
 3) score_5 保留 1 位小数。
-4) 每个指标 reason 为 30 字以内短评，必须包含“简历证据点+判断结论”，禁止空泛描述。
-5) 每个区块 comment 为 300 字以内，必须输出“模块小结”，包含优势、短板和下一步建议。
-6) overall_comment 为 500 字以内，必须包含简历整体概览、分数解读、整体评价、录用建议与行动建议；若超出请自我压缩重写后输出。
+4) 每个指标 reason 为 20 字以内短评，必须包含“简历证据点+判断结论”，禁止空泛描述。
+5) 每个区块 comment 为 120 字以内，必须输出“模块小结”，包含优势、短板和下一步建议。
+6) overall_comment 为 180 字以内，必须包含简历整体概览、分数解读、整体评价、录用建议与行动建议；若超出请自我压缩重写后输出。
 7) 若证据不足，明确写出“信息不足”及需要补充的材料。
-8) 避免套话和重复句式，语言简洁客观。"#;
+8) 即使信息不足也必须返回完整 JSON 结构：所有字段必须存在，highlights/risks/suggestions 可为空数组，不允许输出自然语言解释段落。
+9) 避免套话和重复句式，语言简洁客观。"#;
 
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "template": {
             "name": template.name,
             "weights": template.config.weights,
@@ -1110,9 +906,21 @@ fn build_scoring_prompts(
             "requiredSkills": ctx.required_skills,
             "maxSalaryK": ctx.max_salary_k,
         },
-        "resumeParsed": ctx.resume_parsed,
-        "resumeText": ctx.resume_raw_text,
+        "resumeInputMode": match input_mode {
+            ResumeInputMode::DirectFile => "direct_file",
+            ResumeInputMode::ParsedText => "parsed_text",
+        },
     });
+
+    if input_mode == ResumeInputMode::ParsedText {
+        payload["resumeParsed"] = ctx.resume_parsed.clone();
+        payload["resumeText"] = serde_json::Value::String(ctx.resume_raw_text.clone());
+    } else {
+        payload["resumeFileNotice"] = serde_json::Value::String(
+            "候选人简历已通过附件上传，请直接读取附件内容并完成评分，不要要求额外提供简历文本。"
+                .to_string(),
+        );
+    }
 
     (system_prompt.to_string(), payload.to_string())
 }
@@ -1130,106 +938,6 @@ fn parse_string_array(value: Option<&Value>) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
-}
-
-fn split_chunk_by_chars(text: &str, max_chars: usize) -> Vec<String> {
-    if text.trim().is_empty() {
-        return Vec::new();
-    }
-    let mut chunks = Vec::<String>::new();
-    let mut current = String::new();
-    let mut count = 0_usize;
-    for ch in text.chars() {
-        current.push(ch);
-        count += 1;
-        if count >= max_chars {
-            chunks.push(current.trim().to_string());
-            current.clear();
-            count = 0;
-        }
-    }
-    if !current.trim().is_empty() {
-        chunks.push(current.trim().to_string());
-    }
-    chunks
-}
-
-fn collect_resume_chunks(ctx: &CandidateScoringContext) -> Vec<String> {
-    let sections = ctx
-        .resume_parsed
-        .get("sections")
-        .and_then(|value| value.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let mut chunks = Vec::<String>::new();
-
-    for section in sections {
-        let title = section
-            .get("title")
-            .and_then(|value| value.as_str())
-            .unwrap_or("Section")
-            .trim();
-        let content = section
-            .get("content")
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .trim();
-        if content.is_empty() {
-            continue;
-        }
-        for chunk in split_chunk_by_chars(content, 2400) {
-            chunks.push(format!("[{title}]\n{chunk}"));
-        }
-    }
-
-    if chunks.is_empty() {
-        chunks = split_chunk_by_chars(&ctx.resume_raw_text, 2400);
-    }
-
-    chunks
-}
-
-fn invoke_text_generation_map_reduce(
-    settings: &ResolvedAiProviderSettings,
-    system_prompt: &str,
-    user_prompt: &str,
-    ctx: &CandidateScoringContext,
-) -> Result<String, String> {
-    let chunks = collect_resume_chunks(ctx);
-    if chunks.is_empty() {
-        return invoke_text_generation(settings, system_prompt, user_prompt, None);
-    }
-
-    let map_system_prompt = r#"你是招聘信息抽取助手。请仅输出 JSON，不要 markdown。
-输出结构:
-{
-  "facts": ["..."],
-  "skills": ["..."],
-  "highlights": ["..."],
-  "risks": ["..."]
-}
-要求：只根据输入 chunk 内容总结事实，不得编造。"#;
-    let mut mapped_rows = Vec::<Value>::new();
-    for (index, chunk) in chunks.iter().enumerate() {
-        let map_payload = serde_json::json!({
-            "chunkIndex": index + 1,
-            "chunkTotal": chunks.len(),
-            "requiredSkills": ctx.required_skills,
-            "chunkText": chunk,
-        });
-        let map_text =
-            invoke_text_generation(settings, map_system_prompt, &map_payload.to_string(), None)?;
-        let map_value = parse_json_from_text(&map_text)?;
-        mapped_rows.push(map_value);
-    }
-
-    let base_payload = serde_json::from_str::<Value>(user_prompt)
-        .unwrap_or_else(|_| serde_json::json!({ "rawUserPrompt": user_prompt }));
-    let reduce_payload = serde_json::json!({
-        "baseInput": base_payload,
-        "chunkFacts": mapped_rows,
-    });
-    invoke_text_generation(settings, system_prompt, &reduce_payload.to_string(), None)
 }
 
 fn run_candidate_ai_analysis_blocking<F>(
@@ -1271,7 +979,7 @@ where
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("Candidate {} not found", input.candidate_id))?;
 
-    let materialized_resume = ensure_resume_materialized(&conn, input.candidate_id)?;
+    let materialized_resume = materialize_resume_from_file_full_text(&conn, input.candidate_id)?;
     let resume_raw_text = materialized_resume.raw_text.clone();
     let resume_parsed = materialized_resume.parsed_value.clone();
 
@@ -1316,16 +1024,13 @@ where
     ));
 
     let extracted_skills = parse_skills_from_parsed_json(&resume_parsed);
-    let normalized_skills = extracted_skills
-        .iter()
-        .map(|skill| skill.to_lowercase())
-        .collect::<Vec<_>>();
     let matched_skill_count = required_skills
         .iter()
         .filter(|required| {
-            normalized_skills
+            let required_lower = required.to_lowercase();
+            extracted_skills
                 .iter()
-                .any(|owned| owned.contains(*required))
+                .any(|owned| owned.to_lowercase().contains(&required_lower))
         })
         .count();
     let skill_coverage = if required_skills.is_empty() {
@@ -1345,10 +1050,8 @@ where
         candidate_tags: candidate.3,
         resume_raw_text: resume_raw_text.clone(),
         resume_parsed: resume_parsed.clone(),
-        resume_lower: resume_raw_text.to_lowercase(),
         required_skills,
         extracted_skills,
-        normalized_skills,
         matched_skill_count,
         skill_coverage,
         expected_salary_k,
@@ -1358,7 +1061,6 @@ where
 
     let ai_settings =
         resolve_ai_settings(&conn, &state.cipher).map_err(|error| error.to_string())?;
-    let resume_attachment = materialized_resume.attachment.clone();
     if ai_settings.api_key.is_none() {
         return Err("ai_provider_api_key_missing".to_string());
     }
@@ -1369,27 +1071,45 @@ where
         "已准备模板化评分输入，开始调用 AI",
         None,
     ));
-    let (system_prompt, user_prompt) = build_scoring_prompts(&template, &ctx);
-    let ai_content =
-        if model_supports_file_upload_for_attachment(&ai_settings, resume_attachment.as_ref()) {
-            match invoke_text_generation(
-                &ai_settings,
-                &system_prompt,
-                &user_prompt,
-                resume_attachment.as_ref(),
-            ) {
-                Ok(content) => content,
-                Err(_) => invoke_text_generation_map_reduce(
-                    &ai_settings,
-                    &system_prompt,
-                    &user_prompt,
-                    &ctx,
-                )?,
-            }
+    let resume_attachment = materialized_resume.attachment.as_ref();
+    let use_direct_file = model_supports_file_upload_for_attachment(&ai_settings, resume_attachment);
+    let input_mode = if use_direct_file {
+        ResumeInputMode::DirectFile
+    } else {
+        ResumeInputMode::ParsedText
+    };
+
+    on_progress(scoring_progress_update(
+        "ai",
+        "running",
+        "start",
+        if use_direct_file {
+            "模型支持文件上传，正在直传简历文件并生成结构化评分"
         } else {
-            invoke_text_generation_map_reduce(&ai_settings, &system_prompt, &user_prompt, &ctx)?
-        };
-    let ai_value = parse_json_from_text(&ai_content)?;
+            "模型不支持文件上传，正在使用本地解析的全量简历文本生成结构化评分"
+        },
+        Some(serde_json::json!({
+            "resumeInputMode": if use_direct_file { "direct_file" } else { "parsed_text" }
+        })),
+    ));
+
+    let (system_prompt, user_prompt) = build_scoring_prompts(&template, &ctx, input_mode);
+    let mut emit_retry_progress = || {
+        on_progress(scoring_progress_update(
+            "ai",
+            "running",
+            "retry",
+            "模型返回非JSON，正在尝试自动修复格式",
+            None,
+        ));
+    };
+    let ai_value = invoke_text_generation_json_strict(
+        &ai_settings,
+        &system_prompt,
+        &user_prompt,
+        if use_direct_file { resume_attachment } else { None },
+        Some(&mut emit_retry_progress),
+    )?;
 
     on_progress(scoring_progress_update(
         "t0",
@@ -1398,12 +1118,7 @@ where
         "正在评估 T0 重要指标",
         None,
     ));
-    let t0_assessment = build_section_assessment(
-        "t0",
-        &template.config.t0,
-        ai_value.get("t0_assessment"),
-        &ctx,
-    );
+    let t0_assessment = build_section_assessment(&template.config.t0, ai_value.get("t0_assessment"))?;
 
     on_progress(scoring_progress_update(
         "t1",
@@ -1412,12 +1127,7 @@ where
         "正在评估 T1 指标配置",
         None,
     ));
-    let t1_assessment = build_section_assessment(
-        "t1",
-        &template.config.t1,
-        ai_value.get("t1_assessment"),
-        &ctx,
-    );
+    let t1_assessment = build_section_assessment(&template.config.t1, ai_value.get("t1_assessment"))?;
 
     on_progress(scoring_progress_update(
         "t2",
@@ -1426,12 +1136,7 @@ where
         "正在评估 T2 加分项",
         None,
     ));
-    let t2_assessment = build_section_assessment(
-        "t2",
-        &template.config.t2,
-        ai_value.get("t2_assessment"),
-        &ctx,
-    );
+    let t2_assessment = build_section_assessment(&template.config.t2, ai_value.get("t2_assessment"))?;
 
     on_progress(scoring_progress_update(
         "t3",
@@ -1440,12 +1145,7 @@ where
         "正在评估 T3 风险项",
         None,
     ));
-    let t3_assessment = build_section_assessment(
-        "t3",
-        &template.config.t3,
-        ai_value.get("t3_assessment"),
-        &ctx,
-    );
+    let t3_assessment = build_section_assessment(&template.config.t3, ai_value.get("t3_assessment"))?;
 
     let overall_score_5 = round_one_decimal(
         t0_assessment.score_5 * (template.config.weights.t0 as f64 / 100.0)
@@ -1456,35 +1156,15 @@ where
     let overall_score = clamp_score((overall_score_5 * 20.0).round() as i32);
 
     let risk_level = as_string(ai_value.get("risk_level"));
-    let normalized_risk_level = match risk_level.as_str() {
-        "HIGH" | "MEDIUM" | "LOW" => risk_level,
-        _ => risk_level_from_t3_score(t3_assessment.score_5).to_string(),
-    };
 
     let recommendation =
-        recommendation_from_scores(t0_assessment.score_5, overall_score, &normalized_risk_level);
+        recommendation_from_scores(t0_assessment.score_5, overall_score, &risk_level);
 
     let highlights = parse_string_array(ai_value.get("highlights"));
     let risks = parse_string_array(ai_value.get("risks"));
     let suggestions = parse_string_array(ai_value.get("suggestions"));
 
-    let overall_comment_fallback = build_overall_comment_fallback(
-        &ctx,
-        &template.config.weights,
-        overall_score_5,
-        overall_score,
-        &t0_assessment,
-        &t1_assessment,
-        &t2_assessment,
-        &t3_assessment,
-        &recommendation,
-        &normalized_risk_level,
-    );
-
-    let overall_comment = normalize_comment(
-        &as_string(ai_value.get("overall_comment")),
-        &overall_comment_fallback,
-    );
+    let overall_comment = as_string(ai_value.get("overall_comment"));
 
     let structured_result = serde_json::json!({
         "version": 3,
@@ -1505,7 +1185,7 @@ where
             },
             "overall_comment": overall_comment,
             "recommendation": recommendation,
-            "risk_level": normalized_risk_level,
+            "risk_level": risk_level,
         },
         "template_assessment": {
             "template": template.name,
@@ -1598,7 +1278,7 @@ where
             t2_assessment.score_5,
             t3_assessment.score_5,
             recommendation,
-            normalized_risk_level,
+            risk_level.clone(),
             structured_result.to_string(),
             created_at,
         ],
@@ -1618,7 +1298,7 @@ where
         t2_score_5: t2_assessment.score_5,
         t3_score_5: t3_assessment.score_5,
         recommendation,
-        risk_level: normalized_risk_level,
+        risk_level,
         structured_result,
         created_at,
     };
@@ -1959,6 +1639,7 @@ pub(crate) async fn run_candidate_ai_analysis(
         }
         Err(error) => {
             let phase = match last_phase.as_str() {
+                "ai" => "ai",
                 "t0" => "t0",
                 "t1" => "t1",
                 "t2" => "t2",
@@ -2043,10 +1724,8 @@ mod tests {
             candidate_tags: vec!["vue".to_string()],
             resume_raw_text: "候选人具备完整项目经验与技能信息".to_string(),
             resume_parsed: serde_json::json!({}),
-            resume_lower: "候选人具备完整项目经验与技能信息".to_string(),
             required_skills: vec!["vue".to_string()],
             extracted_skills: vec!["Vue".to_string()],
-            normalized_skills: vec!["vue".to_string()],
             matched_skill_count: 1,
             skill_coverage: 1.0,
             expected_salary_k: Some(35.0),
@@ -2068,14 +1747,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_comment_should_not_truncate_text() {
-        let raw = "这是一个用于验证不会被截断的超长文本";
-        let value = normalize_comment(raw, "fallback");
-        assert_eq!(value, raw);
-    }
-
-    #[test]
-    fn build_section_assessment_reason_should_not_use_generic_fallback() {
+    fn build_section_assessment_should_reject_missing_template_item() {
         let section = ScoringSectionConfig {
             items: vec![ScoringItemConfig {
                 key: "goal_orientation".to_string(),
@@ -2084,23 +1756,148 @@ mod tests {
                 weight: 100,
             }],
         };
+        let ai_section = serde_json::json!({
+            "items": [],
+            "comment": "模块小结"
+        });
 
-        let result = build_section_assessment("t1", &section, None, &build_test_context());
-        assert_eq!(result.items.len(), 1);
-        assert_ne!(result.items[0].reason, "基于候选人资料与岗位要求自动评估。");
+        let error = build_section_assessment(&section, Some(&ai_section))
+            .expect_err("missing template item should fail");
+        assert_eq!(error, PROVIDER_RESPONSE_SCHEMA_INVALID);
     }
 
     #[test]
     fn build_scoring_prompts_should_require_evidence_based_outputs() {
         let (system_prompt, _user_prompt) =
-            build_scoring_prompts(&build_test_template(), &build_test_context());
+            build_scoring_prompts(
+                &build_test_template(),
+                &build_test_context(),
+                ResumeInputMode::ParsedText,
+            );
         assert!(system_prompt.contains("简历证据点+判断结论"));
         assert!(system_prompt.contains("模块小结"));
         assert!(system_prompt.contains("整体评价"));
+        assert!(system_prompt.contains("20 字以内"));
+        assert!(system_prompt.contains("120 字以内"));
+        assert!(system_prompt.contains("180 字以内"));
+        assert!(system_prompt.contains("完整 JSON 结构"));
     }
 
     #[test]
-    fn t0_skill_reason_should_reference_match_ratio() {
+    fn build_scoring_prompts_should_include_resume_text_for_parsed_text_mode() {
+        let (_system_prompt, user_prompt) = build_scoring_prompts(
+            &build_test_template(),
+            &build_test_context(),
+            ResumeInputMode::ParsedText,
+        );
+        let payload = serde_json::from_str::<Value>(&user_prompt).expect("parse payload");
+        assert!(payload.get("resumeText").is_some());
+        assert!(payload.get("resumeParsed").is_some());
+        assert_eq!(
+            payload.get("resumeInputMode").and_then(Value::as_str),
+            Some("parsed_text")
+        );
+    }
+
+    #[test]
+    fn build_scoring_prompts_should_skip_resume_text_for_direct_file_mode() {
+        let (_system_prompt, user_prompt) = build_scoring_prompts(
+            &build_test_template(),
+            &build_test_context(),
+            ResumeInputMode::DirectFile,
+        );
+        let payload = serde_json::from_str::<Value>(&user_prompt).expect("parse payload");
+        assert!(payload.get("resumeText").is_none());
+        assert!(payload.get("resumeParsed").is_none());
+        assert!(payload.get("resumeFileNotice").is_some());
+        assert_eq!(
+            payload.get("resumeInputMode").and_then(Value::as_str),
+            Some("direct_file")
+        );
+    }
+
+    #[test]
+    fn parse_json_with_repair_should_accept_fenced_json() {
+        let raw = "```json\n{\"facts\": [\"a\"]}\n```";
+        let parsed =
+            parse_json_with_repair(raw, || Err("repair_should_not_run".to_string())).expect("parse fenced json");
+        assert_eq!(
+            parsed
+                .get("facts")
+                .and_then(|value| value.as_array())
+                .map(|items| items.len()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn parse_json_with_repair_should_parse_repaired_json() {
+        let raw = "not-json-response";
+        let repaired = r#"{"facts":[],"skills":[],"highlights":[],"risks":[]}"#;
+        let parsed = parse_json_with_repair(raw, || Ok(repaired.to_string())).expect("parse repaired json");
+        assert!(parsed.get("facts").is_some());
+    }
+
+    #[test]
+    fn parse_json_with_repair_should_fail_after_repair() {
+        let raw = "still-not-json";
+        let error = parse_json_with_repair(raw, || Ok("still-invalid".to_string()))
+            .expect_err("should fail after repair");
+        assert_eq!(error, PROVIDER_RESPONSE_NOT_JSON_AFTER_REPAIR);
+    }
+
+    #[test]
+    fn validate_scoring_response_schema_should_reject_missing_sections() {
+        let invalid = serde_json::json!({
+            "t0_assessment": {"items": [{"key": "a", "score_5": 4.2, "reason": "ok", "evidence": "ok"}], "comment": "ok"},
+            "t1_assessment": {"items": [{"key": "b", "score_5": 3.8, "reason": "ok", "evidence": "ok"}], "comment": "ok"},
+            "t2_assessment": {"items": [{"key": "c", "score_5": 4.0, "reason": "ok", "evidence": "ok"}], "comment": "ok"},
+            "overall_comment": "ok",
+            "risk_level": "LOW",
+            "highlights": [],
+            "risks": [],
+            "suggestions": []
+        });
+        let error = validate_scoring_response_schema(&invalid).expect_err("missing section should fail");
+        assert_eq!(error, PROVIDER_RESPONSE_SCHEMA_INVALID);
+    }
+
+    #[test]
+    fn validate_scoring_response_schema_should_reject_empty_reason() {
+        let invalid = serde_json::json!({
+            "t0_assessment": {"items": [{"key": "a", "score_5": 4.2, "reason": "", "evidence": "ok"}], "comment": "ok"},
+            "t1_assessment": {"items": [{"key": "b", "score_5": 3.8, "reason": "ok", "evidence": "ok"}], "comment": "ok"},
+            "t2_assessment": {"items": [{"key": "c", "score_5": 4.0, "reason": "ok", "evidence": "ok"}], "comment": "ok"},
+            "t3_assessment": {"items": [{"key": "d", "score_5": 4.1, "reason": "ok", "evidence": "ok"}], "comment": "ok"},
+            "overall_comment": "ok",
+            "risk_level": "LOW",
+            "highlights": [],
+            "risks": [],
+            "suggestions": []
+        });
+        let error = validate_scoring_response_schema(&invalid).expect_err("empty reason should fail");
+        assert_eq!(error, PROVIDER_RESPONSE_SCHEMA_INVALID);
+    }
+
+    #[test]
+    fn validate_scoring_response_schema_should_reject_invalid_risk_level() {
+        let invalid = serde_json::json!({
+            "t0_assessment": {"items": [{"key": "a", "score_5": 4.2, "reason": "ok", "evidence": "ok"}], "comment": "ok"},
+            "t1_assessment": {"items": [{"key": "b", "score_5": 3.8, "reason": "ok", "evidence": "ok"}], "comment": "ok"},
+            "t2_assessment": {"items": [{"key": "c", "score_5": 4.0, "reason": "ok", "evidence": "ok"}], "comment": "ok"},
+            "t3_assessment": {"items": [{"key": "d", "score_5": 4.1, "reason": "ok", "evidence": "ok"}], "comment": "ok"},
+            "overall_comment": "ok",
+            "risk_level": "UNKNOWN",
+            "highlights": [],
+            "risks": [],
+            "suggestions": []
+        });
+        let error = validate_scoring_response_schema(&invalid).expect_err("invalid risk level should fail");
+        assert_eq!(error, PROVIDER_RESPONSE_SCHEMA_INVALID);
+    }
+
+    #[test]
+    fn build_section_assessment_should_accept_template_aligned_payload() {
         let section = ScoringSectionConfig {
             items: vec![ScoringItemConfig {
                 key: "required_skills_match".to_string(),
@@ -2109,14 +1906,24 @@ mod tests {
                 weight: 100,
             }],
         };
+        let ai_section = serde_json::json!({
+            "items": [{
+                "key": "required_skills_match",
+                "score_5": 4.3,
+                "reason": "技能匹配较高",
+                "evidence": "简历含Vue项目"
+            }],
+            "comment": "模块小结"
+        });
 
-        let result = build_section_assessment("t0", &section, None, &build_test_context());
+        let result =
+            build_section_assessment(&section, Some(&ai_section)).expect("aligned payload should pass");
         assert_eq!(result.items.len(), 1);
-        assert!(result.items[0].reason.contains("/"));
+        assert_eq!(result.items[0].reason, "技能匹配较高");
     }
 
     #[test]
-    fn section_comment_fallback_should_include_module_summary_and_advice() {
+    fn build_section_assessment_should_reject_empty_comment() {
         let section = ScoringSectionConfig {
             items: vec![
                 ScoringItemConfig {
@@ -2133,52 +1940,16 @@ mod tests {
                 },
             ],
         };
+        let ai_section = serde_json::json!({
+            "items": [
+                {"key": "goal_orientation", "score_5": 3.8, "reason": "有结果导向", "evidence": "有项目交付"},
+                {"key": "team_collaboration", "score_5": 3.5, "reason": "协作基础良好", "evidence": "有跨团队经历"}
+            ],
+            "comment": ""
+        });
 
-        let result = build_section_assessment("t1", &section, None, &build_test_context());
-        assert!(result.comment.contains("小结"));
-        assert!(result.comment.contains("优势"));
-        assert!(result.comment.contains("建议"));
-    }
-
-    #[test]
-    fn overall_comment_fallback_should_include_resume_context_and_suggestion() {
-        let ctx = build_test_context();
-        let template = build_test_template();
-        let t0 = SectionAssessment {
-            score_5: 4.2,
-            items: vec![],
-            comment: "T0小结".to_string(),
-        };
-        let t1 = SectionAssessment {
-            score_5: 4.0,
-            items: vec![],
-            comment: "T1小结".to_string(),
-        };
-        let t2 = SectionAssessment {
-            score_5: 3.9,
-            items: vec![],
-            comment: "T2小结".to_string(),
-        };
-        let t3 = SectionAssessment {
-            score_5: 3.3,
-            items: vec![],
-            comment: "T3小结".to_string(),
-        };
-        let comment = build_overall_comment_fallback(
-            &ctx,
-            &template.config.weights,
-            4.0,
-            80,
-            &t0,
-            &t1,
-            &t2,
-            &t3,
-            "REVIEW",
-            "MEDIUM",
-        );
-
-        assert!(comment.contains("年经验"));
-        assert!(comment.contains("技能匹配"));
-        assert!(comment.contains("建议"));
+        let error = build_section_assessment(&section, Some(&ai_section))
+            .expect_err("empty comment should fail");
+        assert_eq!(error, PROVIDER_RESPONSE_SCHEMA_INVALID);
     }
 }

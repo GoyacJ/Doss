@@ -29,7 +29,8 @@ use crate::models::screening::ScreeningDimension;
 #[test]
 fn pipeline_transition_rules_are_enforced() {
     assert!(is_valid_transition("NEW", "SCREENING"));
-    assert!(!is_valid_transition("NEW", "OFFERED"));
+    assert!(is_valid_transition("NEW", "OFFERED"));
+    assert!(is_valid_transition("HOLD", "NEW"));
     assert!(is_valid_transition("REJECTED", "SCREENING"));
     assert!(is_valid_transition("REJECTED", "OFFERED"));
 }

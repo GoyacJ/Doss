@@ -26,6 +26,26 @@ function toTimestamp(value: string): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+export function formatAnalysisTraceElapsed(at: string, startedAtMs: number): string {
+  const eventAt = Date.parse(at);
+  if (!Number.isFinite(eventAt)) {
+    return at;
+  }
+  const base = startedAtMs > 0 ? startedAtMs : eventAt;
+  const seconds = Math.max(0, Math.floor((eventAt - base) / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const restSeconds = seconds % 60;
+  if (hours > 0) {
+    return `T+${pad2(hours)}:${pad2(minutes)}:${pad2(restSeconds)}`;
+  }
+  return `T+${pad2(minutes)}:${pad2(restSeconds)}`;
+}
+
 export function phaseToStepIndex(phase: AnalysisProgressPhase): number {
   if (phase === "prepare") {
     return 0;

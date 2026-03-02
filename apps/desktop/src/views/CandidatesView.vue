@@ -17,6 +17,7 @@ import {
   ANALYSIS_PROGRESS_EVENT,
   appendAnalysisTrace,
   buildFallbackAnalysisMessage,
+  formatAnalysisTraceElapsed,
   resolveAnalysisStepIndex,
   shouldAcceptAnalysisProgressEvent,
   type AnalysisProgressEventPayload,
@@ -406,18 +407,44 @@ function resolveErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-function isChecked(event: Event): boolean {
-  return Boolean((event.target as HTMLInputElement | null)?.checked);
+function formatStageLabelFromDbValue(value: string): string {
+  const stage = value.toUpperCase() as PipelineStage;
+  switch (stage) {
+    case "NEW":
+      return "新候选";
+    case "SCREENING":
+      return "初筛中";
+    case "INTERVIEW":
+      return "面试中";
+    case "HOLD":
+      return "待定";
+    case "REJECTED":
+      return "已淘汰";
+    case "OFFERED":
+      return "已录用";
+    default:
+      return value;
+  }
 }
 
-function formatTraceTime(value: string): string {
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) {
-    return value;
+function resolveStageTransitionErrorMessage(error: unknown, fallback: string): string {
+  const message = resolveErrorMessage(error, fallback);
+  const matched = message.match(/invalid stage transition from ([A-Z_]+) to ([A-Z_]+)/i);
+  if (!matched) {
+    return message;
   }
-  return new Date(parsed).toLocaleTimeString("zh-CN", {
-    hour12: false,
-  });
+
+  const from = matched[1].toUpperCase();
+  const to = matched[2].toUpperCase();
+  if (from === "HOLD" && to === "INTERVIEW") {
+    return "当前候选人处于待定状态，无法直接进入面试。请先将阶段调整为初筛中后再邀约面试。";
+  }
+
+  return `阶段流转不合法：不能从「${formatStageLabelFromDbValue(from)}」直接流转到「${formatStageLabelFromDbValue(to)}」。`;
+}
+
+function isChecked(event: Event): boolean {
+  return Boolean((event.target as HTMLInputElement | null)?.checked);
 }
 
 async function loadRows() {
@@ -1337,16 +1364,42 @@ async function rerunScoring() {
   }
 }
 
-function goInterview() {
-  if (!selectedCandidate.value) {
+async function goInterview() {
+  if (!selectedCandidate.value || actionLoading.value) {
     return;
   }
-  router.push({
-    path: "/interview",
-    query: {
-      candidateId: String(selectedCandidate.value.id),
-    },
-  });
+
+  const candidate = selectedCandidate.value;
+  actionLoading.value = true;
+  try {
+    if (candidate.stage === "NEW") {
+      await store.moveStage({
+        candidate_id: candidate.id,
+        to_stage: "SCREENING",
+        note: "invited_to_interview_prepare",
+        job_id: candidate.job_id ?? undefined,
+      });
+    }
+    const latestStage = store.candidates.find((item) => item.id === candidate.id)?.stage ?? candidate.stage;
+    if (latestStage !== "INTERVIEW") {
+      await store.moveStage({
+        candidate_id: candidate.id,
+        to_stage: "INTERVIEW",
+        note: "invited_to_interview",
+        job_id: candidate.job_id ?? undefined,
+      });
+    }
+    await router.push({
+      path: "/interview",
+      query: {
+        candidateId: String(candidate.id),
+      },
+    });
+  } catch (error) {
+    toast.danger(resolveStageTransitionErrorMessage(error, "邀约面试失败"));
+  } finally {
+    actionLoading.value = false;
+  }
 }
 
 async function rejectCandidate() {
@@ -2035,7 +2088,7 @@ onUnmounted(() => {
               >
                 <p class="m-0 text-[0.82rem] leading-5">{{ item.message }}</p>
                 <p class="m-0 mt-0.5 text-[0.72rem] text-muted">
-                  {{ formatTraceTime(item.at) }} · {{ item.phase }}
+                  {{ formatAnalysisTraceElapsed(item.at, analysisProgressStartedAt) }} · {{ item.phase }}
                 </p>
               </li>
             </ul>

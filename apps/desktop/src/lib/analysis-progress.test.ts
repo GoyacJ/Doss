@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   appendAnalysisTrace,
   buildFallbackAnalysisMessage,
+  formatAnalysisTraceElapsed,
   resolveAnalysisStepIndex,
   shouldAcceptAnalysisProgressEvent,
 } from "./analysis-progress";
@@ -89,5 +90,14 @@ describe("analysis progress helpers", () => {
     expect(buildFallbackAnalysisMessage("ai")).toContain("评估");
     expect(buildFallbackAnalysisMessage("persist")).toContain("刷新");
   });
-});
 
+  it("formats trace elapsed time from analysis start", () => {
+    const startedAt = Date.parse("2026-03-02T01:18:00.000Z");
+    expect(formatAnalysisTraceElapsed("2026-03-02T01:18:56.000Z", startedAt)).toBe("T+00:56");
+    expect(formatAnalysisTraceElapsed("2026-03-02T02:20:59.000Z", startedAt)).toBe("T+01:02:59");
+  });
+
+  it("returns original value for invalid trace time", () => {
+    expect(formatAnalysisTraceElapsed("invalid", Date.now())).toBe("invalid");
+  });
+});
